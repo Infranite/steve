@@ -88,12 +88,12 @@ pub(super) fn describe() {
     describe_histogram!(
         "steve_dispatch_job_duration_seconds",
         Seconds,
-        "Duration of one async Steve Bot-selection Think job. Label: outcome (selected, invalid_choice, failed)."
+        "Duration of one async Steve Bot-selection Think job. Label: outcome (selected, invalid_choice, failed, cancelled)."
     );
     describe_counter!(
         "steve_dispatch_job_total",
         Count,
-        "Completed async Steve Bot-selection Think jobs. Label: outcome (selected, invalid_choice, failed)."
+        "Completed async Steve Bot-selection Think jobs. Label: outcome (selected, invalid_choice, failed, cancelled)."
     );
     describe_counter!(
         "steve_dispatch_invalid_choice_total",
@@ -559,6 +559,16 @@ pub(super) fn describe() {
         "steve_acp_classifier_unavailable_total",
         Count,
         "Tool calls denied or turns stopped because a harness auto-mode classifier returned no safety verdict. Labels: harness, kind (denied, stopped)."
+    );
+    describe_counter!(
+        "steve_permission_oneshot_allowed_total",
+        Count,
+        "One-shot ACP permission requests allowed for explicitly allowlisted read-only Steve MCP tools. Labels: harness, tool."
+    );
+    describe_counter!(
+        "steve_permission_refused_total",
+        Count,
+        "One-shot ACP permission requests refused without interactive approval. Labels: surface, harness, category."
     );
     describe_counter!(
         "steve_node_ingest_commits_total",

@@ -562,7 +562,8 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
   const snooze = () => i.snooze && i.snooze.until > Date.now() ? i.snooze : undefined
   const ss = () => itemSessions(i.id)
   const act = () => itemWork(i.id).active
-  const lines = det ? withDecisionNotes(det.timeline, det.decisions) : []
+  const visibleTimeline = det ? det.timeline.filter((t) => !t.kind.startsWith("deferred_")) : []
+  const lines = det ? withDecisionNotes(visibleTimeline, det.decisions) : []
   const replies = det ? repliesOf(lines, ss().map((s) => s.id)) : new Map<number, Reply>()
   /* a session and a comment's reply show below the lines written while they ran (ST-42) */
   const started = (t: (typeof lines)[number]) => t.kind === "session" && t.session_id && t.text.startsWith("开始会话") ? t.session_id : null

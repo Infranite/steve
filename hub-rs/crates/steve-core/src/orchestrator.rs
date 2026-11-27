@@ -1957,11 +1957,17 @@ impl Tx<'_> {
         Ok((team, goal, tags, required_nodes))
     }
 
-    pub(crate) fn start_waiting_item(&mut self, item_id: &str) -> Result<()> {
-        let item = self.item(item_id)?;
+    /// Collects the deferred opening prompt (`deferred_start:{cycle}` or thread start when
+    /// `prefer_thread` is true) together with every `deferred_supplement:{cycle}` recorded while
+    /// the item was awaiting async dispatch or prerequisites, deduplicating attachments by id.
+    fn collect_deferred_opening(
+        &self,
+        item: &Item,
+        prefer_thread: bool,
+    ) -> Result<(Option<String>, Vec<FileRef>)> {
         let start_kind = format!("deferred_start:{}", item.cycle);
         let supp_kind = format!("deferred_supplement:{}", item.cycle);
-        let timeline = self.db().timeline(item_id)?;
+        let timeline = self.db().timeline(&item.id)?;
         let mut parts = Vec::new();
         let mut files: Vec<FileRef> = Vec::new();
         let mut add_files = |list: &[FileRef]| {
@@ -1971,7 +1977,12 @@ impl Tx<'_> {
                 }
             }
         };
-        if let Some((opening, thread_files)) = self.c.thread_start(&item)? {
+        let thread_start = if prefer_thread {
+            self.c.thread_start(item)?
+        } else {
+            None
+        };
+        if let Some((opening, thread_files)) = thread_start {
             if !opening.is_empty() {
                 parts.push(opening);
             }
@@ -1984,11 +1995,16 @@ impl Tx<'_> {
         }
         for entry in timeline.iter().filter(|e| e.kind == supp_kind) {
             if !entry.text.is_empty() {
-                parts.push(entry.text.clone());
+                parts.push(format!("补充信息：{}", entry.text));
             }
             add_files(&entry.files);
         }
-        let opening = (!parts.is_empty()).then(|| parts.join("\n\n"));
+        Ok(((!parts.is_empty()).then(|| parts.join("\n\n")), files))
+    }
+
+    pub(crate) fn start_waiting_item(&mut self, item_id: &str) -> Result<()> {
+        let item = self.item(item_id)?;
+        let (opening, files) = self.collect_deferred_opening(&item, true)?;
         self.start_or_fail_files(item_id, opening.as_deref(), None, &files)
     }
 
@@ -4185,19 +4201,12 @@ impl Tx<'_> {
         match self.active_session(item_id)? {
             Some(s) => self.prompt(&s.id, &m, "steve"),
             None => {
-                let deferred = self
-                    .db()
-                    .timeline(item_id)?
-                    .into_iter()
-                    .find(|e| e.kind == format!("deferred_start:{}", i.cycle));
-                let opening = deferred.as_ref().map(|e| e.text.as_str()).unwrap_or("");
-                let files = deferred.as_ref().map(|e| e.files.as_slice()).unwrap_or(&[]);
-                let m = if opening.is_empty() {
-                    m
-                } else {
-                    format!("{m}\n{opening}")
+                let (opening, files) = self.collect_deferred_opening(&i, false)?;
+                let m = match opening {
+                    Some(text) => format!("{m}\n{text}"),
+                    None => m,
                 };
-                self.start_or_fail_files(item_id, Some(&m), None, files)?;
+                self.start_or_fail_files(item_id, Some(&m), None, &files)?;
             }
         }
         Ok(())
@@ -5707,14 +5716,8 @@ impl Tx<'_> {
                         .read(|r| steve_store::bot_dispatch::is_dispatching(r, item_id))?
                 {
                     let kind = format!("deferred_supplement:{}", item.cycle);
-                    self.db().timeline_add_files(
-                        item_id,
-                        actor,
-                        &kind,
-                        &format!("补充信息：{text}"),
-                        None,
-                        files,
-                    )?;
+                    self.db()
+                        .timeline_add_files(item_id, actor, &kind, text, None, files)?;
                     return Ok(());
                 }
                 self.start_session_files(

@@ -883,3 +883,48 @@ test("direct answer reload keeps live null while restoring draft thought, and dr
   assert.equal(h.chat.chatLive().thinkingAt, undefined)
   assert.equal(h.chat.chatLive().thinkingStage, undefined)
 })
+
+test("itemOf hides internal deferred_start and deferred_supplement timeline rows", async () => {
+  const h = harness(), s = h.store
+  const view = {
+    id: "ST-99",
+    title: "Deferred timeline",
+    state: { kind: "active" },
+    cycle: 1,
+    revision: 0,
+    delivery: [],
+    accept_mode: "auto",
+    deps: [],
+    source: [],
+    tags: [],
+    plan: [],
+    sessionIds: [],
+    timeline: [],
+    created: 1,
+    updated: 5,
+  }
+  const detail = {
+    source: ["web", "web"],
+    goalsList: [{ text: "goal" }],
+    plan: [],
+    planRounds: [],
+    artifacts: [],
+    annotations: [],
+    decisions: [],
+    timeline: [
+      { id: 1, ts: 1000, actor: "steve", kind: "deferred_start:1", text: "initial brief", session_id: null, files: [] },
+      { id: 2, ts: 2000, actor: "u", kind: "me", text: "extra owner hint", session_id: null, files: [] },
+      { id: 3, ts: 2001, actor: "u", kind: "deferred_supplement:1", text: "extra owner hint", session_id: null, files: [] },
+      { id: 4, ts: 3000, actor: "steve", kind: "dispatch", text: '{"code":"queued"}', session_id: null, files: [] },
+    ],
+  }
+  s.start(); await flush()
+  const mapped = s.itemOf(view, detail)
+  assert.deepEqual(
+    Array.from(mapped.tl, (row) => [row[0], row[1]]),
+    [
+      ["me", "extra owner hint"],
+      ["dispatch", '{"code":"queued"}'],
+    ],
+  )
+})

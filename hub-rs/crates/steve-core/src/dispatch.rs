@@ -29,6 +29,12 @@ pub const MAX_CONCURRENT_DISPATCHES: usize = 4;
 /// Safety sweep interval so pending dispatch jobs are picked up even if a wake signal raced.
 const DISPATCH_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
 
+/// Maximum character length kept for failure detail strings persisted in `DispatchEvent::Failed`.
+const MAX_DISPATCH_DETAIL_CHARS: usize = 200;
+
+/// Maximum character length kept for unparseable model reply excerpts in `DispatchEvent::Failed`.
+const MAX_INVALID_RESPONSE_EXCERPT_CHARS: usize = 160;
+
 /// Persist a typed `DispatchEvent` in `timeline.text` under `kind = "dispatch"`.
 /// User-visible localization happens strictly in the UI layer.
 pub(crate) fn record_dispatch_timeline(
@@ -233,7 +239,7 @@ impl Core {
                     .or_else(|p| p.downcast::<&'static str>().map(|s| (*s).to_owned()))
                     .unwrap_or_else(|_| "dispatch task panicked".to_owned());
                 tracing::error!(item = %job.item_id, "dispatch: job panicked: {panic_msg}");
-                Some(js_head(&panic_msg, 200).to_owned())
+                Some(js_head(&panic_msg, MAX_DISPATCH_DETAIL_CHARS).to_owned())
             } else {
                 tracing::warn!(item = %job.item_id, "dispatch: job task cancelled");
                 Some("dispatch task cancelled".to_owned())
@@ -323,7 +329,7 @@ impl Core {
                     &job,
                     attempt_id,
                     DispatchErrorCode::PrepareFailed,
-                    Some(js_head(&e.to_string(), 200).to_owned()),
+                    Some(js_head(&e.to_string(), MAX_DISPATCH_DETAIL_CHARS).to_owned()),
                 );
                 record_job_metrics(started, "failed");
                 return;
@@ -355,7 +361,7 @@ impl Core {
             Ok(printed) => match parse_dispatch_choice(&printed.text) {
                 Some(choice) => DispatchEval::Selected(choice),
                 None => {
-                    let excerpt = js_head(printed.text.trim(), 160);
+                    let excerpt = js_head(printed.text.trim(), MAX_INVALID_RESPONSE_EXCERPT_CHARS);
                     DispatchEval::Failed {
                         error: DispatchErrorCode::InvalidResponse,
                         detail: (!excerpt.is_empty()).then(|| excerpt.to_owned()),
@@ -364,7 +370,7 @@ impl Core {
             },
             Err(e) => DispatchEval::Failed {
                 error: DispatchErrorCode::ModelCallFailed,
-                detail: Some(js_head(&e.to_string(), 200).to_owned()),
+                detail: Some(js_head(&e.to_string(), MAX_DISPATCH_DETAIL_CHARS).to_owned()),
             },
         };
 
@@ -381,7 +387,7 @@ impl Core {
                     &job,
                     attempt_id,
                     DispatchErrorCode::SettleFailed,
-                    Some(js_head(&e.to_string(), 200).to_owned()),
+                    Some(js_head(&e.to_string(), MAX_DISPATCH_DETAIL_CHARS).to_owned()),
                 );
                 record_job_metrics(started, "failed");
             }
@@ -1415,5 +1421,115 @@ mod tests {
         assert_eq!(meta["bot"], "steve");
         assert_eq!(meta["rejected"], "outside_team");
         assert!(meta.get("reason").is_none());
+    }
+
+    #[tokio::test]
+    async fn deferred_supplement_survives_dependency_wait_and_stores_raw_text() {
+        let k = Kit::new();
+        seed_extra_bot(&k, "review", "Review", true);
+        let prereq = k
+            .core
+            .create_item(CreateItem {
+                ws: WS.into(),
+                title: "Prereq".into(),
+                goal: "Finish first".into(),
+                bot: Some("dev".into()),
+                project: Some(None),
+                ..Default::default()
+            })
+            .unwrap();
+        let dependent = k
+            .core
+            .create_item(CreateItem {
+                ws: WS.into(),
+                title: "Blocked by prereq".into(),
+                goal: "Run after prereq with deferred supplement".into(),
+                project: Some(None),
+                deps: vec![prereq.id.clone()],
+                opening: Some("initial dep brief".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(dependent.bot_id, None);
+        assert!(
+            k.db()
+                .store()
+                .read(|r| bot_dispatch::is_dispatching(r, &dependent.id))
+                .unwrap()
+        );
+
+        let supp_file = crate::repo::FileRef {
+            id: "fil_dep_supp".into(),
+            name: "spec.md".into(),
+            mime: "text/markdown".into(),
+            size: 12,
+        };
+        k.core
+            .supplement(
+                &dependent.id,
+                "extra dep hint",
+                crate::SupplementMode::Auto,
+                std::slice::from_ref(&supp_file),
+                "u",
+            )
+            .unwrap();
+
+        // Internal deferred_supplement entry stores raw text without hardcoded Chinese prefix.
+        let tl = k.db().timeline(&dependent.id).unwrap();
+        let deferred: Vec<_> = tl
+            .iter()
+            .filter(|e| e.kind == format!("deferred_supplement:{}", dependent.cycle))
+            .collect();
+        assert_eq!(deferred.len(), 1);
+        assert_eq!(deferred[0].text, "extra dep hint");
+        assert_eq!(deferred[0].files.len(), 1);
+        assert_eq!(deferred[0].files[0].id, "fil_dep_supp");
+
+        // Dispatch settles onto `review`, but prerequisite is still open so no session starts yet.
+        k.gw.set(|_, _| Ok(r#"{"bot":"review","why":"best fit"}"#.into()));
+        assert!(k.core.drain_dispatch_once().await.unwrap());
+        assert_eq!(
+            k.db()
+                .item(&dependent.id)
+                .unwrap()
+                .unwrap()
+                .bot_id
+                .as_deref(),
+            Some("review")
+        );
+        assert!(k.db().sessions_of_item(&dependent.id).unwrap().is_empty());
+
+        // Complete the prerequisite -> lifecycle_tick runs after_cycle_closed -> check_blocked
+        // starts `review` with both initial brief and deferred supplement text + attachment.
+        let prereq_sessions = k.db().sessions_of_item(&prereq.id).unwrap();
+        assert_eq!(prereq_sessions.len(), 1);
+        k.rt.end_turn(&k.core, &prereq_sessions[0].id, "end_turn", None);
+        let closed = k.finish(&prereq.id).unwrap();
+        assert_eq!(closed.phase.as_str(), "closed");
+        k.core.lifecycle_tick().unwrap();
+        let sessions = k.db().sessions_of_item(&dependent.id).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].bot_id.as_deref(), Some("review"));
+        let joined =
+            k.rt.st()
+                .prompts
+                .iter()
+                .filter(|(sid, _, _)| sid == &sessions[0].id)
+                .map(|(_, text, _)| text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(joined.contains("initial dep brief"), "{joined}");
+        assert!(joined.contains("补充信息：extra dep hint"), "{joined}");
+        let dep_files: Vec<String> =
+            k.rt.st()
+                .files
+                .iter()
+                .filter(|(sid, _)| sid == &sessions[0].id)
+                .flat_map(|(_, files)| files.iter().map(|f| f.id.clone()))
+                .collect();
+        assert!(
+            dep_files.iter().any(|id| id == "fil_dep_supp"),
+            "deferred supplement attachment must reach check_blocked session: {dep_files:?}"
+        );
     }
 }

@@ -313,6 +313,9 @@ impl JobExecutor for RemoteNode {
         }
         let caps = self.ensure_capabilities().await?;
         match &c.body.work {
+            JobWork::Think(t) if t.steve_tools && !caps.supports_think_steve_tools() => {
+                return Err(self.capability_unavailable("think steve tools"));
+            }
             JobWork::Think(_) if !caps.supports_jobs() => {
                 return Err(self.capability_unavailable("jobs"));
             }
@@ -665,11 +668,12 @@ impl Discovery for RemoteNode {
         if !self.is_colocated() {
             // jobs stay with the Hub; commands as the Node's own policy allows (B4)
             c.capacity.jobs = 0;
-            // secrets and colocated host/research features are never accepted from a remote Node
+            // secrets and colocated host/research/think-tool features are never accepted from a remote Node
             c.features.retain(|f| {
                 f != FEATURE_SECRET_FILE
                     && f != FEATURE_COLOCATED_HOST
                     && f != FEATURE_RESEARCH_JOBS
+                    && f != FEATURE_THINK_STEVE_TOOLS
             });
         }
         let mut slot = self.slot.lock().unwrap();
