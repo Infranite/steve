@@ -602,14 +602,30 @@ impl MatrixRig {
     }
 
     async fn finish_active_turn(&self) {
-        eventually_sync("node accepted active turn", || {
-            self.node_executed_starts() == 1
-        })
+        eventually_sync(
+            on_timeout(|| async {
+                format!(
+                    "node accepted active turn; starts={}, reconciled={}, observes={}, snap={:?}",
+                    self.node_executed_starts(),
+                    self.rt().is_reconciled(),
+                    self.proxy.observes.load(Ordering::SeqCst),
+                    fixtures::session_runtime_snapshot(&self.store, SESSION),
+                )
+            }),
+            || self.node_executed_starts() == 1,
+        )
         .await;
         let exec = self.latest_execution();
-        eventually_sync("attempt running before finish", || {
-            node_checks::attempt_start_committed(&self.store, exec.attempt().as_str()).unwrap()
-        })
+        eventually_sync(
+            on_timeout(|| async {
+                format!(
+                    "attempt running before finish; attempt={}, snap={:?}",
+                    exec.attempt(),
+                    fixtures::session_runtime_snapshot(&self.store, SESSION),
+                )
+            }),
+            || node_checks::attempt_start_committed(&self.store, exec.attempt().as_str()).unwrap(),
+        )
         .await;
         self.emit_reply_and_finish(&exec).await;
     }
@@ -1194,15 +1210,41 @@ async fn virtual_clock_transient_turn_retry_uses_injected_clock_not_wall_clock()
     let retry_at = node_checks::active_attempt_retry_at(&rig.store, SESSION).unwrap();
     assert_eq!(retry_at, rig.clock.now() + 20_000);
     rig.advance(20_000);
-    eventually_sync("retry dispatched on virtual clock", || {
-        rig.node_executed_starts() == 2
-    })
+    // Wait for both FakeNode acceptance AND Hub commit of AttemptStarted before emitting
+    // TextDelta/AttemptEnded so FakeNode's concurrent deliver() cannot deliver later stream
+    // sequence numbers ahead of AttemptStarted (which Hub's in-order receiver would skip).
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "retry attempt running on virtual clock; starts={}, snap={:?}, unacked={}",
+                rig.node_executed_starts(),
+                fixtures::session_runtime_snapshot(&rig.store, SESSION),
+                rig.node.unacked(),
+            )
+        }),
+        || {
+            rig.node_executed_starts() == 2
+                && node_checks::attempt_start_committed(
+                    &rig.store,
+                    rig.latest_execution().attempt().as_str(),
+                )
+                .unwrap()
+        },
+    )
     .await;
     let second = rig.latest_execution();
     rig.emit_reply_and_finish(&second).await;
-    eventually_sync("retried turn completed", || {
-        rig.ends().len() == 1 && rig.node.unacked() == 0
-    })
+    eventually_sync(
+        on_timeout(|| async {
+            format!(
+                "retried turn completed; ends={:?}, unacked={}, snap={:?}",
+                rig.ends(),
+                rig.node.unacked(),
+                fixtures::session_runtime_snapshot(&rig.store, SESSION),
+            )
+        }),
+        || rig.ends().len() == 1 && rig.node.unacked() == 0,
+    )
     .await;
     assert_eq!(rig.ends(), [(SESSION.into(), "end_turn".into(), None)]);
 }
