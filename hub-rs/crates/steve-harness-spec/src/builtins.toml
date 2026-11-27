@@ -778,6 +778,7 @@ permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
 mode_args = {"full_access" = ["--dangerously-skip-permissions"]}
+state_settings = "antigravity_settings"
 brand_mark = "google"
 launch_extra = "none"
 probe_initialize = true

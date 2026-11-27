@@ -3,6 +3,9 @@
 use std::path::Path;
 use steve_confine::PROTECTED;
 
+/// Antigravity CLI permission allow rule covering every tool exposed by Steve's `"steve"` MCP server.
+pub const STEVE_MCP_ALLOW_RULE: &str = "mcp(steve/*)";
+
 /// Environment variables the Hub has and no harness inherits: the upgrade control channel, and what
 /// points at the vault's key store or a secret file.
 pub fn hub_private_env(key: &str) -> bool {
@@ -85,6 +88,12 @@ pub fn protected_session_meta(
         val = serde_json::Value::Object(obj);
     }
     val
+}
+
+/// Antigravity CLI `permissions.allow` rules for Steve's own MCP endpoint (`mcp(steve/*)`).
+/// Individual Steve tool permissions remain enforced on the Hub side.
+pub fn antigravity_allow_rules() -> Vec<String> {
+    vec![STEVE_MCP_ALLOW_RULE.to_string()]
 }
 
 #[cfg(test)]
@@ -349,5 +358,10 @@ mod tests {
         assert_eq!(p.masked, vec![r.clone()]);
         assert_eq!(p.writable, vec![r.join("node/local")]);
         let _ = std::fs::remove_dir_all(&t);
+    }
+
+    #[test]
+    fn antigravity_allow_rules_cover_steve_mcp() {
+        assert_eq!(antigravity_allow_rules(), vec!["mcp(steve/*)".to_string()]);
     }
 }

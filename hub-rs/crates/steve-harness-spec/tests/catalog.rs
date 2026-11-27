@@ -109,6 +109,10 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
             "codex" => json!("cx"),
             _ => Value::Null,
         };
+        entry["properties"]["state_settings"] = match id.as_str() {
+            "antigravity" => json!("antigravity_settings"),
+            _ => json!("none"),
+        };
         entry["env"]
             .as_array_mut()
             .unwrap()
@@ -335,12 +339,23 @@ fn only_declared_native_approval_modes_are_offered() {
         if let Some((_, id)) = want {
             use steve_node_api::PermissionMode;
             let offered = [id.to_string(), props.modes.full_access.clone()];
-            let choice = props
-                .modes
-                .choice_with(PermissionMode::Auto, false, None, None);
-            assert!(choice.resolve(Some(&offered)).is_ok(), "{id}");
+            assert_eq!(
+                props
+                    .modes
+                    .choice(PermissionMode::Auto)
+                    .resolve(Some(&offered)),
+                Ok(Some((*id).into())),
+                "{}",
+                builtin.id
+            );
+            assert!(
+                props
+                    .modes
+                    .choice(PermissionMode::Auto)
+                    .resolve(Some(&offered[1..]))
+                    .is_err()
+            );
             assert_eq!(props.modes.id(PermissionMode::Auto), *id);
-            assert!(choice.resolve(Some(&offered[1..])).is_err());
         }
     }
     for mode in ["", "default", "bypassPermissions", "custom-reviewed"] {
@@ -405,5 +420,36 @@ fn verified_append_system_context_declarations_match_contract() {
         Some(AppendSystemContext::CliFlag {
             flag: "--append-system-prompt".into(),
         })
+    );
+}
+
+#[test]
+fn antigravity_declares_nested_sandbox_native_auto_full_access_and_state_settings() {
+    let agy = builtin("antigravity").unwrap();
+    assert!(agy.properties.nested_sandbox);
+    assert_eq!(agy.properties.modes.auto, "auto");
+    assert_eq!(agy.properties.mode_args.get("auto"), None);
+    assert_eq!(
+        agy.properties.mode_args.get("full_access"),
+        Some(&vec!["--dangerously-skip-permissions".to_string()])
+    );
+    assert_eq!(
+        agy.properties.native_approval(),
+        Some(NativeApprovalFallback::AskOwner)
+    );
+    assert_eq!(
+        agy.properties.state_settings,
+        StateSettings::AntigravitySettings
+    );
+    let override_entry: AdapterEntry = serde_json::from_value(json!({
+        "command": "/fixture/adapter",
+        "name": "Own",
+        "properties": { "state_settings": "antigravity_settings" }
+    }))
+    .unwrap();
+    let (_, declared) = split_entries([("own".into(), override_entry)]);
+    assert_eq!(
+        spec("own", declared.get("own")).properties.state_settings,
+        StateSettings::AntigravitySettings
     );
 }

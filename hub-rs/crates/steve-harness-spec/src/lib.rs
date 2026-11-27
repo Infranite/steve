@@ -391,6 +391,18 @@ pub enum BrandMark {
     Other,
 }
 
+/// Harness-native settings merged into a session's isolated state directory before launch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateSettings {
+    #[default]
+    None,
+    /// Antigravity CLI's `<state_target>/settings.json` (`permissions`) and
+    /// `<state_root>/config/config.json` (`userSettings.globalPermissionGrants`, read by
+    /// `agy acp`): allows `mcp(steve/*)` while preserving user settings and rules.
+    AntigravitySettings,
+}
+
 /// Arguments the adapter is started with beyond its declared `args`.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -536,7 +548,8 @@ pub enum NativeApprovalFallback {
 }
 
 impl AdapterProperties {
-    /// Native auto is opt-in. An alias for Ask or Full Access is not a native auto mode.
+    /// Native auto is opt-in and must resolve to a distinct ACP mode, never an alias for Ask or
+    /// Full Access.
     pub fn native_approval(&self) -> Option<NativeApprovalFallback> {
         let mode = self.modes.auto.as_str();
         if self.native_execution
@@ -594,6 +607,8 @@ adapter_properties! {
     model_strip_prefixes: Vec<String> = vec![] => Option<Vec<String>>, "Option::is_none", cloned;
     /// Key prefix (`"<prefix>:<path>"`) used when indexing local transcripts of this harness.
     history_prefix: Option<String> = None => Option<String>, "Option::is_none", trimmed_string;
+
+    state_settings: StateSettings = StateSettings::None => Option<StateSettings>, "Option::is_none", copied;
 
     launch_extra: LaunchExtra = LaunchExtra::None => Option<LaunchExtra>, "Option::is_none", copied;
     /// Discovery asks it `initialize` and opens a scratch session (`ACP initialize probe`), at most every half

@@ -26,6 +26,7 @@ mod file_access;
 pub mod git;
 mod harness_context;
 mod harness_login;
+mod harness_settings;
 mod harness_updates;
 pub mod history;
 mod host;

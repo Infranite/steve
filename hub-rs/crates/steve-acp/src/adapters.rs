@@ -1790,9 +1790,15 @@ mod tests {
             c.session_meta_with_mode("grok-build", false, Some(PermissionMode::FullAccess)),
             Some(json!({"yoloMode": true}))
         );
-        // antigravity: native PATH binary, 4 ACP modes + --dangerously-skip-permissions only for full_access
+        // antigravity: native PATH binary, runs inside Steve's OS sandbox; auto uses native ACP
+        // `auto`, full_access launches with --dangerously-skip-permissions
         let agy = c.adapter_spec("antigravity");
         assert_eq!(agy.name, "Antigravity CLI");
+        assert!(agy.properties.nested_sandbox);
+        assert_eq!(
+            agy.properties.state_settings,
+            steve_harness_spec::StateSettings::AntigravitySettings
+        );
         assert_eq!(
             agy.properties.native_approval(),
             Some(steve_harness_spec::NativeApprovalFallback::AskOwner)
@@ -2066,7 +2072,7 @@ rl.on("line", (line) => {{
         assert_eq!(seen_perm.lock().unwrap().as_deref(), Some("ls -la"));
         conn.kill();
 
-        // 3. Open session in FullAccess mode passes --dangerously-skip-permissions and skips set_mode
+        // 3. FullAccess mode passes --dangerously-skip-permissions and skips set_mode
         let (program, args) = c
             .adapter_command_for_mode("antigravity", Some(PermissionMode::FullAccess))
             .unwrap();
