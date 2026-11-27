@@ -1,0 +1,34 @@
+name: PR description
+# The pull request's title and description (Conventional Commits title, issue link, release note,
+# upgrade trailers), checked by `ops/cut-release.py lint`. It is the only check that runs when a
+# description is edited, so fixing a description re-runs seconds of linting instead of the whole
+# CI workflow. Branch rules on main require the `PR description` check, by that name, next to
+# `CI gate`. A merge queue run has no description to check and passes.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, edited]
+  merge_group:
+permissions:
+  contents: read
+  pull-requests: read
+concurrency:
+  group: pr-description-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+jobs:
+  lint:
+    name: PR description
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        if: github.event_name == 'pull_request'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        if: github.event_name == 'pull_request'
+        with:
+          python-version: '3.13'
+      - name: Title and release metadata
+        if: github.event_name == 'pull_request'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 ops/cut-release.py lint --github-event "$GITHUB_EVENT_PATH"
