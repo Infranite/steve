@@ -123,6 +123,11 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
             "antigravity" => json!("antigravity_settings"),
             _ => json!("none"),
         };
+        // #620 runs Codex inside Steve's OS sandbox and uses Steve's read-only sandbox for research.
+        if id == "codex" {
+            entry["properties"]["self_read_only"] = json!(false);
+            entry["properties"]["nested_sandbox"] = json!(true);
+        }
         entry["env"]
             .as_array_mut()
             .unwrap()
@@ -554,5 +559,22 @@ fn steve_mcp_allow_spec_renders_declarative_rules_for_claude_code_and_custom_man
             .unwrap()
             .session_meta(&["steve_items_search"]),
         Some(json!({"custom": {"allow": ["mcp(steve/steve_items_search)"]}}))
+    );
+}
+
+#[test]
+fn codex_declares_nested_sandbox_without_self_read_only() {
+    let codex = builtin("codex").unwrap();
+    assert!(codex.properties.nested_sandbox);
+    assert!(!codex.properties.self_read_only);
+    assert!(codex.properties.outer_sandbox_args.is_empty());
+    assert_eq!(codex.properties.modes.plan, "read-only");
+    assert_eq!(codex.properties.modes.ask, "read-only");
+    assert_eq!(codex.properties.modes.accept_edits, "workspace-write");
+    assert_eq!(codex.properties.modes.auto, "agent");
+    assert_eq!(codex.properties.modes.full_access, "agent-full-access");
+    assert_eq!(
+        codex.properties.native_approval(),
+        Some(NativeApprovalFallback::AskOwner)
     );
 }

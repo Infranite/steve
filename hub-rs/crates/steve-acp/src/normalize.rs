@@ -107,6 +107,62 @@ struct Open {
     offset: u64,
 }
 
+#[derive(Debug, Default, Clone)]
+struct TerminalOutput {
+    text: String,
+    chars: usize,
+    truncated: bool,
+}
+
+impl TerminalOutput {
+    /// Appends `chunk`, retaining at most [`TEXT_MAX`] characters. Returns `true` only on the
+    /// update that first overflows [`TEXT_MAX`].
+    fn push(&mut self, chunk: &str) -> bool {
+        if chunk.is_empty() || self.truncated {
+            return false;
+        }
+        let remaining = TEXT_MAX.saturating_sub(self.chars);
+        let mut iter = chunk.chars();
+        for _ in 0..remaining {
+            let Some(ch) = iter.next() else {
+                return false;
+            };
+            self.text.push(ch);
+            self.chars += 1;
+        }
+        if iter.next().is_some() {
+            self.truncated = true;
+            metrics::counter!(
+                "steve_acp_tool_output_truncated_total",
+                "source" => "terminal_delta",
+            )
+            .increment(1);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn rendered(&self) -> Option<String> {
+        if self.text.is_empty() {
+            return None;
+        }
+        if self.truncated {
+            let mut out = self.text.clone();
+            out.push('…');
+            Some(out)
+        } else {
+            Some(self.text.clone())
+        }
+    }
+
+    fn clear(&mut self) {
+        self.text.clear();
+        self.chars = 0;
+        self.truncated = false;
+    }
+}
+
 pub struct Normalizer {
     /// The workspace root, to show paths inside it relative.
     root: PathBuf,
@@ -123,6 +179,9 @@ pub struct Normalizer {
     messages: u64,
     open: Option<Open>,
     tools: HashMap<String, ToolFact>,
+    /// Bounded streaming output accumulated from `_meta.terminal_output_delta` /
+    /// `_meta.terminal_output` / `_meta.mcp_output_delta` across updates of each `toolCallId`.
+    terminal_outputs: HashMap<String, TerminalOutput>,
     /// See [`Normalizer::input_includes_cache`].
     input_includes_cache: bool,
     /// Cumulative session token baseline subtracted from `PromptResponse.usage` when
@@ -147,6 +206,7 @@ impl Normalizer {
             messages: 0,
             open: None,
             tools: HashMap::new(),
+            terminal_outputs: HashMap::new(),
             input_includes_cache: false,
             prior_prompt_tokens: None,
             last_prompt_tokens: None,
@@ -668,22 +728,58 @@ impl Normalizer {
             .get(&raw_id)
             .map(|t| t.raw.clone())
             .unwrap_or_else(|| serde_json::json!({}));
+        let incoming_delta = incoming_meta_output_delta(u);
+        let cleared_content = u
+            .get("content")
+            .and_then(Value::as_array)
+            .is_some_and(Vec::is_empty);
+        if cleared_content && incoming_delta.is_none() {
+            if let Some(buf) = self.terminal_outputs.get_mut(&raw_id) {
+                buf.clear();
+            }
+        }
+        let terminal_newly_truncated = incoming_delta.is_some_and(|delta| {
+            self.terminal_outputs
+                .entry(raw_id.clone())
+                .or_default()
+                .push(delta)
+        });
+        let terminal_output = self
+            .terminal_outputs
+            .get(&raw_id)
+            .and_then(TerminalOutput::rendered);
         let fields = merged.as_object_mut().expect("tool fields are an object");
         for (key, value) in u.as_object()? {
-            if key != "sessionUpdate"
-                && (!value.is_null() || matches!(key.as_str(), "rawInput" | "rawOutput"))
+            if key == "sessionUpdate" {
+                continue;
+            }
+            if key == "_meta"
+                && let Some(incoming_meta) = value.as_object()
+                && let Some(existing_meta) = fields.get_mut("_meta").and_then(Value::as_object_mut)
             {
+                for (mk, mv) in incoming_meta {
+                    if !mv.is_null() {
+                        existing_meta.insert(mk.clone(), mv.clone());
+                    }
+                }
+                continue;
+            }
+            if !value.is_null() || matches!(key.as_str(), "rawInput" | "rawOutput") {
                 fields.insert(key.clone(), value.clone());
             }
         }
         let adapter = self.adapter.clone();
-        let (fact, diagnostics) = tool_fact(
+        let (fact, mut diagnostics) = tool_fact(
             &raw_id,
             merged,
             &self.root,
             adapter.as_ref(),
             initial_title.as_deref(),
+            terminal_output.as_deref(),
         );
+        if terminal_newly_truncated {
+            diagnostics.push(diagnostic("truncated", "tool output preview"));
+        }
         let mut view = fact.view(&self.root);
         let settled = matches!(fact.phase, ToolPhase::Succeeded | ToolPhase::Failed);
         view.duration_ms = self.subtasks.record_tool_timing(&raw_id, settled);
@@ -984,6 +1080,9 @@ fn content_parts(u: &Value, root: &Path, diagnostics: &mut Vec<Fact>) -> Vec<Par
                 c.get("oldText").and_then(Value::as_str),
                 c.get("newText").and_then(Value::as_str).unwrap_or(""),
             )),
+            // ACP terminal reference (`{type: "terminal", terminalId: ...}`): output streams via
+            // `_meta.terminal_output_delta` / `_meta.terminal_output`, not inline content blocks.
+            Some("terminal") => {}
             _ => diagnostics.push(diagnostic(
                 "unsupported_content",
                 "unsupported tool content",
@@ -1100,6 +1199,7 @@ fn tool_fact(
     root: &Path,
     adapter: &dyn HarnessAdapter,
     initial_title: Option<&str>,
+    terminal_output: Option<&str>,
 ) -> (ToolFact, Vec<Fact>) {
     let mut name = tool_name(&raw);
     if name.is_empty()
@@ -1148,8 +1248,7 @@ fn tool_fact(
     };
     let paths = tool_paths(&raw, input);
     let mut diagnostics = vec![];
-    let mut result = tool_result(&raw, input, root, &mut diagnostics);
-    adapter.enrich_tool_result(&raw, &mut result);
+    let result = tool_result(&raw, input, root, terminal_output, &mut diagnostics);
     let diffs: Vec<&Value> = raw
         .get("content")
         .and_then(Value::as_array)
@@ -1168,7 +1267,7 @@ fn tool_fact(
     } else {
         None
     };
-    let error = tool_error(&raw, phase);
+    let error = tool_error(&raw, phase, terminal_output);
     if error.as_ref().is_some_and(|e| e.chars().count() > 500) {
         diagnostics.push(diagnostic("truncated", "tool error preview"));
     }
@@ -1252,12 +1351,57 @@ fn tool_paths(raw: &Value, input: &Value) -> Vec<String> {
     paths
 }
 
-fn tool_result(raw: &Value, input: &Value, root: &Path, diagnostics: &mut Vec<Fact>) -> Vec<Part> {
+fn incoming_meta_output_delta(u: &Value) -> Option<&str> {
+    u.pointer("/_meta/terminal_output_delta/data")
+        .or_else(|| u.pointer("/_meta/terminal_output/data"))
+        .or_else(|| u.pointer("/_meta/mcp_output_delta/data"))
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+}
+
+/// True when `rawOutput` contains only command exit metadata (e.g. `{"exit_code": 0}` sent by
+/// `@agentclientprotocol/codex-acp` on non-terminal read/search/list commands whose stdout arrives
+/// in `_meta.terminal_output_delta`).
+fn is_exit_metadata_only(output: &Value) -> bool {
+    let Some(obj) = output.as_object() else {
+        return false;
+    };
+    !obj.is_empty()
+        && obj
+            .keys()
+            .all(|k| matches!(k.as_str(), "exit_code" | "exitCode" | "signal"))
+}
+
+fn tool_result(
+    raw: &Value,
+    input: &Value,
+    root: &Path,
+    terminal_output: Option<&str>,
+    diagnostics: &mut Vec<Fact>,
+) -> Vec<Part> {
     // An explicitly supplied collection is authoritative, even when empty. Never resurrect an
     // old rawOutput/input diff when content was cleared by the adapter.
     if raw.get("content").is_some_and(Value::is_array) {
-        content_parts(raw, root, diagnostics)
+        let mut out = content_parts(raw, root, diagnostics);
+        if !out.iter().any(|p| matches!(p, Part::Text { .. }))
+            && let Some(text) = terminal_output
+        {
+            out.insert(
+                0,
+                Part::Text {
+                    text: text.to_string(),
+                },
+            );
+        }
+        out
     } else if let Some(output) = raw.get("rawOutput") {
+        if let Some(text) = terminal_output
+            && (output.is_null() || is_exit_metadata_only(output))
+        {
+            return vec![Part::Text {
+                text: text.to_string(),
+            }];
+        }
         let text = match output {
             Value::String(s) => s.clone(),
             Value::Null => String::new(),
@@ -1273,31 +1417,44 @@ fn tool_result(raw: &Value, input: &Value, root: &Path, diagnostics: &mut Vec<Fa
                 text: bound(&text, TEXT_MAX),
             }]
         }
+    } else if let Some(text) = terminal_output {
+        vec![Part::Text {
+            text: text.to_string(),
+        }]
     } else {
         input_diffs(input, root)
     }
 }
 
-fn tool_error(raw: &Value, phase: ToolPhase) -> Option<String> {
-    if phase == ToolPhase::Failed {
-        if let Some(content) = raw.get("content").and_then(Value::as_array) {
-            let texts: Vec<&str> = content
-                .iter()
-                .filter(|c| c["type"] == "content")
-                .filter_map(|c| c.pointer("/content/text").and_then(Value::as_str))
-                .collect();
-            (!texts.is_empty()).then(|| texts.join("\n"))
-        } else {
-            raw.get("rawOutput")
-                .filter(|v| !v.is_null())
-                .map(|v| match v {
-                    Value::String(s) => s.clone(),
-                    v => v.to_string(),
-                })
-        }
-    } else {
-        None
+fn tool_error(raw: &Value, phase: ToolPhase, terminal_output: Option<&str>) -> Option<String> {
+    if phase != ToolPhase::Failed {
+        return None;
     }
+    if let Some(content) = raw.get("content").and_then(Value::as_array) {
+        let texts: Vec<&str> = content
+            .iter()
+            .filter(|c| c["type"] == "content")
+            .filter_map(|c| c.pointer("/content/text").and_then(Value::as_str))
+            .collect();
+        if !texts.is_empty() {
+            return Some(texts.join("\n"));
+        }
+        if content.is_empty() && terminal_output.is_none() {
+            return None;
+        }
+    }
+    if let Some(text) = terminal_output {
+        return Some(text.to_string());
+    }
+    if let Some(output) = raw.get("rawOutput").filter(|v| !v.is_null()) {
+        return Some(match output {
+            Value::String(s) => s.clone(),
+            v => v.to_string(),
+        });
+    }
+    raw.pointer("/_meta/terminal_exit/exit_code")
+        .and_then(Value::as_i64)
+        .map(|code| format!("exit code {code}"))
 }
 
 fn diagnose_tool_diffs(raw: &Value, input: &Value, diffs: &[&Value], diagnostics: &mut Vec<Fact>) {

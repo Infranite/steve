@@ -1556,7 +1556,9 @@ mod tests {
             c.adapters.insert(id.into(), dir.path().join(id));
         }
         let codex = c.adapter_spec("codex");
-        assert!(codex.builtin && codex.properties.self_read_only);
+        assert!(
+            codex.builtin && codex.properties.nested_sandbox && !codex.properties.self_read_only
+        );
         for (m, want) in [
             (PermissionMode::Plan, "read-only"),
             (PermissionMode::Ask, "read-only"),

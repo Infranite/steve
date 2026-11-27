@@ -6542,3 +6542,621 @@ async fn real_antigravity_in_steve_sandbox_modes_and_control_plane() {
 
     n.shutdown().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn codex_runs_inside_steve_sandbox_and_blocks_control_plane() {
+    use serde_json::Value;
+
+    let t = T::new(&[]);
+    let steve_dir = t.root.join("steve");
+    std::fs::create_dir_all(&steve_dir).unwrap();
+    std::fs::write(steve_dir.join("steve.env"), "SECRET_ENV_CANARY=555\n").unwrap();
+
+    let codex_adapter = t.root.join("adapter-codex.sh");
+    std::fs::write(
+        &codex_adapter,
+        format!(
+            "#!/bin/sh\nexport FAKE_ACP_CODEX=1\nexec '{}' \"$@\"\n",
+            t.adapter.display()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&codex_adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let mut cfg = t.config();
+    cfg.acp.adapters.insert("codex".into(), codex_adapter);
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    n.prepare_workspace(now_cmd("op_prep_cx", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep_cx").await));
+
+    for (sid, op, mode) in [
+        ("s_cx_ask", "op_open_cx_ask", PermissionMode::Ask),
+        ("s_cx_auto", "op_open_cx_auto", PermissionMode::Auto),
+        ("s_cx_full", "op_open_cx_full", PermissionMode::FullAccess),
+    ] {
+        let mut open = open_body(sid);
+        open.choice.harness = "codex".into();
+        open.choice.model = None;
+        open.policy.permissions = mode;
+        open.state = Some(HarnessState {
+            dir: format!("default/owner/dev/codex-{sid}"),
+            import_owner: false,
+            owner_context: false,
+        });
+        n.open_session(now_cmd(op, open)).await.unwrap();
+        assert!(ok(&finished(&n, op).await), "open {sid} ({mode:?}) failed");
+    }
+
+    // Control-plane protection comes from Steve's OS sandbox (`nested_sandbox = true`), even under
+    // FullAccess (`agent-full-access`).
+    if n.confinement().is_ok() {
+        let mut t_cmd = turn(
+            "s_cx_full",
+            "t_cx_1",
+            "a_cx_1",
+            &format!("@cat {}", steve_dir.join("steve.env").display()),
+        );
+        t_cmd.run.choice.harness = "codex".into();
+        t_cmd.run.choice.model = None;
+        t_cmd.run.policy.permissions = PermissionMode::FullAccess;
+        n.start_turn(now_cmd("op_turn_cx", t_cmd)).await.unwrap();
+        assert!(ok(&finished(&n, "op_turn_cx").await));
+        let text = t.text();
+        assert!(
+            !text.contains("SECRET_ENV_CANARY"),
+            "control-plane steve.env leaked in FullAccess: {text:?}"
+        );
+        if cfg!(target_os = "macos") {
+            assert_eq!(text, "cat:EPERM ");
+        }
+    }
+
+    n.shutdown().await;
+
+    let log_text = std::fs::read_to_string(&t.log).unwrap();
+    let spawns: Vec<Vec<String>> = log_text
+        .lines()
+        .filter_map(|l| {
+            serde_json::from_str::<Value>(l).ok()?["spawn"]["argv"]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str().map(String::from))
+                        .collect()
+                })
+        })
+        .collect();
+    assert_eq!(spawns.len(), 3, "expected 3 codex spawns: {spawns:?}");
+    for argv in &spawns {
+        assert!(
+            !argv.iter().any(|a| a == "-c"),
+            "codex-acp 2.x ignores CLI flags; must not pass -c overrides: {argv:?}"
+        );
+    }
+    assert_eq!(
+        modes_sent(&t),
+        vec!["read-only", "agent", "agent-full-access"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "runs real codex-acp binary outside sandbox"]
+async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
+    use serde_json::json;
+
+    #[derive(Default)]
+    struct CodexProbeTools {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    #[async_trait::async_trait]
+    impl HubTools for CodexProbeTools {
+        async fn catalog(&self, _e: ExecutionRef) -> ApiResult<Catalog> {
+            self.session_catalog(SessionId::new("s_codex_real_full").unwrap())
+                .await
+        }
+        async fn session_catalog(&self, _s: SessionId) -> ApiResult<Catalog> {
+            Ok(Catalog {
+                revision: Revision::new("c_codex_1").unwrap(),
+                tools: vec![ToolDescriptor {
+                    name: "steve_probe_read".into(),
+                    description: "Read a probe marker from Steve (read-only).".into(),
+                    input_schema: json!({"type": "object", "properties": {}}),
+                    read_only: true,
+                    annotations: serde_json::Value::Null,
+                }],
+            })
+        }
+        async fn call(&self, q: ToolCall) -> ApiResult<ToolResult> {
+            self.calls.lock().unwrap().push(q.name.clone());
+            Ok(ToolResult::Completed {
+                parts: vec![Part::Text {
+                    text: "STEVE-LOCAL-NODE-CODEX-MARKER-77".into(),
+                }],
+                structured: None,
+                end_turn: false,
+            })
+        }
+        async fn call_status(&self, _k: ToolKey) -> ApiResult<ToolResult> {
+            Err(Error::new(Code::Unsupported, "unused"))
+        }
+        async fn cancel_call(&self, _k: ToolKey) -> ApiResult<ToolResult> {
+            Err(Error::new(Code::Unsupported, "unused"))
+        }
+    }
+
+    let codex_bin = std::env::var_os("STEVE_ADAPTER_CODEX")
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            let p = steve_acp::default_codex_adapter(&steve_acp::npm_root());
+            p.is_file().then_some(p)
+        })
+        .unwrap_or_else(|| PathBuf::from("codex-acp"));
+    let model = std::env::var("STEVE_TEST_CODEX_MODEL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let t = T::new(&[]);
+    let ws_hello = t.root.join("work/proj/hello.txt");
+    std::fs::write(&ws_hello, "HELLO_WORKSPACE_CODEX_REAL\n").unwrap();
+
+    let steve_dir = t.root.join("steve");
+    std::fs::create_dir_all(steve_dir.join("signing")).unwrap();
+    std::fs::create_dir_all(steve_dir.join("releases")).unwrap();
+    std::fs::write(
+        steve_dir.join("signing/canary.key"),
+        "SECRET_SIGNING_CANARY_888\n",
+    )
+    .unwrap();
+    std::fs::write(steve_dir.join("steve.env"), "SECRET_ENV_CANARY=555\n").unwrap();
+    std::fs::write(
+        steve_dir.join("releases/README.txt"),
+        "RELEASE_PUBLIC_TEXT\n",
+    )
+    .unwrap();
+
+    // Bridge the host's Codex sign-in and provider settings read-only into the test Node's
+    // temporary user home (`t.root/.codex`). `harness_login` links `auth.json` and reconciles only
+    // declared provider entries without mutating `~/.codex` or importing unrelated host rules.
+    let node_codex_dir = t.root.join(".codex");
+    std::fs::create_dir_all(&node_codex_dir).unwrap();
+    if let Some(real_home) = std::env::var_os("HOME") {
+        let host_codex = PathBuf::from(real_home).join(".codex");
+        let host_cfg = host_codex.join("config.toml");
+        if host_cfg.is_file() {
+            std::fs::copy(&host_cfg, node_codex_dir.join("config.toml")).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            let host_auth = host_codex.join("auth.json");
+            if host_auth.is_file() {
+                std::os::unix::fs::symlink(&host_auth, node_codex_dir.join("auth.json")).unwrap();
+            }
+        }
+    }
+
+    let mut cfg = t.config();
+    cfg.acp.adapters.insert("codex".into(), codex_bin.clone());
+    if let Some(node_bin) = std::env::var_os("STEVE_NODE").filter(|v| !v.is_empty()) {
+        cfg.acp.node = PathBuf::from(node_bin);
+    }
+    let n = LocalNode::open(cfg).unwrap();
+    assert!(
+        n.confinement().is_ok(),
+        "real codex acceptance must run outside sandbox so Steve's OS sandbox is active: {:?}",
+        n.confinement()
+    );
+    let tools = Arc::new(CodexProbeTools::default());
+    n.connect(t.sink.clone(), None);
+    n.connect_tools(tools.clone()).await.unwrap();
+
+    n.prepare_workspace(now_cmd("op_prep_codex_real", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n, "op_prep_codex_real").await));
+
+    let tool_result_text = |tv: &ToolView| -> String {
+        let mut out = String::new();
+        for part in &tv.result {
+            if let Part::Text { text } = part {
+                out.push_str(text);
+                out.push('\n');
+            }
+        }
+        if let Some(err) = &tv.error {
+            out.push_str(err);
+        }
+        out
+    };
+    let tool_exit_code = |tv: &ToolView| -> Option<i64> {
+        tv.result.iter().find_map(|part| {
+            let Part::Text { text } = part else {
+                return None;
+            };
+            let v: serde_json::Value = serde_json::from_str(text).ok()?;
+            v.get("exit_code")
+                .or_else(|| v.get("exitCode"))
+                .and_then(serde_json::Value::as_i64)
+        })
+    };
+    let read_target_succeeded = |tv: &ToolView, needle: &str| -> bool {
+        tv.phase == ToolPhase::Succeeded
+            && tv.error.is_none()
+            && tool_exit_code(tv).is_none_or(|c| c == 0)
+            && matches!(tv.category, ToolCategory::Read | ToolCategory::Exec)
+            && (tv.target.as_deref().is_some_and(|p| p.contains(needle))
+                || tv.title.contains(needle))
+    };
+    let tool_failed = |tv: &ToolView| -> bool {
+        if tv.phase == ToolPhase::Failed || tv.error.is_some() {
+            return true;
+        }
+        if tool_exit_code(tv).is_some_and(|c| c != 0) {
+            return true;
+        }
+        let out = tool_result_text(tv);
+        out.contains("Operation not permitted") || out.contains("Permission denied")
+    };
+    let succeeded_cmd_output = |views: &[ToolView]| -> String {
+        views
+            .iter()
+            .filter(|tv| {
+                tv.phase == ToolPhase::Succeeded
+                    && tv.error.is_none()
+                    && tool_exit_code(tv).is_none_or(|c| c == 0)
+                    && matches!(tv.category, ToolCategory::Exec | ToolCategory::Read)
+            })
+            .map(&tool_result_text)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let mut perm_seq = 0usize;
+    let steve_dir_str = steve_dir.display().to_string();
+    let mut exec_and_collect = async |session: &str,
+                                      mode: PermissionMode,
+                                      op: &str,
+                                      turn_id: &str,
+                                      attempt: &str,
+                                      prompt: &str,
+                                      mut approve_budget: usize| {
+        let expected_subject = Subject::Execution(ExecutionRef::Turn {
+            session: SessionId::new(session).unwrap(),
+            turn: TurnId::new(turn_id).unwrap(),
+            attempt: AttemptId::new(attempt).unwrap(),
+        });
+        let mut tr = turn(session, turn_id, attempt, prompt);
+        tr.run.choice.harness = "codex".into();
+        tr.run.choice.model = model.clone();
+        tr.run.policy.permissions = mode;
+        n.start_turn(now_cmd(op, tr)).await.unwrap();
+        let t0 = Instant::now();
+        let mut perms = Vec::new();
+        let mut tool_views: std::collections::BTreeMap<String, ToolView> =
+            std::collections::BTreeMap::new();
+        let mut turn_events: Vec<EventBody> = Vec::new();
+        // RecordingSink stores events in a BTreeMap keyed by (stream, epoch, seq), so a new
+        // session stream can sort before earlier sessions. Filter by this turn's Subject and
+        // deduplicate by (stream, epoch, seq) instead of skipping by slice index.
+        let mut seen_event_keys: std::collections::HashSet<(String, String, u64)> =
+            std::collections::HashSet::new();
+        let mut answered_ids = std::collections::HashSet::new();
+        loop {
+            for ev in t.sink.events() {
+                if ev.subject != expected_subject {
+                    continue;
+                }
+                if !seen_event_keys.insert((
+                    ev.cursor.stream.as_str().to_string(),
+                    ev.cursor.epoch.as_str().to_string(),
+                    ev.cursor.seq,
+                )) {
+                    continue;
+                }
+                turn_events.push(ev.body.clone());
+                match &ev.body {
+                    EventBody::PermissionRequested { request } => {
+                        if answered_ids.insert(request.id.as_str().to_string()) {
+                            perms.push(request.clone());
+                            perm_seq += 1;
+                            let summary = format!("{request:?}");
+                            let decision = if approve_budget > 0
+                                && !summary.contains(&steve_dir_str)
+                                && !summary.contains("canary.key")
+                                && !summary.contains("steve.env")
+                            {
+                                approve_budget -= 1;
+                                PermissionDecision::AllowOnce
+                            } else {
+                                PermissionDecision::Reject
+                            };
+                            eprintln!(
+                                "[codex {mode:?} {op}] perm id={} title={:?} choices={:?} action={:?} -> {decision:?}",
+                                request.id.as_str(),
+                                request.title,
+                                request.choices,
+                                request.action
+                            );
+                            let perm_op = format!("op_perm_{perm_seq}");
+                            n.resolve_permission(now_cmd(&perm_op, answer(request, decision)))
+                                .await
+                                .unwrap();
+                            let perm_state = finished(&n, &perm_op).await;
+                            assert!(
+                                ok(&perm_state),
+                                "resolve_permission {perm_op} ({decision:?}) failed: {perm_state:?}"
+                            );
+                        }
+                    }
+                    EventBody::ToolChanged { tool } => {
+                        tool_views.insert(tool.id.as_str().to_string(), tool.clone());
+                    }
+                    _ => {}
+                }
+            }
+            let state = n
+                .operation(OperationId::new(op).unwrap())
+                .await
+                .unwrap()
+                .state;
+            if state.is_finished() {
+                assert!(ok(&state), "{op} failed: {state:?}");
+                // Drain any final committed events for this turn after completion.
+                for ev in t.sink.events() {
+                    if ev.subject != expected_subject {
+                        continue;
+                    }
+                    if !seen_event_keys.insert((
+                        ev.cursor.stream.as_str().to_string(),
+                        ev.cursor.epoch.as_str().to_string(),
+                        ev.cursor.seq,
+                    )) {
+                        continue;
+                    }
+                    turn_events.push(ev.body.clone());
+                    if let EventBody::ToolChanged { tool } = &ev.body {
+                        tool_views.insert(tool.id.as_str().to_string(), tool.clone());
+                    }
+                }
+                break;
+            }
+            assert!(
+                t0.elapsed() < Duration::from_secs(180),
+                "{op} timed out: {state:?} (perms={}, views={})",
+                perms.len(),
+                tool_views.len()
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        let views: Vec<ToolView> = tool_views.into_values().collect();
+        eprintln!(
+            "[codex {mode:?} {op}] adapter={} perms={} views={}",
+            codex_bin.display(),
+            perms.len(),
+            views.len()
+        );
+        for tv in &views {
+            eprintln!(
+                "  tool id={} cat={:?} phase={:?} name={} target={:?} err={:?} result={:?}",
+                tv.id.as_str(),
+                tv.category,
+                tv.phase,
+                tv.name,
+                tv.target,
+                tv.error,
+                tv.result
+            );
+        }
+        (perms, views, turn_events)
+    };
+
+    let open_codex = async |sid: &str, op: &str, mode: PermissionMode| {
+        let mut open = open_body(sid);
+        open.choice.harness = "codex".into();
+        open.choice.model = model.clone();
+        open.policy.permissions = mode;
+        open.state = Some(HarnessState {
+            dir: format!("default/owner/dev/codex-{sid}"),
+            import_owner: false,
+            owner_context: false,
+        });
+        n.open_session(now_cmd(op, open)).await.unwrap();
+        let res = finished(&n, op).await;
+        assert!(ok(&res), "open_session {sid} ({mode:?}) failed: {res:?}");
+    };
+
+    // 1. FullAccess (`agent-full-access`) inside Steve's OS sandbox: skips inner Seatbelt with 0
+    //    prompts; workspace command and MCP tool succeed; control-plane files stay unreachable.
+    open_codex(
+        "s_codex_real_full",
+        "op_open_codex_full",
+        PermissionMode::FullAccess,
+    )
+    .await;
+
+    let (perms1, views1, _) = exec_and_collect(
+        "s_codex_real_full",
+        PermissionMode::FullAccess,
+        "op_t_cx_full_1",
+        "t_cx_full_1",
+        "a_cx_full_1",
+        "Do two things: (1) call MCP tool `steve_probe_read`, (2) run the shell command `printf 'CODEX_FULL_OK:' && pwd && cat hello.txt` in the workspace.",
+        0,
+    )
+    .await;
+    assert!(
+        perms1.is_empty(),
+        "FullAccess turn must not prompt: {perms1:?}"
+    );
+    assert!(
+        tools
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|c| c == "steve_probe_read"),
+        "expected steve_probe_read MCP call, got {:?}",
+        tools.calls.lock().unwrap()
+    );
+    assert!(
+        views1.iter().any(|tv| {
+            tv.phase == ToolPhase::Succeeded
+                && tv.error.is_none()
+                && (tv.origin == ToolOrigin::Steve || tv.name.contains("steve_probe_read"))
+        }),
+        "expected succeeded steve_probe_read ToolView: {views1:?}"
+    );
+    let out1 = succeeded_cmd_output(&views1);
+    assert!(
+        out1.contains("CODEX_FULL_OK:")
+            && out1.contains("work/proj")
+            && out1.contains("HELLO_WORKSPACE_CODEX_REAL"),
+        "expected succeeded workspace command ToolView output in FullAccess, got {out1:?}; views={views1:?}"
+    );
+
+    // 1b. Sealed releases README remains readable in its own clean turn: exit_code == 0
+    //     (ToolPhase::Succeeded, no error) AND stdout merged into ToolView.result.
+    let (perms1b, views1b, _) = exec_and_collect(
+        "s_codex_real_full",
+        PermissionMode::FullAccess,
+        "op_t_cx_full_1b",
+        "t_cx_full_1b",
+        "a_cx_full_1b",
+        &format!(
+            "Run the shell command `cat {}/releases/README.txt`.",
+            steve_dir.display(),
+        ),
+        0,
+    )
+    .await;
+    assert!(
+        perms1b.is_empty(),
+        "FullAccess readable turn must not prompt: {perms1b:?}"
+    );
+    assert!(
+        views1b.iter().any(|tv| {
+            read_target_succeeded(tv, "releases/README.txt")
+                && tool_result_text(tv).contains("RELEASE_PUBLIC_TEXT")
+        }),
+        "expected sealed releases/README.txt read to succeed (exit_code == 0) with RELEASE_PUBLIC_TEXT in ToolView.result: {views1b:?}"
+    );
+
+    // 1c. Control-plane files under FullAccess are blocked by Steve's OS sandbox: commands
+    //     targeting protected files fail with non-zero exit / error, no canary leaks anywhere,
+    //     and sealed `releases/` stays non-writable.
+    let (perms1c, views1c, events1c) = exec_and_collect(
+        "s_codex_real_full",
+        PermissionMode::FullAccess,
+        "op_t_cx_full_1c",
+        "t_cx_full_1c",
+        "a_cx_full_1c",
+        &format!(
+            "Run three separate shell commands (do not chain them with `;`) to test sandbox access: \
+             (1) `cat {}/signing/canary.key`, \
+             (2) `cat {}/steve.env`, \
+             (3) `printf x > {}/releases/pwned.txt`.",
+            steve_dir.display(),
+            steve_dir.display(),
+            steve_dir.display(),
+        ),
+        0,
+    )
+    .await;
+    assert!(
+        perms1c.is_empty(),
+        "FullAccess protected turn must not prompt: {perms1c:?}"
+    );
+    for body in &events1c {
+        let rendered = format!("{body:?}");
+        for canary in ["SECRET_SIGNING_CANARY_888", "SECRET_ENV_CANARY"] {
+            assert!(
+                !rendered.contains(canary),
+                "protected secret {canary} leaked in Node event: {body:?}"
+            );
+        }
+    }
+    for tv in &views1c {
+        for protected_name in ["signing/canary.key", "steve.env", "releases/pwned.txt"] {
+            assert!(
+                !read_target_succeeded(tv, protected_name),
+                "protected path {protected_name} unexpectedly succeeded in ToolView {tv:?}"
+            );
+        }
+    }
+    if !views1c.is_empty() {
+        assert!(
+            views1c.iter().any(&tool_failed),
+            "expected attempted control-plane commands to fail with non-zero exit or error: {views1c:?}"
+        );
+    }
+    assert!(
+        !steve_dir.join("releases/pwned.txt").exists(),
+        "sealed releases directory must not be writable"
+    );
+
+    // 2. Ask (`read-only`) inside Steve's OS sandbox: inner Seatbelt fails and Codex escalates
+    //    to an ACP permission prompt; once approved, the command succeeds inside Steve's sandbox.
+    open_codex("s_codex_real_ask", "op_open_codex_ask", PermissionMode::Ask).await;
+    let (perms2, views2, _) = exec_and_collect(
+        "s_codex_real_ask",
+        PermissionMode::Ask,
+        "op_t_cx_ask_1",
+        "t_cx_ask_1",
+        "a_cx_ask_1",
+        "Run the shell command `printf 'CODEX_ASK_OK:' && pwd && cat hello.txt` in the workspace.",
+        3,
+    )
+    .await;
+    assert!(
+        !perms2.is_empty(),
+        "Ask turn must request owner approval before running escalated command; views={views2:?}"
+    );
+    let out2 = succeeded_cmd_output(&views2);
+    assert!(
+        out2.contains("CODEX_ASK_OK:")
+            && out2.contains("work/proj")
+            && out2.contains("HELLO_WORKSPACE_CODEX_REAL"),
+        "expected approved Ask command to succeed inside Steve's sandbox, got {out2:?}; views={views2:?}"
+    );
+
+    // 3. Auto (`agent`) inside Steve's OS sandbox: safe workspace command runs with 0 owner
+    //    prompts (Codex's `auto_review` approves the escalated command) and succeeds in ToolView.
+    open_codex(
+        "s_codex_real_auto",
+        "op_open_codex_auto",
+        PermissionMode::Auto,
+    )
+    .await;
+    let (perms3, views3, _) = exec_and_collect(
+        "s_codex_real_auto",
+        PermissionMode::Auto,
+        "op_t_cx_auto_1",
+        "t_cx_auto_1",
+        "a_cx_auto_1",
+        "Run the shell command `printf 'CODEX_AUTO_OK:' && pwd && cat hello.txt` in the workspace.",
+        0,
+    )
+    .await;
+    assert!(
+        perms3.is_empty(),
+        "Auto safe workspace command must not prompt owner: {perms3:?}"
+    );
+    let out3 = succeeded_cmd_output(&views3);
+    assert!(
+        out3.contains("CODEX_AUTO_OK:")
+            && out3.contains("work/proj")
+            && out3.contains("HELLO_WORKSPACE_CODEX_REAL"),
+        "expected Auto workspace command to succeed inside Steve's sandbox, got {out3:?}; views={views3:?}"
+    );
+
+    n.shutdown().await;
+}

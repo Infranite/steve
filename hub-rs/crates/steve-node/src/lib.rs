@@ -1155,6 +1155,7 @@ fn tool_evidence(
                 .raw
                 .pointer("/rawOutput/exitCode")
                 .or_else(|| fact.raw.pointer("/rawOutput/exit_code"))
+                .or_else(|| fact.raw.pointer("/_meta/terminal_exit/exit_code"))
                 .and_then(serde_json::Value::as_i64);
             let signature =
                 digest_of(&(workspace, &fact.name, fact.category, target, exit)).ok()?;

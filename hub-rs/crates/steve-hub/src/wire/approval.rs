@@ -298,8 +298,8 @@ mod tests {
         let modes = ApprovalModes(Arc::new(declared));
         let (_, unconfined) = modes.harness_summary(&[]);
         assert!(
-            unconfined.iter().any(|name| name == "Codex"),
-            "built-in nested_sandbox=false harness included: {unconfined:?}"
+            !unconfined.iter().any(|name| name == "Codex"),
+            "built-in Codex runs inside Steve's sandbox (nested_sandbox=true) and must not appear in unconfined: {unconfined:?}"
         );
         assert!(
             unconfined.iter().any(|name| name == "Custom Self Box"),
