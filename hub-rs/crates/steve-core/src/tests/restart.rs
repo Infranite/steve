@@ -199,6 +199,7 @@ fn a_missing_release_script_fails_the_item() {
 #[test]
 fn a_conflicting_rebase_before_a_release_goes_back_to_the_agent() {
     let k = Kit::new();
+    let _ng = k.wire_node_git();
     let r = repo(k.home());
     let rel = Release {
         kind: "script".into(),
@@ -235,11 +236,13 @@ fn a_conflicting_rebase_before_a_release_goes_back_to_the_agent() {
         steve_store::core_fixture::DecisionState::Subject(&name),
     );
     k.core.resolve(&d, "yes", "", "me").unwrap();
-    assert!(
-        k.rt.prompts_of(&s)
-            .last()
-            .unwrap()
-            .contains("自动 rebase 有冲突（a.txt），已经撤销，没有发布")
+    steve_runtime::testkit::eventually_blocking(
+        "The Node rebase conflict hands back to the agent.",
+        || {
+            k.rt.prompts_of(&s)
+                .last()
+                .is_some_and(|p| p.contains("自动 rebase 有冲突（a.txt），已经撤销，没有发布"))
+        },
     );
     assert!(k.core.tx().st.releasing.is_none());
 }
@@ -247,10 +250,24 @@ fn a_conflicting_rebase_before_a_release_goes_back_to_the_agent() {
 #[test]
 fn a_clean_rebase_before_a_release_is_noted() {
     let k = Kit::new();
+    let _ng = k.wire_node_git();
     let r = repo(k.home());
+    let rel = Release {
+        kind: "script".into(),
+        cmd: "/usr/bin/true".into(),
+    };
     let p = k
         .db()
-        .project_create(WS, "G", "", &r.to_string_lossy(), "git", true, None, None)
+        .project_create(
+            WS,
+            "G",
+            "",
+            &r.to_string_lossy(),
+            "git",
+            true,
+            None,
+            Some(&rel),
+        )
         .unwrap();
     let i = k.item("wait", "收尾", Some(&p.id));
     let (name, wt) = branch_with(&r, &k.core.config().worktrees, &i, "b.txt", "b\n");
@@ -263,16 +280,21 @@ fn a_clean_rebase_before_a_release_is_noted() {
             patch![cwd: wt.to_string_lossy().to_string(), branch: name.as_str()],
         )
         .unwrap();
-    let to = crate::orchestrator::To::Decision {
-        live: None,
-        item: None,
-    };
-    assert!(k.core.tx().rebase_for_release(&i, &name, &to).unwrap());
-    assert!(
-        k.timeline_texts(&i)
-            .last()
-            .unwrap()
-            .contains("rebase 到最新的 main")
+    let s = k.session(&i, "idle");
+    let d = k.decision(&i, Some(&s), "approve", "release", &["yes", "no"]);
+    steve_store::core_fixture::decision(
+        k.db().store(),
+        &d,
+        steve_store::core_fixture::DecisionState::Subject(&name),
+    );
+    k.core.resolve(&d, "yes", "", "me").unwrap();
+    steve_runtime::testkit::eventually_blocking(
+        "The Node rebase completes and records on the timeline.",
+        || {
+            k.timeline_texts(&i)
+                .iter()
+                .any(|t| t.contains("rebase 到最新的 main"))
+        },
     );
 }
 

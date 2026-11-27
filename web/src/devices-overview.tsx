@@ -1,13 +1,14 @@
 /* Devices · Overview (#/devices): first what wants you, one line each with its next step (a Node to confirm, an upgrade
- * that failed and went back, one under way, a Node behind the Hub, a Node offline, sessions waiting for an answer), then
- * four numbers (sessions, Nodes online, Nodes on the Hub's version, clients online), then the map of how everything
- * connects (devices-map.tsx) and the Node cards. */
+ * that failed and went back, one under way, a Node behind the Hub, a Node offline, sessions waiting for an answer, and
+ * system health alerts for the owner), then four numbers (sessions, Nodes online, Nodes on the Hub's version, clients
+ * online), then the map of how everything connects (devices-map.tsx) and the Node cards. */
 import { useState, type ReactNode } from "react"
-import { ArrowUpCircleIcon, CircleAlertIcon, LoaderIcon, MessageCircleIcon, RotateCcwIcon, ShieldAlertIcon, WifiOffIcon } from "lucide-react"
+import { ActivityIcon, ArrowUpCircleIcon, CircleAlertIcon, LoaderIcon, MessageCircleIcon, RotateCcwIcon, ShieldAlertIcon, WifiOffIcon } from "lucide-react"
 import { useT } from "@/i18n"
 import { Button } from "@/components/ui/button"
 import { go, openSheet } from "@/ui"
 import { api } from "@/api"
+import { overallStatus, sortedWarnings, warningText } from "@/health"
 import { deviceWorkEvidence, st, toast, useStore } from "@/store"
 import { isUpgradeOnlyLink, nodeStatus, offlineReason, statusText, upgradeCard, type NodeView } from "@/device-model"
 import { mapClients } from "@/device-map-model"
@@ -24,7 +25,7 @@ const ATTENTION_ROWS = 4
 type Row = { key: string; tone: "bad" | "warn" | "info"; icon: typeof CircleAlertIcon; text: ReactNode; actions: ReactNode }
 
 export function OverviewTab() {
-  const t = useT(), { views, hubVersion, access, reloadNodes } = useDevices()
+  const t = useT(), { views, hubVersion, access, health, reloadNodes } = useDevices()
   useStore()
   const [all, setAll] = useState(false), [busy, setBusy] = useState("")
   const now = Date.now()
@@ -67,6 +68,21 @@ export function OverviewTab() {
     const asks = v.device && deviceWorkEvidence().loaded ? deviceGroups(v.device.id).attention.length : 0
     if (asks > 0) rows.push({ key: v.id + ":ask", tone: "warn", icon: MessageCircleIcon, text: t("devices:attn.ask", { name, count: asks }),
       actions: <Button size="xs" variant="outline" onClick={() => go(nodeHref(v.id, "work"))} data-attention-ask={v.id}>{t("devices:attn.answer")}</Button> })
+  }
+  if (st.owner && health) {
+    const healthWarns = sortedWarnings(health)
+    if (healthWarns.length > 0) {
+      const detail = warningText(healthWarns[0])
+      rows.push({
+        key: "system-health",
+        tone: overallStatus(health) === "critical" ? "bad" : "warn",
+        icon: ActivityIcon,
+        text: healthWarns.length === 1
+          ? t("devices:attn.healthOne", { detail })
+          : t("devices:attn.healthMany", { count: healthWarns.length, detail }),
+        actions: <Button size="xs" variant="outline" onClick={() => go("#/devices/monitor")} data-attention-monitor>{t("devices:attn.viewMonitor")}</Button>,
+      })
+    }
   }
   const order = { bad: 0, warn: 1, info: 2 }
   rows.sort((a, b) => order[a.tone] - order[b.tone])

@@ -882,10 +882,13 @@ fn a_dropped_item_gives_back_its_clean_worktree_and_a_new_message_brings_it_back
         )
         .unwrap();
     assert_eq!(k.phase(&i), "active");
-    assert!(
-        wt.join("x.txt").exists(),
-        "worktree re-created from the kept branch"
+    let reopened = k.db().item(&i).unwrap().unwrap();
+    assert_eq!(
+        reopened.branch.as_deref(),
+        Some(name.as_str()),
+        "kept branch stays named for the Node to recreate on open"
     );
+    assert_eq!(reopened.cwd.as_deref(), Some(wt.to_string_lossy().as_ref()),);
 }
 
 #[test]
@@ -930,6 +933,7 @@ fn a_finished_merged_item_gives_back_worktree_and_branch() {
 /// A delivered item in a git project with a release action, on its own worktree branched from main;
 /// `commit` puts one commit on the branch.
 pub(super) fn delivered_in_git(k: &Kit, commit: bool) -> (super::Delivered, std::path::PathBuf) {
+    let _ = k.wire_node_git();
     let r = repo(k.home());
     let rel = crate::repo::Release {
         kind: "script".into(),

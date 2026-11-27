@@ -371,11 +371,10 @@ impl Core {
 
     fn inline_meta(
         &self,
-        ws: &str,
         task: &ThreadTask,
         question: &str,
         files: &[FileRef],
-        project: Option<&str>,
+        info: &RouteInfo,
         offer: Option<&Offer>,
         steps: Value,
     ) -> Result<Value> {
@@ -391,7 +390,11 @@ impl Core {
             m.insert("reply_to".into(), json!(r));
         }
         if let Some(o) = offer {
-            m.insert("offer".into(), self.offer_meta(ws, o, project)?);
+            let project = info.project.as_deref().or(task.project_id.as_deref());
+            m.insert(
+                "offer".into(),
+                self.offer_meta(&task.workspace_id, o, project, &info.tags)?,
+            );
         }
         m.insert("steps".into(), steps);
         Ok(Value::Object(m))
@@ -450,11 +453,10 @@ impl Core {
                 handoff::NEEDS_TOOLS_HERE
             };
             let mut meta = self.inline_meta(
-                ws,
                 task,
                 text,
                 files,
-                info.project.as_deref(),
+                &info,
                 info.offer.as_ref(),
                 lock(&steps).json(now() - t0),
             )?;
@@ -532,11 +534,10 @@ impl Core {
                 format!("{partial}\n\n（已停下）")
             };
             let mut meta = self.inline_meta(
-                ws,
                 task,
                 text,
                 files,
-                info.project.as_deref(),
+                &info,
                 None,
                 json!({"tools": [], "ms": now() - t0}),
             )?;
@@ -590,11 +591,10 @@ impl Core {
             info.offer.clone().or_else(|| a.offer.clone())
         };
         let mut meta = self.inline_meta(
-            ws,
             task,
             text,
             files,
-            info.project.as_deref(),
+            &info,
             offer.as_ref(),
             steps.json(now() - t0),
         )?;
@@ -662,11 +662,10 @@ impl Core {
         };
         let Some(r) = r.filter(|_| !stop.is_stopped()) else {
             let mut meta = self.inline_meta(
-                ws,
                 task,
                 text,
                 files,
-                info.project.as_deref(),
+                &info,
                 None,
                 json!({"tools": [], "ms": now() - t0}),
             )?;
@@ -700,6 +699,10 @@ impl Core {
         let (reply_text, failed) = match r {
             Ok(t) if !t.trim().is_empty() => (t, false),
             Ok(_) => (format!("（没能生成回答。{FIX_MODEL}）"), true),
+            Err(steve_modules::gateway::GatewayError::LocalNodeUpdating) => (
+                steve_i18n::stored(|| steve_i18n::t!("core.node.local_updating")),
+                true,
+            ),
             Err(e) if e.can_handoff() => (handoff::NEEDS_TOOLS_HERE.to_string(), true),
             Err(e) => (
                 format!(
@@ -715,11 +718,10 @@ impl Core {
             ..Default::default()
         };
         let mut meta = self.inline_meta(
-            ws,
             task,
             text,
             files,
-            info.project.as_deref(),
+            &info,
             if failed { None } else { info.offer.as_ref() },
             steps.json(now() - t0),
         )?;
@@ -989,11 +991,10 @@ impl Core {
         }
 
         let mut meta = self.inline_meta(
-            ws,
             task,
             text,
             files,
-            info.project.as_deref(),
+            &info,
             offer.as_ref(),
             lock(&steps).json(now() - t0),
         )?;

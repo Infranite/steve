@@ -1,0 +1,17 @@
+{
+  "title": "Claude Code",
+  "status": "ready",
+  "session": {
+    "models": [
+      {
+        "id": "claude-sonnet-4-6"
+      }
+    ]
+  },
+  "capabilities": {
+    "subagents": "acp_rfd",
+    "background_tasks": "acp_async_tasks",
+    "usage_attribution": "turn_and_model_all",
+    "resume": "session_load"
+  }
+}

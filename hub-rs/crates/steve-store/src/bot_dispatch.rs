@@ -286,6 +286,22 @@ pub fn scope_for(r: &mut impl Read, ws: &str, team: Option<&Team>, bot: &str) ->
     scope_for_on(r.connection(), ws, team, bot)
 }
 
+/// Workspace membership timestamps from `bot_workspaces` so tie-breaking favors earlier members
+/// over random Bot UID lexicographic order.
+pub fn workspace_join_order(
+    r: &mut impl Read,
+    ws: &str,
+) -> Result<std::collections::HashMap<String, i64>> {
+    let rows = r.all(
+        Query::select()
+            .columns(["bot_id", "created"])
+            .from("bot_workspaces")
+            .and_where(Expr::col("workspace_id").eq(ws)),
+        |row| Ok((row.get::<String>(0)?, row.get::<i64>(1)?)),
+    )?;
+    Ok(rows.into_iter().collect())
+}
+
 pub fn record(
     w: &mut W<'_>,
     ws: &str,

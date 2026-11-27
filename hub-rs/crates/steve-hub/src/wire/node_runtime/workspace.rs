@@ -80,6 +80,31 @@ impl NodeRuntime {
         })
     }
 
+    /// True when `session`'s worktree is created by this Node and does not currently exist on disk
+    /// because its initial prepare has not succeeded yet or it was tidied and will be prepared
+    /// again on the next flush.
+    pub fn pending_workspace_prepare(&self, session: &str) -> Result<bool, StoreError> {
+        let node = self.node_id.as_str();
+        self.store.read(|r| {
+            let Some((_, resource)) = resource_in(r, session, node)? else {
+                return Ok(false);
+            };
+            let Some(last) = worktree::last_prepare(r, node, &resource)? else {
+                return Ok(false);
+            };
+            if !matches!(last.body.kind, PrepareKind::Worktree { .. }) {
+                return Ok(false);
+            }
+            if last.state != "finished" || !last.success {
+                return Ok(true);
+            }
+            Ok(
+                worktree::tidy_since(r, node, &workspace_id(&resource), last.rowid)?
+                    == Some(TidyState::Removed),
+            )
+        })
+    }
+
     /// Before `session` opens again: when the worktree it works in is one this Node makes, and
     /// it was tidied since it was made, or its last prepare failed or was refused, a new prepare of
     /// the same spec (the open waits for it). Its operation, or `None`: nothing to prepare.

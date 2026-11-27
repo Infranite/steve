@@ -47,6 +47,63 @@ struct ComponentDeclaration {
     minimum: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrandRule {
+    pub mark: BrandMark,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub substrings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum McpClientLanguage {
+    Json,
+    Bash,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpClientSpec {
+    pub id: String,
+    pub language: McpClientLanguage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default)]
+    pub wrap: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command_template: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiAdapterMeta {
+    pub name: String,
+    pub brand_mark: BrandMark,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub brand_substrings: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub brand_words: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub model_strip_prefixes: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct UiMetadata {
+    pub adapters: BTreeMap<String, UiAdapterMeta>,
+    pub model_brands: Vec<BrandRule>,
+    pub mcp_clients: Vec<McpClientSpec>,
+}
+
+#[derive(Deserialize)]
+struct UiDeclaration {
+    #[serde(default)]
+    model_brands: Vec<BrandRule>,
+    #[serde(default)]
+    mcp_clients: Vec<McpClientSpec>,
+}
+
 #[derive(Deserialize)]
 struct BuiltinDeclaration {
     id: String,
@@ -63,6 +120,10 @@ struct BuiltinDeclaration {
     #[serde(default)]
     managed_by_default: bool,
     #[serde(default)]
+    brand_substrings: Vec<String>,
+    #[serde(default)]
+    brand_words: Vec<String>,
+    #[serde(default)]
     components: Vec<ComponentDeclaration>,
     /// Trusted launch flags owned by the compile-time built-in catalog (never accepted from
     /// operator or API manifests).
@@ -75,6 +136,7 @@ struct BuiltinDeclaration {
 #[derive(Deserialize)]
 struct Catalog {
     adapters: Vec<BuiltinDeclaration>,
+    ui: UiDeclaration,
 }
 
 /// The immutable catalog view. Borrowed fields preserve the existing registry API, including
@@ -94,6 +156,8 @@ pub struct Builtin {
     pub properties: AdapterProperties,
     pub primary: bool,
     pub managed_by_default: bool,
+    pub brand_substrings: Vec<&'static str>,
+    pub brand_words: Vec<&'static str>,
     pub components: Vec<Component>,
 }
 fn intern(s: String) -> &'static str {
@@ -139,20 +203,54 @@ impl From<BuiltinDeclaration> for Builtin {
             properties,
             primary: b.primary,
             managed_by_default: b.managed_by_default,
+            brand_substrings: intern_list(b.brand_substrings),
+            brand_words: intern_list(b.brand_words),
             components: b.components.into_iter().map(Component::from).collect(),
         }
     }
 }
-static BUILTINS: LazyLock<Vec<Builtin>> = LazyLock::new(|| {
+static PARSED: LazyLock<(Vec<Builtin>, UiMetadata)> = LazyLock::new(|| {
     let catalog: Catalog =
         toml::from_str(include_str!("builtins.toml")).expect("valid built-in declarations");
-    catalog.adapters.into_iter().map(Builtin::from).collect()
+    let builtins: Vec<Builtin> = catalog.adapters.into_iter().map(Builtin::from).collect();
+    let mut adapters = BTreeMap::new();
+    for b in &builtins {
+        adapters.insert(
+            b.id.to_owned(),
+            UiAdapterMeta {
+                name: b.name.to_owned(),
+                brand_mark: b.properties.brand_mark,
+                brand_substrings: b.brand_substrings.iter().map(|s| (*s).to_owned()).collect(),
+                brand_words: b.brand_words.iter().map(|s| (*s).to_owned()).collect(),
+                model_strip_prefixes: b.properties.model_strip_prefixes.clone(),
+            },
+        );
+    }
+    let ui = UiMetadata {
+        adapters,
+        model_brands: catalog.ui.model_brands,
+        mcp_clients: catalog.ui.mcp_clients,
+    };
+    (builtins, ui)
 });
 pub fn builtins() -> &'static [Builtin] {
-    &BUILTINS
+    &PARSED.0
+}
+pub fn ui_metadata() -> &'static UiMetadata {
+    &PARSED.1
+}
+pub fn ui_metadata_json() -> String {
+    let mut out = serde_json::to_string_pretty(ui_metadata()).expect("ui metadata json");
+    out.push('\n');
+    out
 }
 pub fn builtin(id: &str) -> Option<&'static Builtin> {
     builtins().iter().find(|b| b.id == id)
+}
+pub fn builtin_by_history_prefix(prefix: &str) -> Option<&'static Builtin> {
+    builtins()
+        .iter()
+        .find(|b| b.properties.history_prefix.as_deref() == Some(prefix))
 }
 pub fn builtin_ids() -> impl Iterator<Item = &'static str> {
     builtins().iter().map(|b| b.id)

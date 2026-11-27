@@ -115,13 +115,29 @@ pub fn decision_session(r: &mut impl Read, id: &str) -> Result<Option<String>> {
     .flatten())
 }
 
+/// True only when `id` is a waiting permission card belonging to a currently running Node turn
+/// (neither the attempt nor its logical turn has finished).
 pub fn waiting_card(r: &mut impl Read, id: &str) -> Result<bool> {
     Ok(r.one(
         Query::select()
-            .column("decision_id")
-            .from("runtime_permissions")
-            .and_where(Expr::col("decision_id").eq(id))
-            .and_where(Expr::col("state").eq("waiting")),
+            .column(("p", "decision_id"))
+            .from_as("runtime_permissions", "p")
+            .join_as(
+                JoinType::InnerJoin,
+                "runtime_attempts",
+                "a",
+                Expr::col(("a", "attempt_id")).eq(Expr::col(("p", "attempt_id"))),
+            )
+            .join_as(
+                JoinType::InnerJoin,
+                "runtime_turns",
+                "t",
+                Expr::col(("t", "turn_id")).eq(Expr::col(("a", "turn_id"))),
+            )
+            .and_where(Expr::col(("p", "decision_id")).eq(id))
+            .and_where(Expr::col(("p", "state")).eq("waiting"))
+            .and_where(Expr::col(("a", "state")).ne("finished"))
+            .and_where(Expr::col(("t", "state")).ne("finished")),
         |_| Ok(()),
     )?
     .is_some())

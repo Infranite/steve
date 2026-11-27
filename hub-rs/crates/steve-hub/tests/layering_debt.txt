@@ -5,11 +5,7 @@
 # STEVE_GUARD_BLESS=1 rewrites after removals; new or growing edges always fail.
 w3	g4	edge steve-acp steve-i18n	1
 w3	g4	edge steve-acp steve-vault	1
-w3	g4	edge steve-hub steve-acp	1
-w3	g4	edge steve-hub steve-node	1
-w3	g4	edge steve-hub steve-node-cli	1
 w3	g4	edge steve-hub steve-node-wire	1
-w3	g4	edge steve-hub steve-research	1
 w3	g4	edge steve-node-cli steve-acp	1
 w3	g4	edge steve-node-cli steve-install	1
 w3	g4	edge steve-node-cli steve-node	1
@@ -42,7 +38,6 @@ w4	c1	edge steve-modules steve-store	1
 w4	c1	edge steve-stats steve-acp	1
 w4	c1	edge steve-stats steve-i18n	1
 w4	c1	edge steve-stats steve-store	1
-w4	g0	edge steve-core steve-acp	1
 w4	g0	edge steve-core steve-modules	1
 w4	g0	edge steve-core steve-stats	1
 w4	g0	edge steve-core steve-store	1

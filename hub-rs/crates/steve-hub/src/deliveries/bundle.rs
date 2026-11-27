@@ -53,7 +53,7 @@ pub(super) fn unpack(bytes: &[u8], entrypoint: Option<&str>) -> Result<Bundle, S
         let name = std::str::from_utf8(f.name_raw())
             .map_err(|_| "ZIP names must be UTF-8")?
             .to_string();
-        let dir = f.is_dir();
+        let dir = name.ends_with(['/', '\\']);
         let key = if dir {
             name.strip_suffix('/').unwrap_or(&name)
         } else {

@@ -63,6 +63,9 @@ pub enum CoreError {
     /// A refusal with its own status (`404 没有这条消息`, `409 已经处理过了`).
     #[error("{1}")]
     Status(u16, String),
+    /// No Node is attached to serve a workspace/git/housekeeping operation.
+    #[error("{0}")]
+    NoNodeAvailable(String),
     #[error(transparent)]
     Gateway(#[from] steve_modules::gateway::GatewayError),
 }

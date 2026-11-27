@@ -13,8 +13,12 @@ use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 use steve_store::{NewSession, NewWorkspace, Store, WS};
 
+#[path = "support/local_node.rs"]
+mod local_node;
+
 struct Env {
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     db: PathBuf,
     data_dir: PathBuf,
     base: String,
@@ -66,7 +70,7 @@ async fn start() -> Env {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        ("STEVE_NO_RESUME", "1".into()),
+        ("STEVE_LOCAL_NODE_PORT", "0".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_MODELS_FAST", "claude-haiku-5-5".into()),
         ("STEVE_MODELS_SMART", "claude-sonnet-5-5".into()),
@@ -89,13 +93,16 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_node(w.node.clone())
+        .with_history(w.history.clone())
+        .with_nodes(w.nodes.clone())
+        .with_workspaces(Some(w.workspaces.clone()))
         .with_modules(w.modules)
         .with_oidc(w.oidc.clone());
     steve_hub::app::boot(&st).await.expect("boot");
-    for job in w.jobs {
-        job.start(&st.jobs);
-    }
+    local_node::start_jobs(w.jobs, &st.jobs);
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
         let _ = axum::serve(
@@ -126,6 +133,7 @@ async fn start() -> Env {
     let owner = store.access().owner().expect("owner query").expect("owner");
     Env {
         _home: home,
+        _local_node: local_node,
         db: cfg.db_path(),
         data_dir: cfg.data_dir.clone(),
         base,

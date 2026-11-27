@@ -241,6 +241,8 @@ export default {
     waitTurns_other: "等 {{count}} 个回合结束",
     restartNow: "马上重启",
     hold: "正在发布 <link>{{item}}</link>，{{wait}}；新消息发布后发送",
+    localNodeUpdating: "本机 Node 正在更新，{{wait}}；切换完成前对话回复暂不可用",
+    localNodeSwitchNow: "马上切换",
   },
   /* resume.tsx: the harness's own session behind a conversation */
   resume: {
@@ -472,10 +474,21 @@ export default {
     scratchSubEnded_other: "{{count}} 个没有项目的事项，缓存 {{cache}}，其中已结束事项的 {{ended}} 在磁盘紧张时回收",
     scratchPolicy: "没有项目的事项在临时目录里工作：事项结束后，只在磁盘紧张时回收其中的 node_modules、target 这类缓存目录，其他文件不动。",
   },
-  /* health-settings.tsx: 设置 · 关于 · 运行状况 (the Hub's /api/system/health) */
+  /* health-settings.tsx & health.ts: 设置 · 关于摘要与设备 · 监控 (the Hub's /api/system/health) */
   health: {
     title: "运行状况",
-    note: "最近 {{minutes}} 分钟的关键数字，每项旁边是它的阈值；超过的排在最前面。只有实例管理员能看到。",
+    summary: {
+      okTitle: "系统运行正常",
+      warnTitle_other: "有 {{count}} 项指标超出阈值",
+      criticalTitle_other: "有 {{count}} 项严重告警",
+      okBadge: "正常",
+      warnBadge: "注意",
+      criticalBadge: "严重",
+      okSub: "最近 {{minutes}} 分钟 · 已采集 {{measured}} 项指标 · 趋势与子系统明细已迁移至「设备 · 监控」",
+      warnSingle: "{{detail}} 点此前往监控页排查",
+      warnMore_other: "{{detail}} 等 {{count}} 项，点此前往监控页排查",
+      openMonitor: "查看监控",
+    },
     hub: "Hub",
     node: "节点 {{name}}",
     plugin: "插件 {{name}}",

@@ -49,7 +49,7 @@ fn router(k: &Kit, f: impl Fn(&str) -> Value + Send + Sync + 'static) {
 /// The script of A1: one knowledge search, three files read, the answer in two parts.
 fn a1_research() -> Arc<FakeResearch> {
     FakeResearch::new(vec![
-        Step::Tool("mcp__steve__steve_knowledge_search", "知识系统"),
+        Step::Tool("steve_knowledge_search", "知识系统"),
         Step::Text("知识系统分三层：入库、检索、注入对话。"),
         Step::Sleep(80),
         Step::Tool("Read", "hub-rs/crates/steve-knowledge/src/lib.rs"),
@@ -122,7 +122,7 @@ async fn a1_a_question_is_researched_in_the_conversation() {
             )
         })
         .collect();
-    assert_eq!(tools[0].0, "mcp__steve__steve_knowledge_search");
+    assert_eq!(tools[0].0, "steve_knowledge_search");
     assert_eq!(tools.iter().filter(|t| t.0 == "Read").count(), 3);
     assert_eq!(st["research"]["tools"], 4);
     assert_eq!(st["research"]["model"], "fake-research");
@@ -198,7 +198,10 @@ async fn a1_a_question_is_researched_in_the_conversation() {
 
     /* taking the offer is not a correction; who took it asked for the item (a member only) */
     steve_store::core_fixture::thread::owner(k.db().store(), WS, "usr_dev", "dev", "Dev");
-    let h = k.core.offer(WS, &a.id, true, Some("usr_dev")).unwrap();
+    let h = k
+        .core
+        .offer(WS, &a.id, true, None, Some("usr_dev"))
+        .unwrap();
     let item = h.item.unwrap();
     let by = steve_store::core_fixture::thread::requested_by(k.db().store(), &item.id);
     assert_eq!(by.as_deref(), Some("usr_dev"));
@@ -219,7 +222,7 @@ async fn a1_a_question_is_researched_in_the_conversation() {
     assert_eq!(ti.origin_message_id, mid);
     assert!(ti.from_question);
     /* a second click: 409 with the same result */
-    let again = k.core.offer(WS, &a.id, true, None).unwrap();
+    let again = k.core.offer(WS, &a.id, true, None, None).unwrap();
     assert!(again.already);
     assert_eq!(again.item.unwrap().id, item.id);
 }
@@ -321,7 +324,7 @@ async fn a3_an_unclear_request_is_planned_here_and_offered() {
         ("research", Some("3"))
     );
     /* the offer makes the item in one click */
-    let h = k.core.offer(WS, &a.id, true, None).unwrap();
+    let h = k.core.offer(WS, &a.id, true, None, None).unwrap();
     assert_eq!(h.item.unwrap().title, "事项页布局优化");
     assert_eq!(items(&k), before + 1);
 }
@@ -727,8 +730,8 @@ async fn a_named_but_unsure_supplement_answers_inline_with_offer() {
     assert!(ms[1].meta.get("suggest").is_none());
     assert_eq!(ms[1].meta["offer"]["state"], "open");
     assert!(k.rt.prompts_of(&session).is_empty());
-    let first = k.core.offer(WS, &ms[1].id, true, None).unwrap();
-    let second = k.core.offer(WS, &ms[1].id, true, None).unwrap();
+    let first = k.core.offer(WS, &ms[1].id, true, None, None).unwrap();
+    let second = k.core.offer(WS, &ms[1].id, true, None, None).unwrap();
     assert_ne!(first.item.unwrap().id, old);
     assert!(second.already);
 }
@@ -762,7 +765,7 @@ async fn a_closed_supplement_offers_separate_work_without_losing_the_request() {
             assert_eq!(card.meta["offer"]["state"], "open");
             let made = k
                 .core
-                .offer(WS, &card.id, true, None)
+                .offer(WS, &card.id, true, None, None)
                 .unwrap()
                 .item
                 .unwrap();
@@ -778,7 +781,12 @@ async fn a_closed_supplement_offers_separate_work_without_losing_the_request() {
                     .next(),
                 Some(text.as_str())
             );
-            assert!(k.core.offer(WS, &card.id, true, None).unwrap().already);
+            assert!(
+                k.core
+                    .offer(WS, &card.id, true, None, None)
+                    .unwrap()
+                    .already
+            );
             assert_eq!(items(&k), 2);
             assert!(k.rt.prompts_of(&session).is_empty());
             assert!(k.db().queued(&session).unwrap().is_empty());
@@ -1573,7 +1581,7 @@ async fn maintenance_keeps_incoming_chat_durable_and_resumes_it_once() {
 async fn failed_research_tool_keeps_a_safe_diagnostic_in_reply_metadata() {
     let k = Kit::new();
     assert!(k.core.set_researcher(FakeResearch::new(vec![
-        Step::ToolFailure("mcp__steve__steve_item_read", "ST-23", "permission_denied"),
+        Step::ToolFailure("steve_item_read", "ST-23", "permission_denied"),
         Step::Text("暂时无法查询。"),
     ])));
     router(
@@ -1766,4 +1774,151 @@ async fn a_tool_call_is_shown_while_it_runs() {
     let tools = ms[1].meta["steps"]["tools"].as_array().unwrap();
     assert_eq!(tools.len(), 1, "{tools:?}");
     assert_eq!(tools[0]["status"], "ok");
+}
+
+#[tokio::test]
+async fn offer_carries_route_tags_into_preview_and_item() {
+    let k = Kit::new();
+    let tag = k
+        .db()
+        .tag_create(WS, "文档", "领域", "文档与资料", "owner")
+        .unwrap();
+    k.db()
+        .store()
+        .bots()
+        .seed(
+            "bot_doc",
+            false,
+            &steve_store::NewBot {
+                name: "文档".into(),
+                role: Some("写和整理文档".into()),
+                harness: "fixture".into(),
+                perm_mode: Some("auto".into()),
+                ..Default::default()
+            },
+            WS,
+        )
+        .unwrap();
+    k.core
+        .set_researcher(FakeResearch::new(vec![Step::Text("已梳理现状。")]));
+    let tid = tag.id.clone();
+    router(&k, move |_| {
+        json!({
+            "kind": "item",
+            "confidence": 0.6,
+            "signals": ["change"],
+            "title": "更新说明",
+            "goal": "整理本周变更",
+            "tags": [tid],
+            "project": null
+        })
+    });
+    k.core
+        .say(WS, "本周变更是不是得整理一下，你看看", &[])
+        .unwrap();
+    let ms = settle(&k, 2).await;
+    let offer = &ms[1].meta["offer"];
+    assert_eq!(offer["state"], "open", "{offer}");
+    assert_eq!(offer["tags"], json!([tag.id]), "{offer}");
+    assert_eq!(offer["bot"], "bot_doc", "{offer}");
+    assert_eq!(offer["reason"], "description", "{offer}");
+    assert_eq!(offer["matched"], json!(["文档"]), "{offer}");
+
+    let handled = k.core.offer(WS, &ms[1].id, true, None, None).unwrap();
+    let item = handled.item.unwrap();
+    assert_eq!(item.bot_id.as_deref(), Some("bot_doc"));
+    assert!(k.db().tags_of_item(&item.id).unwrap().contains(&tag.id));
+    let initial = k
+        .db()
+        .store()
+        .read(|r| steve_store::bot_dispatch::initial(r, &item.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        initial.explanation.reason,
+        steve_types::PlacementReason::Description
+    );
+    assert_eq!(initial.explanation.matched, vec!["文档"]);
+}
+
+#[tokio::test]
+async fn offer_explicit_bot_override_and_failed_override_recovery() {
+    let k = Kit::new();
+    for (id, enabled) in [("bot_doc", true), ("bot_off", false)] {
+        k.db()
+            .store()
+            .bots()
+            .seed(
+                id,
+                false,
+                &steve_store::NewBot {
+                    name: id.into(),
+                    harness: "fixture".into(),
+                    enabled: Some(enabled),
+                    ..Default::default()
+                },
+                WS,
+            )
+            .unwrap();
+    }
+    for (id, ts) in [("dev", 100), ("bot_doc", 200), ("bot_off", 300)] {
+        steve_store::core_fixture::bot_workspace_created(k.db().store(), WS, id, ts);
+    }
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(json!({"kind": "answer", "confidence": 0.9}).to_string())
+        } else {
+            Ok(json!({
+                "thought": "想",
+                "answer": "直接回答",
+                "offer": {"title": "补文档", "goal": "补齐说明"}
+            })
+            .to_string())
+        }
+    });
+    k.core.say(WS, "看下这部分", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    assert_eq!(ms[1].meta["offer"]["bot"], "dev", "{}", ms[1].meta["offer"]);
+
+    let err = k
+        .core
+        .offer(WS, &ms[1].id, true, Some("bot_off"), None)
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::CoreError::Placement(steve_types::PlacementBlocked {
+                reason: steve_types::PlacementRejection::Bot,
+                ..
+            })
+        ),
+        "{err}"
+    );
+    assert_eq!(
+        k.db().message(&ms[1].id).unwrap().unwrap().meta["offer"]["state"],
+        "open"
+    );
+    assert_eq!(items(&k), 0);
+
+    let ok = k
+        .core
+        .offer(WS, &ms[1].id, true, Some("bot_doc"), None)
+        .unwrap();
+    let item = ok.item.unwrap();
+    assert_eq!(item.bot_id.as_deref(), Some("bot_doc"));
+    let initial = k
+        .db()
+        .store()
+        .read(|r| steve_store::bot_dispatch::initial(r, &item.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        initial.explanation.reason,
+        steve_types::PlacementReason::Explicit
+    );
+    let saved = k.db().message(&ms[1].id).unwrap().unwrap();
+    assert_eq!(saved.meta["offer"]["state"], "taken");
+    assert_eq!(saved.meta["offer"]["bot"], "bot_doc");
+    assert_eq!(saved.meta["offer"]["reason"], "explicit");
+    assert!(saved.meta["offer"].get("matched").is_none());
 }

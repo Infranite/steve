@@ -25,7 +25,7 @@ const events: Record<string, REvent[]> = {
   s2: [
     ev(10, "user", { text: "先更新计划，看看卡在哪", via: "me" }),
     ev(11, "text", { role: "thought", text: "先更新计划状态。" }),
-    tool(14, { name: "mcp__steve__steve_update", origin: "steve", category: "steve", title: "update", action: { type: "tool", args: { action: "pause", reason: "先看看卡在哪", expected_revision: 37 } } }),
+    tool(14, { name: "steve_update", origin: "steve", category: "steve", title: "update", action: { type: "tool", args: { action: "pause", reason: "先看看卡在哪", expected_revision: 37 } } }),
     ev(16, "text", { role: "assistant", text: "已更新，接着读代码。" }),
     tool(20, { name: "Read", category: "read", title: "Read hub-rs/src/cycle.rs", target: "hub-rs/src/cycle.rs" }),
     ev(95, "turn_end", { stopReason: "cancelled" }),

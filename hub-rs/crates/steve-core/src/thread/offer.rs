@@ -9,10 +9,80 @@ use crate::orchestrator::CreateItem;
 use crate::repo::{BotExt, FileRef, Item, Message};
 use crate::util::{js_head, js_len, now};
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 use steve_store::{DispatchClaim, ReceiptDispatch, thread};
+use steve_types::PlacementReason;
+
+/// Typed lifecycle state stored in `messages.meta.offer.state`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum OfferState {
+    Open,
+    Taken,
+    Dismissed,
+}
+
+/// Typed contract for `messages.meta.offer` persisted on inline Steve answers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OfferMeta {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    goal: String,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    tags: Vec<String>,
+    #[serde(default)]
+    bot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reason: Option<PlacementReason>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    matched: Vec<String>,
+    state: OfferState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    item: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    folded: Option<bool>,
+}
+
+fn record_offer_preview(result: &'static str) {
+    thread_local! {
+        static PREVIEW_TOTAL: std::cell::RefCell<
+            std::collections::HashMap<&'static str, metrics::Counter>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    PREVIEW_TOTAL.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry(result)
+            .or_insert_with(|| metrics::counter!("steve_offer_preview_total", "result" => result))
+            .increment(1);
+    });
+}
+
+fn record_offer_action(action: &'static str, bot_override: &'static str) {
+    thread_local! {
+        static ACTION_TOTAL: std::cell::RefCell<
+            std::collections::HashMap<(&'static str, &'static str), metrics::Counter>,
+        > = std::cell::RefCell::new(std::collections::HashMap::new());
+    }
+    ACTION_TOTAL.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry((action, bot_override))
+            .or_insert_with(|| {
+                metrics::counter!(
+                    "steve_offer_action_total",
+                    "action" => action,
+                    "bot_override" => bot_override
+                )
+            })
+            .increment(1);
+    });
+}
 
 /// The result of a click on an offer, a suggestion card or a correction.
 #[derive(Debug, Clone, Serialize)]
@@ -71,21 +141,154 @@ fn hm(t: i64, zone: steve_runtime::tz::Zone) -> String {
 }
 
 impl Core {
-    /// `meta.offer` of an answer: the work, where and by whom it would be done, `open`.
-    pub(crate) fn offer_meta(&self, ws: &str, o: &Offer, project: Option<&str>) -> Result<Value> {
-        let bot = match project {
-            Some(p) => self
-                .store()
-                .projects(ws)?
-                .into_iter()
-                .find(|x| x.id == p)
-                .and_then(|x| x.default_bot),
-            None => None,
+    fn resolve_offer_tags(
+        &self,
+        ws: &str,
+        tag_ids: &[String],
+    ) -> Result<(Vec<String>, Vec<String>)> {
+        let mut ids = Vec::new();
+        let mut names = Vec::new();
+        for id in tag_ids {
+            let trimmed = id.trim();
+            if trimmed.is_empty() || ids.iter().any(|seen| seen == trimmed) {
+                continue;
+            }
+            if let Some(tag) = self.store().tag(trimmed)?.filter(|t| t.workspace_id == ws) {
+                ids.push(tag.id);
+                names.push(tag.name);
+            }
+        }
+        Ok((ids, names))
+    }
+
+    fn preview_offer_placement(
+        &self,
+        ws: &str,
+        title: &str,
+        goal: &str,
+        project: Option<&str>,
+        tag_names: &[String],
+    ) -> Result<Option<steve_types::BotPlacement>> {
+        let db = self.store();
+        let team = db
+            .store()
+            .read(|r| steve_store::bot_dispatch::selected(r, ws, None))?;
+        let project_opt = Some(project.map(str::to_owned));
+        let make_req = || crate::placement::DispatchRequest {
+            workspace: ws,
+            bot: None,
+            harness: None,
+            model: None,
+            effort: None,
+            team: team.as_ref(),
+            project: &project_opt,
+            title,
+            goal,
+            tags: tag_names,
+            required_specialties: &[],
+            node: None,
+            required_nodes: None,
         };
-        Ok(json!({
-            "title": o.title, "goal": o.goal, "project": project,
-            "bot": bot.unwrap_or_else(|| "steve".into()), "state": "open",
-        }))
+        let default_model = |rt_id: &str| self.models().agent_model(ws, rt_id);
+        match crate::placement::preview(db, self.rt(), make_req(), default_model) {
+            Ok((placement, _)) => {
+                record_offer_preview("placed");
+                Ok(Some(placement))
+            }
+            Err(CoreError::Placement(blocked)) => {
+                let policy = db
+                    .store()
+                    .read(|r| steve_store::bot_dispatch::no_executor_policy(r, ws))?;
+                if policy != steve_types::NoExecutorPolicy::Steve {
+                    record_offer_preview("unassigned");
+                    return Ok(None);
+                }
+                match crate::placement::preview_coordinator(
+                    db,
+                    self.rt(),
+                    make_req(),
+                    default_model,
+                    blocked,
+                    steve_types::CoordinatorDeferSource::Setting,
+                ) {
+                    Ok((placement, _)) => {
+                        record_offer_preview("coordinator");
+                        Ok(Some(placement))
+                    }
+                    Err(CoreError::Placement(_)) => {
+                        record_offer_preview("unassigned");
+                        Ok(None)
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn validate_explicit_offer_bot(
+        &self,
+        ws: &str,
+        explicit_bot: &str,
+        title: &str,
+        goal: &str,
+        project: Option<&str>,
+        tag_names: &[String],
+    ) -> Result<()> {
+        let db = self.store();
+        let team = db
+            .store()
+            .read(|r| steve_store::bot_dispatch::selected(r, ws, None))?;
+        let project_opt = Some(project.map(str::to_owned));
+        let default_model = |rt_id: &str| self.models().agent_model(ws, rt_id);
+        crate::placement::preview(
+            db,
+            self.rt(),
+            crate::placement::DispatchRequest {
+                workspace: ws,
+                bot: Some(explicit_bot),
+                harness: None,
+                model: None,
+                effort: None,
+                team: team.as_ref(),
+                project: &project_opt,
+                title,
+                goal,
+                tags: tag_names,
+                required_specialties: &[],
+                node: None,
+                required_nodes: None,
+            },
+            default_model,
+        )?;
+        Ok(())
+    }
+
+    /// `meta.offer` of an answer: the work, where and by whom it would be done, `open`.
+    pub(crate) fn offer_meta(
+        &self,
+        ws: &str,
+        o: &Offer,
+        project: Option<&str>,
+        tag_ids: &[String],
+    ) -> Result<Value> {
+        let (tags, tag_names) = self.resolve_offer_tags(ws, tag_ids)?;
+        let preview = self.preview_offer_placement(ws, &o.title, &o.goal, project, &tag_names)?;
+        let offer = OfferMeta {
+            title: o.title.clone(),
+            goal: o.goal.clone(),
+            project: project.map(str::to_owned),
+            tags,
+            bot: preview
+                .as_ref()
+                .map(|p| p.explanation.bot.as_str().to_owned()),
+            reason: preview.as_ref().map(|p| p.explanation.reason),
+            matched: preview.map(|p| p.explanation.matched).unwrap_or_default(),
+            state: OfferState::Open,
+            item: None,
+            folded: None,
+        };
+        Ok(serde_json::to_value(offer)?)
     }
 
     /// A new offer folds the older open ones (they stay clickable).
@@ -385,8 +588,15 @@ impl Core {
     }
 
     /// Take (`take: true`) or dismiss an offer on Steve's answer `msg_id` (`POST /api/thread/:id/offer`).
-    pub fn offer(&self, ws: &str, msg_id: &str, take: bool, by: Option<&str>) -> Result<Handled> {
-        self.offer_as(ws, msg_id, take, true, by)
+    pub fn offer(
+        &self,
+        ws: &str,
+        msg_id: &str,
+        take: bool,
+        bot: Option<&str>,
+        by: Option<&str>,
+    ) -> Result<Handled> {
+        self.offer_as(ws, msg_id, take, true, bot, by)
     }
 
     pub(crate) fn offer_as(
@@ -395,6 +605,7 @@ impl Core {
         msg_id: &str,
         take: bool,
         start: bool,
+        bot: Option<&str>,
         by: Option<&str>,
     ) -> Result<Handled> {
         let _one = lock(&self.0.thread.acting);
@@ -403,16 +614,26 @@ impl Core {
             .message(msg_id)?
             .filter(|m| m.workspace_id == ws)
             .ok_or_else(not_found)?;
-        let Some(o) = m.meta.get("offer").filter(|o| o.is_object()).cloned() else {
+        let Some(raw_offer) = m.meta.get("offer").filter(|o| o.is_object()).cloned() else {
             return Err(CoreError::Status(
                 400,
                 steve_i18n::t!("core.message.no_offer"),
             ));
         };
-        if o["state"] != "open" {
+        let mut offer: OfferMeta = serde_json::from_value(raw_offer)
+            .map_err(|_| CoreError::Status(400, steve_i18n::t!("core.message.no_offer")))?;
+        let bot_override = bot.map(str::trim).filter(|s| !s.is_empty());
+        let override_label = if take && bot_override.is_some() {
+            "explicit"
+        } else {
+            "auto"
+        };
+        if offer.state != OfferState::Open {
+            record_offer_action("already", override_label);
             let origin = self.origin_of(ws, &m)?;
-            let item = o["item"]
-                .as_str()
+            let item = offer
+                .item
+                .as_deref()
                 .and_then(|i| self.store().item(i).ok().flatten());
             let dispatch_ref_id =
                 self.existing_dispatch_id(ws, &origin, item.as_ref().map(|i| i.id.as_str()))?;
@@ -426,7 +647,8 @@ impl Core {
         let origin = self.origin_of(ws, &m)?;
         let mut meta = meta_of(&m);
         if !take {
-            meta["offer"]["state"] = json!("dismissed");
+            offer.state = OfferState::Dismissed;
+            meta.insert("offer".into(), serde_json::to_value(&offer)?);
             self.store()
                 .message_patch_meta(msg_id, &Value::Object(meta))?;
             self.store().store().write(|w| {
@@ -438,12 +660,24 @@ impl Core {
                     ReceiptDispatch::NoDispatch,
                 )
             })?;
+            record_offer_action("dismiss", "auto");
             return Ok(Handled {
                 message_id: msg_id.into(),
                 item: None,
                 already: false,
                 dispatch_ref_id: None,
             });
+        }
+        let (tags, tag_names) = self.resolve_offer_tags(ws, &offer.tags)?;
+        if let Some(explicit_bot) = bot_override {
+            self.validate_explicit_offer_bot(
+                ws,
+                explicit_bot,
+                &offer.title,
+                &offer.goal,
+                offer.project.as_deref(),
+                &tag_names,
+            )?;
         }
         let from_question = self
             .store()
@@ -460,11 +694,11 @@ impl Core {
         let (item, already, disp_id) = self.thread_item_once(ThreadItem {
             ws,
             origin: &origin,
-            title: crate::gateway::jstr(&o["title"]),
-            goal: crate::gateway::jstr(&o["goal"]),
-            bot: None,
-            project: o["project"].as_str().map(String::from),
-            tags: vec![],
+            title: offer.title.clone(),
+            goal: offer.goal.clone(),
+            bot: bot_override.map(String::from),
+            project: offer.project.clone(),
+            tags: tags.clone(),
             files: m
                 .meta
                 .get("chatFiles")
@@ -476,13 +710,23 @@ impl Core {
             answer: Some(&m),
             by: by.map(String::from),
         })?;
-        meta["offer"]["state"] = json!("taken");
-        meta["offer"]["item"] = json!(item.id);
+        let initial = self
+            .store()
+            .store()
+            .read(|r| steve_store::bot_dispatch::initial(r, &item.id))?;
+        offer.state = OfferState::Taken;
+        offer.item = Some(item.id.clone());
+        offer.tags = tags;
+        offer.bot = item.bot_id.clone();
+        offer.reason = initial.as_ref().map(|p| p.explanation.reason);
+        offer.matched = initial.map(|p| p.explanation.matched).unwrap_or_default();
+        meta.insert("offer".into(), serde_json::to_value(&offer)?);
         meta.remove("chat");
         meta.insert("promoted".into(), json!(item.id));
         self.store()
             .message_patch_meta(msg_id, &Value::Object(meta))?;
         if already {
+            record_offer_action("already", override_label);
             return Ok(Handled {
                 message_id: msg_id.into(),
                 item: Some(item),
@@ -490,6 +734,7 @@ impl Core {
                 dispatch_ref_id: Some(disp_id),
             });
         }
+        record_offer_action("take", override_label);
         self.store().store().write(|w| {
             thread::update_receipt_outcome(
                 w,

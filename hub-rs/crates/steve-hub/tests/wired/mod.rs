@@ -17,8 +17,12 @@ use steve_hub::api::AppState;
 use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
+#[path = "../support/local_node.rs"]
+mod local_node;
+
 struct Env {
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     base: String,
     http: reqwest::Client,
     cookie: String,
@@ -97,8 +101,7 @@ async fn start_with_model(extra: &[(&str, String)], model: bool) -> Env {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         ("STEVE_NO_RESUME", if model { "0" } else { "1" }.into()),
-        ("STEVE_NODE_MODE", if model { "local" } else { "" }.into()),
-        ("STEVE_NODE_LISTEN", "0".into()),
+        ("STEVE_LOCAL_NODE_PORT", "0".into()),
         ("STEVE_BACKUP", "off".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("CODEX_EXECUTABLE", "/usr/bin/false".into()),
@@ -133,11 +136,10 @@ async fn start_with_model(extra: &[(&str, String)], model: bool) -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
-    for job in w.jobs {
-        job.start(&st.jobs);
-    }
+    local_node::start_jobs(w.jobs, &st.jobs);
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
         let _ = axum::serve(
@@ -167,6 +169,7 @@ async fn start_with_model(extra: &[(&str, String)], model: bool) -> Env {
     Env {
         db: cfg.db_path(),
         _home: home,
+        _local_node: local_node,
         base,
         http,
         cookie,
@@ -527,7 +530,6 @@ async fn a_secret_use_runs_after_its_decision() {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../steve-acp/tests/fake-acp.js");
     let e = start_with(&[
         ("STEVE_NO_RESUME", "0".into()),
-        ("STEVE_NODE_MODE", "local".into()),
         ("STEVE_ADAPTER_CLAUDE", adapter.display().to_string()),
     ])
     .await;

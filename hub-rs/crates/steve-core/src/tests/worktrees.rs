@@ -3,11 +3,10 @@
 //! `remove` for such a session, and applies what the backend tells it only to the item's current
 //! session.
 
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::CreateItem;
-use crate::git::tests::{branch_with, g, repo};
+use crate::git::tests::{branch_with, g, git_test, repo};
 use crate::patch;
 use crate::repo::WS;
 use crate::testkit::Kit;
@@ -87,7 +86,7 @@ fn a_worktree_its_backend_makes_is_only_named_under_the_lock() {
     assert_eq!(s.cwd, wt.to_string_lossy());
     assert!(k.rt.prompts_of(&s.id)[0].contains(&format!("Working directory: {}", wt.display())));
     assert!(
-        crate::git::git_test(&r, &["rev-parse", "--verify", "--quiet", &branch]) != Ok(true),
+        git_test(&r, &["rev-parse", "--verify", "--quiet", &branch]) != Ok(true),
         "no branch made either"
     );
     // the backend made it: where it is is applied, the same place (no change)
@@ -122,11 +121,16 @@ fn a_late_answer_for_an_older_session_changes_nothing() {
     assert_eq!(after.cwd.as_deref(), Some(new.cwd.as_str()));
     assert_ne!(after.branch.as_deref(), Some("steve/x"));
     // nor does a prepare failure of it raise a card
-    k.core.workspace_failed(&old.id, false, "boom").unwrap();
+    k.core
+        .workspace_failed(&old.id, crate::WorkspaceFailure::Other("boom"))
+        .unwrap();
     assert!(!k.open_kinds(&i.id).contains(&"fail".to_string()));
     // the current one's does, in the start's words
     k.core
-        .workspace_failed(&new.id, false, "git worktree: not a worktree")
+        .workspace_failed(
+            &new.id,
+            crate::WorkspaceFailure::Other("git worktree: not a worktree"),
+        )
         .unwrap();
     let cards = k.db().decisions_of_item(&i.id).unwrap();
     assert!(
@@ -157,7 +161,9 @@ fn below_the_floor_the_backends_refusal_reads_as_steves() {
     let i = create(&k, &p);
     let s = k.db().sessions_of_item(&i.id).unwrap().pop().unwrap();
     assert!(k.open_kinds(&i.id).is_empty());
-    k.core.workspace_failed(&s.id, true, "disk low").unwrap();
+    k.core
+        .workspace_failed(&s.id, crate::WorkspaceFailure::DiskLow)
+        .unwrap();
     let cards = k.db().decisions_of_item(&i.id).unwrap();
     assert!(
         cards.iter().any(|d| d.kind == "fail"
@@ -169,25 +175,11 @@ fn below_the_floor_the_backends_refusal_reads_as_steves() {
 }
 
 #[test]
-fn a_session_left_with_the_core_gets_its_worktree_from_the_core() {
-    let k = kit(false);
-    let (r, p) = project(&k);
-    let i = create(&k, &p);
-    let wt = k.core.config().worktrees.join(&i.id);
-    assert!(wt.join("a.txt").exists(), "made here, as without the Node");
-    assert_eq!(
-        g(&wt, &["rev-parse", "--abbrev-ref", "HEAD"]),
-        format!("steve/{}", i.id.to_lowercase())
-    );
-    let _ = r;
-}
-
-#[test]
 fn a_finished_items_worktree_goes_back_through_its_backend_preserving_unmerged_branches_and_reporting_failures()
  {
     let k = kit(true);
     let (r, p) = project(&k);
-    // done, its work merged: given back by the backend, the merged branch with it
+    // done, its work merged: dispatched to session backend with keep_branch=false
     let done = k.item("done", "收尾", Some(&p));
     let (branch, wt) = branch_with(&r, &k.core.config().worktrees, &done, "x.txt", "x\n");
     k.db()
@@ -280,86 +272,6 @@ fn a_busy_session_keeps_the_worktree_and_nothing_is_asked() {
 }
 
 #[test]
-fn a_removed_worktree_its_backend_makes_again_is_not_made_by_the_core() {
-    let k = kit(true);
-    let (r, p) = project(&k);
-    let id = k.item("run", "执行", Some(&p));
-    let (branch, wt) = branch_with(&r, &k.core.config().worktrees, &id, "x.txt", "x\n");
-    k.db()
-        .item_patch(
-            &id,
-            patch![cwd: wt.to_string_lossy().to_string(), branch: branch.as_str()],
-        )
-        .unwrap();
-    let s = k.session(&id, "idle");
-    g(&r, &["worktree", "remove", &wt.to_string_lossy()]);
-    // its session's backend makes it again when it opens: not here
-    k.rt.st().node_made.insert(s.clone());
-    k.core.tx().ensure_cwd(&id).unwrap();
-    assert!(!wt.exists());
-    // a session the core runs gets it back from the core, as before
-    k.rt.st().node_made.remove(&s);
-    k.core.tx().ensure_cwd(&id).unwrap();
-    assert!(wt.join("x.txt").exists());
-    let _ = fs::metadata(&wt);
-}
-
-#[test]
-fn a_session_bound_to_a_directory_it_only_opens_gets_its_worktree_before_it_is_bound() {
-    // an item first prepared by its backend as an existing directory keeps that plan: the
-    // backend opens it right away, so the core makes a worktree tidied since before it binds
-    let k = kit(true);
-    k.rt.st().binds_existing = true;
-    let (r, p) = project(&k);
-    let id = k.item("run", "执行", Some(&p));
-    let (branch, wt) = branch_with(&r, &k.core.config().worktrees, &id, "x.txt", "x\n");
-    k.db()
-        .item_patch(
-            &id,
-            patch![cwd: wt.to_string_lossy().to_string(), branch: branch.as_str()],
-        )
-        .unwrap();
-    g(&r, &["worktree", "remove", &wt.to_string_lossy()]);
-    k.core.tx().start_session(&id, Some("继续"), None).unwrap();
-    assert_eq!(k.rt.st().bound_with_dir, vec![true], "made before the bind");
-    assert!(wt.join("x.txt").exists());
-}
-
-#[test]
-fn a_worktree_the_core_could_not_make_is_not_left_named_and_a_retry_still_waits_for_disk() {
-    let k = Kit::with(|c| {
-        c.disk = DiskPolicy {
-            floor: u64::MAX,
-            low: u64::MAX,
-            idle_ms: i64::MAX,
-        }
-    });
-    {
-        let mut st = k.rt.st();
-        st.makes_worktrees = true;
-        st.binds_worktrees = false;
-    }
-    let (_, p) = project(&k);
-    let id = k.item("run", "定义", Some(&p));
-    let wt = k.core.config().worktrees.join(&id);
-    assert!(k.core.tx().start_session(&id, None, None).is_err());
-    let i = k.db().item(&id).unwrap().unwrap();
-    assert!(i.cwd.as_deref().is_none_or(str::is_empty), "{:?}", i.cwd);
-    assert!(i.branch.as_deref().is_none_or(str::is_empty));
-    assert!(
-        k.db()
-            .sessions_of_item(&id)
-            .unwrap()
-            .iter()
-            .all(|s| s.status == "ended")
-    );
-    // continuing it later is still a new worktree below the floor: refused, not made
-    k.core.tx().ensure_cwd(&id).unwrap();
-    assert!(k.core.tx().start_session(&id, None, None).is_err());
-    assert!(!wt.exists());
-}
-
-#[test]
 fn a_workspace_binding_conflict_retires_the_session_before_continue() {
     let k = kit(true);
     let (_, p) = project(&k);
@@ -387,25 +299,6 @@ fn a_workspace_binding_conflict_retires_the_session_before_continue() {
 }
 
 #[test]
-fn separate_installations_never_take_another_worktrees_branch() {
-    let k = kit(true);
-    let (repo, p) = project(&k);
-    let i = create(&k, &p);
-    let other = k.home().join("another-installation-worktree");
-    let old_branch = format!("steve/{}", i.id.to_lowercase());
-    node_makes(&repo, &other, &old_branch);
-    std::fs::write(other.join("uncommitted.txt"), "keep this work").unwrap();
-    let plan = k.core.tx().planned_worktree(&i).unwrap().unwrap();
-    assert_ne!(plan.1, old_branch);
-    assert_eq!(plan.1, k.core.tx().planned_worktree(&i).unwrap().unwrap().1);
-    assert_eq!(
-        std::fs::read_to_string(other.join("uncommitted.txt")).unwrap(),
-        "keep this work"
-    );
-    assert_eq!(g(&other, &["branch", "--show-current"]), old_branch);
-}
-
-#[test]
 fn a_worktree_in_a_unicode_directory_keeps_its_own_branch() {
     let k = kit(true);
     let (r, p) = project(&k);
@@ -413,7 +306,7 @@ fn a_worktree_in_a_unicode_directory_keeps_its_own_branch() {
     let target = k.home().join("workspaces with spaces/任务").join(&i.id);
     let branch = i.branch.clone().unwrap();
     node_makes(&r, &target, &branch);
-    assert_eq!(crate::worktrees::worktree_branch(&i, &r, &target), branch);
+    assert_eq!(crate::worktrees::worktree_branch(&i), branch);
 }
 
 fn attach_merged_worktree(
@@ -562,12 +455,16 @@ fn closed_item_removes_clean_worktree_and_preserves_and_marks_unmerged_branch() 
             .any(|t| t.contains("未合并分支") && t.contains(&branch) && t.contains(&sha)),
         "preserved unmerged branch must be noted on item: {tl:?}"
     );
-    // Reopening via a new cycle recreates the worktree from the preserved branch.
+    // Reopening via a new cycle keeps the preserved branch and worktree path for the Node to
+    // recreate when the session opens (core never spawns local git).
     let rev = k.db().item(&id).unwrap().unwrap().cas_revision;
     k.core
         .lifecycle_command(&id, "new_cycle", 1, rev, None, Some("继续"), None, "me")
         .unwrap();
-    assert!(wt.join("unmerged.txt").exists());
+    let reopened = k.db().item(&id).unwrap().unwrap();
+    assert_eq!(reopened.phase.as_str(), "active");
+    assert_eq!(reopened.branch.as_deref(), Some(branch.as_str()));
+    assert_eq!(reopened.cwd.as_deref(), Some(wt.to_string_lossy().as_ref()));
 }
 
 #[test]
@@ -576,7 +473,7 @@ fn worktree_cleanup_failure_is_displayed_on_item_and_not_swallowed() {
     let (r, p) = project(&k);
     let id = k.item("run", "执行", Some(&p));
     let (branch, wt) = branch_with(&r, &k.core.config().worktrees, &id, "dirty.txt", "a\n");
-    fs::write(wt.join("uncommitted.txt"), "keep me").unwrap();
+    std::fs::write(wt.join("uncommitted.txt"), "keep me").unwrap();
     k.db()
         .item_patch(
             &id,
@@ -623,7 +520,7 @@ fn backfill_closed_worktrees_cleans_leftovers_enqueues_busy_and_is_idempotent() 
     // 3. Closed + dirty leftover
     let dirty = k.item("done", "收尾", Some(&p));
     let (d_br, d_wt) = branch_with(&r, &k.core.config().worktrees, &dirty, "d.txt", "d\n");
-    fs::write(d_wt.join("scratch.tmp"), "uncommitted").unwrap();
+    std::fs::write(d_wt.join("scratch.tmp"), "uncommitted").unwrap();
     k.db()
         .item_patch(
             &dirty,

@@ -13,7 +13,7 @@ use steve_store::{Decision, NewDecision};
 
 use crate::api::GhError;
 use crate::effects::{self, Fail, Ran};
-use crate::push::{self, PushSpec};
+use crate::push;
 use crate::repos::Settings;
 use crate::sync::Effects;
 use crate::{GitHub, Inner};
@@ -193,7 +193,7 @@ impl GitHub {
             .project_id
             .clone()
             .ok_or("事项不属于项目".to_string())?;
-        let (r, path) = self
+        let (r, _path) = self
             .store()
             .read(|c| {
                 let r = steve_store::github::repo_of_project(c, &ws, &project)?;
@@ -204,29 +204,21 @@ impl GitHub {
         let r = r
             .filter(|r| r.enabled)
             .ok_or("项目没有关联可用的仓库".to_string())?;
-        let nodes = self.git_nodes();
-        let cwd = item.cwd.clone().filter(|c| !c.is_empty()).or(path);
+        let nodes = self.git_nodes().ok_or_else(|| {
+            push::PushError::NoNodeAvailable(steve_i18n::t!("github.push.no_git_nodes")).to_string()
+        })?;
         let conn = self.effect_conn(&ws, &r.connection_id)?;
         let sha = match e.result["sha"].as_str() {
             Some(s) => s.to_string(),
             None => {
-                let on_node = match &nodes {
-                    Some(n) => n.head_of(item_id, &branch).await,
-                    None => None,
-                };
-                let head = match on_node {
-                    Some(h) => h.map_err(|e| e.to_string())?,
-                    None => {
-                        let c = cwd.clone().ok_or("事项没有工作目录".to_string())?;
-                        let b = branch.clone();
-                        tokio::task::spawn_blocking(move || {
-                            push::head_of(std::path::Path::new(&c), &b)
-                        })
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .map_err(|e| e.to_string())?
-                    }
-                };
+                let head = nodes
+                    .head_of(item_id, &branch)
+                    .await
+                    .ok_or_else(|| {
+                        push::PushError::NoNodeAvailable(steve_i18n::t!("github.push.no_node_head"))
+                    })
+                    .and_then(|h| h)
+                    .map_err(|e| e.to_string())?;
                 self.effect_intent(&d.id, &json!({"sha": head, "branch": branch}))?;
                 head
             }
@@ -248,26 +240,22 @@ impl GitHub {
                     sha.clone(),
                 );
                 self.mark_pull_write(d, false)?;
-                let on_node = match &nodes {
-                    Some(n) => {
-                        if !push::branch_ok(&b) {
-                            return Err(push::PushError::BadBranch(b).to_string().into());
-                        }
-                        push::check_git_base(&git_base).map_err(|e| e.to_string())?;
-                        let url = format!("{}/{full}.git", git_base.trim_end_matches('/'));
-                        n.push(&push::NodePush {
-                            item: item_id,
-                            key: &d.id,
-                            branch: &b,
-                            full_name: &full,
-                            url: &url,
-                            token: token.expose(),
-                            expect: &want,
-                        })
-                        .await
-                    }
-                    None => None,
-                };
+                if !push::branch_ok(&b) {
+                    return Err(push::PushError::BadBranch(b).to_string().into());
+                }
+                push::check_git_base(&git_base).map_err(|e| e.to_string())?;
+                let url = format!("{}/{full}.git", git_base.trim_end_matches('/'));
+                let on_node = nodes
+                    .push(&push::NodePush {
+                        item: item_id,
+                        key: &d.id,
+                        branch: &b,
+                        full_name: &full,
+                        url: &url,
+                        token: token.expose(),
+                        expect: &want,
+                    })
+                    .await;
                 match on_node {
                     Some(Ok(_)) => {}
                     // whether it landed is what the branch on GitHub says now; never pushed again
@@ -280,21 +268,11 @@ impl GitHub {
                     }
                     Some(Err(e)) => return Err(e.to_string().into()),
                     None => {
-                        let cwd = cwd.ok_or("事项没有工作目录".to_string())?;
-                        // the approved commit, or nothing; pushing it again is harmless
-                        tokio::task::spawn_blocking(move || {
-                            push::push(&PushSpec {
-                                cwd: std::path::Path::new(&cwd),
-                                branch: &b,
-                                full_name: &full,
-                                git_base: &git_base,
-                                token: token.expose(),
-                                expect: Some(&want),
-                            })
-                        })
-                        .await
-                        .map_err(|e| e.to_string())?
-                        .map_err(|e| e.to_string())?;
+                        return Err(push::PushError::NoNodeAvailable(steve_i18n::t!(
+                            "github.push.no_node_push"
+                        ))
+                        .to_string()
+                        .into());
                     }
                 }
                 let (title, body) = title_body(d);

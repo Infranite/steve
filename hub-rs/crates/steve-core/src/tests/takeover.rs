@@ -327,15 +327,15 @@ fn commit(dir: &Path, file: &str, text: &str) {
 #[test]
 fn a_rebase_or_a_reset_onto_the_merged_copy_is_the_same_result_a_new_file_is_not() {
     let k = Kit::new();
+    let ng = k.wire_node_git();
     let r = repo(k.home());
     let (_, wt) = branch_with(&r, &k.home().join("wt"), "ST-9", "x.txt", "x\n");
-    let cwd = wt.to_string_lossy().to_string();
-    let frozen = cycle::fingerprint(Some(&cwd)).unwrap();
+    let frozen = ng.fingerprint_dir(&wt).unwrap();
     assert_eq!(frozen.split(':').count(), 4, "{frozen}");
     // main moves on; the branch is rebased onto it: other content, the same own change
     commit(&r, "m.txt", "m\n");
     g(&wt, &["rebase", "-q", "main"]);
-    let rebased = cycle::fingerprint(Some(&cwd)).unwrap();
+    let rebased = ng.fingerprint_dir(&wt).unwrap();
     assert_ne!(
         upstream::parse(&frozen).tree,
         upstream::parse(&rebased).tree
@@ -347,7 +347,7 @@ fn a_rebase_or_a_reset_onto_the_merged_copy_is_the_same_result_a_new_file_is_not
     let merged = g(&r, &["rev-parse", "main"]);
     assert_ne!(merged, tip);
     g(&wt, &["reset", "-q", "--hard", &merged]);
-    let reset = cycle::fingerprint(Some(&cwd)).unwrap();
+    let reset = ng.fingerprint_dir(&wt).unwrap();
     assert_ne!(
         cycle::fingerprint_head(&reset),
         cycle::fingerprint_head(&rebased)
@@ -355,7 +355,7 @@ fn a_rebase_or_a_reset_onto_the_merged_copy_is_the_same_result_a_new_file_is_not
     assert!(cycle::same_result(&rebased, &reset));
     // one more file after the freeze is a new result, and says which file
     commit(&wt, "notes.md", "n\n");
-    let more = cycle::fingerprint(Some(&cwd)).unwrap();
+    let more = ng.fingerprint_dir(&wt).unwrap();
     assert!(!cycle::same_result(&reset, &more));
     assert_eq!(
         upstream::describe_change(&wt, &reset, &more),

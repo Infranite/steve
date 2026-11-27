@@ -1,0 +1,19 @@
+{
+  "node": "node_compat_1",
+  "checking": false,
+  "harnesses": [
+    {
+      "harness": "claude-code",
+      "name": "Claude Code",
+      "components": [
+        {
+          "id": "cli",
+          "name": "CLI",
+          "managed": true,
+          "state": "current"
+        }
+      ],
+      "can_upgrade": false
+    }
+  ]
+}

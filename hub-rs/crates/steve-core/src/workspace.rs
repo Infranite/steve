@@ -1,46 +1,33 @@
-//! Task workspaces: how much disk the items' worktrees take, giving space back, and the floor below
-//! which no new worktree is made.
+//! Task workspaces: disk policy, report models, and Node-delegated housekeeping.
 //!
-//! A worktree is the item's sources (small; the git objects are shared with the project) plus rebuildable
-//! caches — Rust `target/`, `node_modules`, the toolchains' outputs in `.steve/build` — which are almost all
-//! of its size (measured on Steve's own repo: 16 MB of sources next to up to 30 GB of `target/`). So:
-//! - a closed item gives its caches back at once, and its worktree once that loses nothing: clean, and its
-//!   work landed in main or the item is archived (the branch always stays; [`crate::git::tidy_worktree`]);
-//! - when free space falls below [`DiskPolicy::low`], idle items' caches go too (no session busy, no process
-//!   inside, untouched for [`DiskPolicy::idle_ms`]), oldest first, until there is enough again;
-//! - below [`DiskPolicy::floor`] no new worktree is made ([`Core::disk_floor`]);
-//! - an item without a project works in a scratch directory (`STEVE_HOME/scratch/<id>`), which has no git
-//!   to ask what is rebuildable: once the item ended, and only under pressure, its directories with a known
-//!   cache name or a `CACHEDIR.TAG` and its toolchains' outputs go ([`scratch_cache_dirs`]); everything else
-//!   in it stays.
-//!
-//! Nothing is touched while a session of the item is busy or a process runs inside the worktree. Deleting
-//! tens of GB takes a while, so it never happens under the core's lock: caches are renamed into
-//! `worktrees/.trash` (atomic, same volume) under the lock and deleted outside it. A crash leaves them in the
-//! trash and the next pass deletes them, so a pass can be interrupted anywhere and the next one finishes it.
+//! All filesystem scanning, process inspection (`lsof` / `/proc`), `.trash` staging/purging,
+//! and git worktree pruning/tidying run on the colocated Node via [`NodeHousekeeping`]
+//! (`steve-node/src/housekeeping.rs`). Core owns only item state, policy thresholds, and
+//! recording timeline/notification outcomes.
 
+use std::collections::HashMap;
 use std::fs;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::Path;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
+use async_trait::async_trait;
 use serde::Serialize;
+use steve_node_api::{
+    ApiResult, DiskInspectRequest, DiskInspectResponse, DiskReclaimRequest, DiskReclaimResponse,
+    ReclaimCacheTarget, ReclaimClosedTarget,
+};
 pub use steve_toolchains::ITEM_BUILD_DIR;
 
-use crate::error::Result;
-use crate::git;
+use crate::error::{CoreError, Result};
 use crate::util::now;
 use crate::{Core, Tx};
 
 pub const GB: u64 = 1 << 30;
-/// How often the watcher looks at the disk and gives back what it can.
+/// How often the watcher asks the Node to reclaim disk space.
 const CHECK_EVERY: Duration = Duration::from_secs(600);
-/// Where removed caches wait to be deleted, inside the worktrees directory (same volume: a rename).
-const TRASH: &str = ".trash";
-/// Dependency and tool caches by name: the toolchains' disposable directories (`steve-toolchains`,
-/// data, not a list kept here). Anything else counts as a cache only with a `CACHEDIR.TAG` (Cargo
-/// writes one into every `target/`).
+
 fn cache_names() -> &'static [String] {
     static NAMES: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
     NAMES.get_or_init(|| {
@@ -53,9 +40,7 @@ fn cache_names() -> &'static [String] {
 }
 
 /// Whether one real directory contains only regenerable toolchain/cache data.
-/// Both reclamation and backup traversal use this predicate; traversal depth is the caller's choice.
-/// Reclamation supplies its workspace root: only that root's build namespace is disposable.
-/// Backups pass `None` to recognize build namespaces at any depth.
+/// Used by Hub backup traversal on Hub-owned staging/backup directories.
 pub fn is_disposable_dir(dir: &Path, workspace_root: Option<&Path>) -> bool {
     fs::symlink_metadata(dir).is_ok_and(|m| m.is_dir())
         && (dir.parent().is_some_and(|p| match workspace_root {
@@ -67,10 +52,12 @@ pub fn is_disposable_dir(dir: &Path, workspace_root: Option<&Path>) -> bool {
             || dir.join("CACHEDIR.TAG").is_file())
 }
 
-/// How deep caches are looked for (`hub-rs/target`, `web/node_modules`).
-const CACHE_DEPTH: usize = 4;
-/// How long listing the processes may take before Steve treats them as unknown.
-const PS_DEADLINE: Duration = Duration::from_secs(10);
+/// Node-delegated workspace disk inspection and reclamation port.
+#[async_trait]
+pub trait NodeHousekeeping: Send + Sync {
+    async fn disk_inspect(&self, req: DiskInspectRequest) -> ApiResult<DiskInspectResponse>;
+    async fn disk_reclaim(&self, req: DiskReclaimRequest) -> ApiResult<DiskReclaimResponse>;
+}
 
 /// The disk thresholds, for the volume the worktrees are on (`STEVE_DISK_FLOOR_GB`, `STEVE_DISK_LOW_GB`,
 /// `STEVE_WORKTREE_IDLE_HOURS`).
@@ -85,11 +72,9 @@ pub struct DiskPolicy {
 }
 
 impl Default for DiskPolicy {
-    /// One cold test build of Steve writes 12–16 GB, a JS project's `node_modules` under 1 GB: below the
-    /// floor even a small project risks filling the disk mid-build; `low` leaves room for a few Rust builds.
     fn default() -> Self {
         DiskPolicy {
-            floor: 10 * GB,
+            floor: steve_node_api::DEFAULT_DISK_FLOOR_BYTES,
             low: 40 * GB,
             idle_ms: 24 * 3_600_000,
         }
@@ -166,18 +151,6 @@ pub enum Pressure {
     Floor,
 }
 
-/// `(free, total)` bytes of the volume `path` is on, as an unprivileged user may use it.
-pub fn space(path: &Path) -> Option<(u64, u64)> {
-    use std::os::unix::ffi::OsStrExt;
-    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
-    let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statvfs(c.as_ptr(), &mut s) } != 0 {
-        return None;
-    }
-    let unit = s.f_frsize as u64;
-    Some((s.f_bavail as u64 * unit, s.f_blocks as u64 * unit))
-}
-
 /// "12.3 GB" (binary units, as `df -h` and Finder's "GB" on the same disk round them alike enough).
 pub fn human(bytes: u64) -> String {
     let g = bytes as f64 / GB as f64;
@@ -190,181 +163,6 @@ pub fn human(bytes: u64) -> String {
     }
 }
 
-/// The rebuildable caches in worktree `wt`: directories that git ignores and tracks nothing in, and that are
-/// a known dependency or tool cache or marked as a cache (`CACHEDIR.TAG`). Neither `.git` nor the caches
-/// themselves are looked into; symlinks are not followed.
-pub fn cache_dirs(wt: &Path) -> Vec<PathBuf> {
-    let mut found = marked_caches(wt);
-    found.retain(|p| rebuildable(wt, p));
-    found
-}
-
-/// The caches in an ended item's scratch directory `dir`: only directories with a known cache name or a
-/// `CACHEDIR.TAG`, and its toolchains' outputs (there is no git to ask what else is rebuildable).
-/// Symlinks are not followed.
-pub fn scratch_cache_dirs(dir: &Path) -> Vec<PathBuf> {
-    marked_caches(dir)
-}
-
-/// Directories under `wt` (to [`CACHE_DEPTH`]) with a known cache name or a `CACHEDIR.TAG`, and each
-/// toolchain's own output directory in [`ITEM_BUILD_DIR`] (a moved `target`, say, has neither),
-/// sorted; neither `.git` nor the caches themselves are looked into.
-fn marked_caches(wt: &Path) -> Vec<PathBuf> {
-    let mut found = vec![];
-    let mut todo = vec![(wt.to_path_buf(), 0)];
-    while let Some((dir, depth)) = todo.pop() {
-        let Ok(rd) = fs::read_dir(&dir) else {
-            continue;
-        };
-        for e in rd.flatten() {
-            if !e.file_type().is_ok_and(|t| t.is_dir()) || e.file_name() == ".git" {
-                continue;
-            }
-            let p = e.path();
-            if is_disposable_dir(&p, Some(wt)) {
-                found.push(p);
-            } else if depth + 1 < CACHE_DEPTH {
-                todo.push((p, depth + 1));
-            }
-        }
-    }
-    found.sort();
-    found
-}
-
-/// Ignored by git and nothing in it tracked: deleting it loses nothing a commit holds.
-fn rebuildable(wt: &Path, dir: &Path) -> bool {
-    let Ok(rel) = dir.strip_prefix(wt) else {
-        return false;
-    };
-    let rel = rel.to_string_lossy();
-    git::git_test(wt, &["check-ignore", "-q", &format!("{rel}/")]).unwrap_or(false)
-        && git::git(wt, &["ls-files", "--", &rel]).is_ok_and(|o| o.is_empty())
-}
-
-/// What `dir` takes on disk: its allocated blocks. A file sharing blocks with another (an APFS clone, a hard
-/// link) counts in full, so this can overstate what deleting it frees.
-pub fn dir_bytes(dir: &Path) -> u64 {
-    use std::os::unix::fs::MetadataExt;
-    let mut sum = fs::symlink_metadata(dir).map_or(0, |m| m.blocks() * 512);
-    let mut todo = vec![dir.to_path_buf()];
-    while let Some(d) = todo.pop() {
-        let Ok(rd) = fs::read_dir(&d) else {
-            continue;
-        };
-        for e in rd.flatten() {
-            /* `DirEntry::metadata` does not follow symlinks */
-            let Ok(m) = e.metadata() else {
-                continue;
-            };
-            sum += m.blocks() * 512;
-            if m.is_dir() {
-                todo.push(e.path());
-            }
-        }
-    }
-    sum
-}
-
-/// The working directories of this user's running processes; `None` when they can't be listed.
-pub fn process_dirs() -> Option<Vec<PathBuf>> {
-    #[cfg(target_os = "linux")]
-    {
-        let mut out = vec![];
-        for e in fs::read_dir("/proc").ok()?.flatten() {
-            if e.file_name()
-                .to_string_lossy()
-                .bytes()
-                .all(|b| b.is_ascii_digit())
-                && let Ok(p) = fs::read_link(e.path().join("cwd"))
-            {
-                out.push(p);
-            }
-        }
-        Some(out)
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        /* `lsof -d cwd` lists every process's working directory in one call (about a second) */
-        let mut child = Command::new("lsof")
-            .args(["-nP", "-w", "-d", "cwd", "-Fn"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let mut stdout = child.stdout.take()?;
-        let reader = std::thread::spawn(move || {
-            let mut s = String::new();
-            std::io::Read::read_to_string(&mut stdout, &mut s).map(|_| s)
-        });
-        let start = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if start.elapsed() < PS_DEADLINE => {
-                    std::thread::sleep(Duration::from_millis(50))
-                }
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-            }
-        }
-        let text = reader.join().ok()?.ok()?;
-        let dirs: Vec<PathBuf> = text
-            .lines()
-            .filter_map(|l| l.strip_prefix('n'))
-            .map(PathBuf::from)
-            .collect();
-        /* lsof exits 1 when some process could not be read; an empty list means it saw nothing */
-        (!dirs.is_empty()).then_some(dirs)
-    }
-}
-
-/// Whether a process runs inside `dir`. The process list holds resolved paths (`/private/tmp`, not `/tmp`),
-/// so `dir` is resolved too.
-pub fn in_use(dir: &Path, procs: &[PathBuf]) -> bool {
-    let dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
-    procs.iter().any(|p| p.starts_with(&dir))
-}
-
-pub fn trash_dir(worktrees: &Path) -> PathBuf {
-    worktrees.join(TRASH)
-}
-
-/// Moves `dirs` (caches inside worktree `wt` of `item`) into one trash folder `<item>@<ms>`. A cache that
-/// can't be moved (another volume, gone meanwhile) stays where it is. Returns the paths moved, relative to
-/// `wt`.
-pub(crate) fn to_trash(trash: &Path, item: &str, wt: &Path, dirs: &[PathBuf]) -> Vec<String> {
-    if dirs.is_empty() {
-        return vec![];
-    }
-    let folder = trash.join(format!("{item}@{}", now()));
-    if let Err(e) = fs::create_dir_all(&folder) {
-        tracing::warn!("trash {}: {e}", folder.display());
-        return vec![];
-    }
-    let mut moved = vec![];
-    for (n, d) in dirs.iter().enumerate() {
-        let rel = d
-            .strip_prefix(wt)
-            .unwrap_or(d)
-            .to_string_lossy()
-            .to_string();
-        let to = folder.join(format!("{n}-{}", rel.replace('/', "__")));
-        match fs::rename(d, &to) {
-            Ok(()) => moved.push(rel),
-            Err(e) => tracing::warn!("move {} to trash: {e}", d.display()),
-        }
-    }
-    if moved.is_empty() {
-        let _ = fs::remove_dir(&folder);
-    }
-    moved
-}
-
 /// What one trash folder held once deleted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Freed {
@@ -372,75 +170,6 @@ pub struct Freed {
     /// The caches, relative to the worktree (`hub-rs/target`).
     pub caches: Vec<String>,
     pub bytes: u64,
-}
-
-/// Deletes everything in the trash, folder by folder; a folder that can't be deleted entirely stays for the
-/// next pass.
-pub fn purge(trash: &Path) -> Vec<Freed> {
-    let mut out: Vec<Freed> = vec![];
-    let mut failed: Vec<PathBuf> = vec![];
-    /* folders moved in while this runs are taken too */
-    loop {
-        let Ok(rd) = fs::read_dir(trash) else {
-            break;
-        };
-        let next: Vec<PathBuf> = rd
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| !failed.contains(p))
-            .collect();
-        if next.is_empty() {
-            break;
-        }
-        for folder in next {
-            let name = folder
-                .file_name()
-                .map(|n| n.to_string_lossy().to_string())
-                .unwrap_or_default();
-            let item = name
-                .split_once('@')
-                .map_or(name.as_str(), |(i, _)| i)
-                .to_string();
-            let caches = fs::read_dir(&folder)
-                .map(|rd| {
-                    let mut c: Vec<String> = rd
-                        .flatten()
-                        .map(|e| {
-                            let n = e.file_name().to_string_lossy().to_string();
-                            n.split_once('-')
-                                .map_or(n.clone(), |(_, r)| r.to_string())
-                                .replace("__", "/")
-                        })
-                        .collect();
-                    c.sort();
-                    c
-                })
-                .unwrap_or_default();
-            let bytes = dir_bytes(&folder);
-            let gone = if folder.is_dir() {
-                fs::remove_dir_all(&folder)
-            } else {
-                fs::remove_file(&folder)
-            };
-            if let Err(e) = gone {
-                tracing::warn!("purge {}: {e}", folder.display());
-                failed.push(folder);
-                continue;
-            }
-            match out.iter_mut().find(|f| f.item == item) {
-                Some(f) => {
-                    f.bytes += bytes;
-                    f.caches.extend(caches);
-                }
-                None => out.push(Freed {
-                    item,
-                    caches,
-                    bytes,
-                }),
-            }
-        }
-    }
-    out
 }
 
 /// One pass of [`Core::reclaim_workspaces`].
@@ -514,28 +243,37 @@ pub struct DiskReport {
     pub measured_at: i64,
 }
 
-/// An item with a worktree under Steve's worktrees folder, as the pass sees it under the lock.
-struct Candidate {
-    item: String,
-    wt: PathBuf,
-    finished: bool,
-    updated: i64,
-    /// The project's repository and the item's branch, when it has both.
-    repo: Option<(PathBuf, String)>,
+fn localize_kept_reason(code: &str) -> String {
+    match code {
+        "in_use" => "有进程还在工作区里运行".into(),
+        "dirty" => "有未提交的改动，保留工作区".into(),
+        "unmerged" => "分支还没合入主线，归档后回收工作区（分支保留）".into(),
+        "remove_failed" => "工作区未能删除，下次再试".into(),
+        "unknown_state" => "看不出工作区的状态，保留".into(),
+        other => other.to_string(),
+    }
 }
 
 impl Core {
-    /// The floor check before a new worktree is made: below [`DiskPolicy::floor`] it is refused, and a pass
-    /// starts giving space back.
-    pub(crate) fn disk_floor(&self) -> Result<()> {
-        let pol = self.config().disk;
-        let Some((free, _)) = space(&self.config().worktrees) else {
-            return Ok(());
-        };
-        if free >= pol.floor {
-            return Ok(());
+    /// Wires the colocated Node's workspace housekeeping port (once).
+    pub fn set_housekeeping(&self, h: Arc<dyn NodeHousekeeping>) {
+        let _ = self.0.housekeeping.set(h);
+    }
+
+    pub(crate) fn node_housekeeping(&self) -> Option<Arc<dyn NodeHousekeeping>> {
+        self.0.housekeeping.get().cloned()
+    }
+
+    fn record_free(&self, free: Option<u64>) {
+        if let Some(f) = free {
+            self.0.last_free_bytes.store(f, Ordering::Relaxed);
         }
-        Err(crate::error::msg(self.disk_low(free)))
+    }
+
+    /// Last observed free bytes on the worktrees volume, if known.
+    pub(crate) fn worktrees_free(&self) -> Option<u64> {
+        let v = self.0.last_free_bytes.load(Ordering::Relaxed);
+        (v != u64::MAX).then_some(v)
     }
 
     /// Why no new worktree is made with `free` bytes left (below the floor), and a pass starts
@@ -544,7 +282,7 @@ impl Core {
         let c = self.clone();
         crate::detach(move || {
             if let Err(e) = c.reclaim_workspaces() {
-                tracing::error!("reclaim {e}");
+                tracing::debug!("reclaim {e}");
             }
         });
         steve_i18n::t!(
@@ -554,30 +292,92 @@ impl Core {
         )
     }
 
-    /// The free bytes where worktrees go, if they can be told.
-    pub(crate) fn worktrees_free(&self) -> Option<u64> {
-        space(&self.config().worktrees).map(|s| s.0)
+    /// Inspect a batch of worktree paths (and optional branch states) on the colocated Node.
+    pub(crate) fn inspect_worktrees(
+        &self,
+        entries: Vec<steve_node_api::DiskInspectTarget>,
+    ) -> Result<DiskInspectResponse> {
+        let Some(port) = self.node_housekeeping() else {
+            return Err(CoreError::NoNodeAvailable(steve_i18n::t!(
+                "core.workspace.node_unconnected_inspect"
+            )));
+        };
+        let req = DiskInspectRequest {
+            worktrees_root: self.config().worktrees.to_string_lossy().into_owned(),
+            entries,
+            scratch: vec![],
+        };
+        crate::node_git::block_on(port.disk_inspect(req))
+            .ok_or_else(|| CoreError::Msg("workspace disk inspect runtime unavailable".into()))?
+            .map_err(|e| {
+                if e.code == steve_node_api::Code::Unavailable {
+                    CoreError::NoNodeAvailable(steve_i18n::t!(
+                        "core.workspace.node_offline",
+                        detail = e.safe_detail.as_str()
+                    ))
+                } else {
+                    CoreError::Msg(e.safe_detail)
+                }
+            })
     }
 
-    /// Deletes what is in the trash on a thread of its own, unless a pass is already running (it takes
-    /// what comes in meanwhile).
-    pub(crate) fn purge_soon(&self) {
-        let c = self.clone();
-        crate::detach(move || {
-            if c.0.reclaiming.swap(true, Ordering::SeqCst) {
-                return;
-            }
-            let freed = purge(&trash_dir(&c.config().worktrees));
-            c.0.reclaiming.store(false, Ordering::SeqCst);
-            if let Err(e) = c.tx().note_freed(&freed) {
-                tracing::error!("reclaim note {e}");
-            }
-        });
+    /// Ask the colocated Node whether `branch` in `repo` is merged into its default base and what
+    /// its short head SHA is (`None` head means the branch no longer exists).
+    pub(crate) fn inspect_branch(
+        &self,
+        repo: &str,
+        branch: &str,
+    ) -> Option<(bool, Option<String>)> {
+        if repo.is_empty() || branch.is_empty() {
+            return None;
+        }
+        let resp = self
+            .inspect_worktrees(vec![steve_node_api::DiskInspectTarget {
+                item: String::new(),
+                path: String::new(),
+                repo: repo.to_string(),
+                branch: branch.to_string(),
+            }])
+            .ok()?;
+        let m = resp.entries.into_iter().next()?;
+        m.branch_merged.map(|merged| (merged, m.branch_head))
     }
 
-    /// One pass: deletes what an earlier pass left in the trash, gives back closed items' caches and their
-    /// worktrees where that is safe, and under pressure idle items' caches, oldest first, until free space is
-    /// above [`DiskPolicy::low`]. One pass at a time; a second caller gets `skipped`.
+    /// Deterministically reclaim a single closed item's worktree and branch on the colocated Node.
+    pub(crate) fn reclaim_single_closed(
+        &self,
+        target: ReclaimClosedTarget,
+    ) -> Result<DiskReclaimResponse> {
+        let Some(port) = self.node_housekeeping() else {
+            return Err(CoreError::NoNodeAvailable(steve_i18n::t!(
+                "core.workspace.node_unconnected_clean"
+            )));
+        };
+        let req = DiskReclaimRequest {
+            worktrees_root: self.config().worktrees.to_string_lossy().into_owned(),
+            git_projects: vec![],
+            closed_worktrees: vec![target],
+            idle_worktrees: vec![],
+            ended_scratch: vec![],
+            low_bytes: u64::MAX,
+        };
+        crate::node_git::block_on(port.disk_reclaim(req))
+            .ok_or_else(|| CoreError::Msg("workspace reclaim runtime unavailable".into()))?
+            .map_err(|e| {
+                if e.code == steve_node_api::Code::Unavailable {
+                    CoreError::NoNodeAvailable(steve_i18n::t!(
+                        "core.workspace.node_offline",
+                        detail = e.safe_detail.as_str()
+                    ))
+                } else {
+                    CoreError::Msg(e.safe_detail)
+                }
+            })
+    }
+
+    /// One pass on the colocated Node: deletes trash, reclaims closed worktrees/caches, and under
+    /// pressure sheds idle worktree and ended scratch caches until free space exceeds `DiskPolicy::low`.
+    /// One pass at a time; a second caller gets `skipped`.
     pub fn reclaim_workspaces(&self) -> Result<Reclaimed> {
         if self.0.reclaiming.swap(true, Ordering::SeqCst) {
             return Ok(Reclaimed {
@@ -587,174 +387,169 @@ impl Core {
         }
         let r = self.reclaim_pass();
         self.0.reclaiming.store(false, Ordering::SeqCst);
-        let r = r?;
-        self.tx().note_freed(&r.freed)?;
-        Ok(r)
+        let (reclaimed, resp) = r?;
+        self.record_free(reclaimed.free_after.or(reclaimed.free_before));
+        let t = self.tx();
+        t.note_freed(&resp.freed)?;
+        t.note_reclaim_outcomes(&resp)?;
+        Ok(reclaimed)
     }
 
-    fn reclaim_pass(&self) -> Result<Reclaimed> {
-        let root = self.config().worktrees.clone();
-        let trash = trash_dir(&root);
-        let pol = self.config().disk;
-        let free = || space(&root).map(|s| s.0);
-        let mut r = Reclaimed {
-            free_before: free(),
-            ..Default::default()
+    fn reclaim_pass(&self) -> Result<(Reclaimed, DiskReclaimResponse)> {
+        let Some(port) = self.node_housekeeping() else {
+            return Err(CoreError::NoNodeAvailable(steve_i18n::t!(
+                "core.workspace.node_unconnected_reclaim"
+            )));
         };
-        r.freed = purge(&trash);
-        let procs = process_dirs();
-        let (candidates, git_projects) = {
-            let t = self.tx();
-            (t.workspace_candidates()?, t.git_worktree_projects()?)
-        };
-        for path in git_projects {
-            if path.is_dir()
-                && let Err(e) = git::git(&path, &["worktree", "prune"])
+        let (mut req, mut extra_kept, backend_candidates) = self.tx().build_reclaim_request()?;
+        // Dispatch Node-managed closed worktrees through the Node workspace ledger (`tidy_workspace`)
+        // while keeping branch inspection off the Core lock; anything the backend does not own falls
+        // through to `disk_reclaim`.
+        for (item, project, branch, cwd) in backend_candidates {
+            let keep_branch = branch.as_deref().is_none_or(|b| {
+                !self
+                    .inspect_branch(&project.path, b)
+                    .is_some_and(|(merged, _)| merged)
+            });
+            match self
+                .tx()
+                .tidy_by_backend_with_branch(&item, branch.as_deref(), &cwd, keep_branch)
             {
-                tracing::warn!("worktree prune {}: {e}", path.display());
-            }
-        }
-
-        /* closed items: release any idle harness first, then reclaim caches and clean worktrees */
-        for c in candidates.iter().filter(|c| c.finished) {
-            let releasing = {
-                let t = self.tx();
-                let mut pending = false;
-                for s in t.db().sessions_of_item(&c.item)? {
-                    if t.busy(&s.id) || t.rt().release(&s.id)? != crate::Released::Gone {
-                        pending = true;
-                    }
+                Ok(true) => continue,
+                Ok(false) => {
+                    req.closed_worktrees.push(ReclaimClosedTarget {
+                        item: item.id,
+                        path: cwd,
+                        repo: project.path,
+                        branch: branch.unwrap_or_default(),
+                        keep_unmerged: false,
+                    });
                 }
-                pending
-            };
-            if releasing {
-                r.kept.push(Kept {
-                    item: c.item.clone(),
-                    reason: "会话正在释放，稍后清理工作区".into(),
-                });
-                continue;
-            }
-            if procs.as_deref().is_some_and(|p| in_use(&c.wt, p)) {
-                r.kept.push(Kept {
-                    item: c.item.clone(),
-                    reason: "有进程还在工作区里运行".into(),
-                });
-                continue;
-            }
-            /* the slow part of the tidy's decision, outside the lock (it is remembered) */
-            if let Some((repo, branch)) = &c.repo {
-                git::landed(repo, branch, git::default_base(repo));
-            }
-            let mut t = self.tx();
-            t.tidy_branch_now(&c.item)?;
-            if Path::new(&c.wt).exists() {
-                r.kept.push(Kept {
-                    item: c.item.clone(),
-                    reason: t.why_kept(&c.wt),
-                });
-            } else {
-                r.removed.push(c.item.clone());
-            }
-        }
-        r.freed.extend(purge(&trash));
-
-        /* under pressure: idle open items' caches, oldest first, until there is enough again; then the
-         * scratch directories of ended items without a project, oldest first */
-        let at = now();
-        let mut idle: Vec<&Candidate> = candidates
-            .iter()
-            .filter(|c| !c.finished && at - c.updated >= pol.idle_ms)
-            .collect();
-        idle.sort_by_key(|c| c.updated);
-        for c in idle {
-            if free().is_none_or(|f| pol.pressure(f) == Pressure::Ok) {
-                break;
-            }
-            /* without the process list, an open item's worktree is never touched */
-            if procs.as_deref().is_none_or(|p| in_use(&c.wt, p)) {
-                continue;
-            }
-            if self.tx().shed_caches(&c.item, &c.wt)? {
-                r.freed.extend(purge(&trash));
-            }
-        }
-        if free().is_some_and(|f| pol.pressure(f) != Pressure::Ok) {
-            let mut ended = self.tx().scratch_candidates()?;
-            ended.sort_by_key(|c| c.updated);
-            for c in ended {
-                if free().is_none_or(|f| pol.pressure(f) == Pressure::Ok) {
-                    break;
-                }
-                if procs.as_deref().is_none_or(|p| in_use(&c.wt, p)) {
-                    continue;
-                }
-                if self.tx().shed_scratch_caches(&c.item, &c.wt)? {
-                    r.freed.extend(purge(&trash));
+                Err(e) => {
+                    tracing::warn!(
+                        item = %item.id,
+                        error = %e,
+                        "reclaim skipped closed item whose node tidy dispatch failed"
+                    );
                 }
             }
         }
-        r.free_after = free();
-        Ok(r)
+        let resp = crate::node_git::block_on(port.disk_reclaim(req))
+            .ok_or_else(|| CoreError::Msg("workspace reclaim runtime unavailable".into()))?
+            .map_err(|e| {
+                if e.code == steve_node_api::Code::Unavailable {
+                    CoreError::NoNodeAvailable(steve_i18n::t!(
+                        "core.workspace.node_offline",
+                        detail = e.safe_detail.as_str()
+                    ))
+                } else {
+                    CoreError::Msg(e.safe_detail)
+                }
+            })?;
+        extra_kept.extend(resp.kept.iter().map(|k| Kept {
+            item: k.item.clone(),
+            reason: localize_kept_reason(&k.reason),
+        }));
+        let reclaimed = Reclaimed {
+            skipped: false,
+            free_before: resp.free_before,
+            free_after: resp.free_after,
+            freed: resp
+                .freed
+                .iter()
+                .map(|f| Freed {
+                    item: f.item.clone(),
+                    caches: f.caches.clone(),
+                    bytes: f.bytes,
+                })
+                .collect(),
+            removed: resp.removed.clone(),
+            kept: extra_kept,
+        };
+        Ok((reclaimed, resp))
     }
 
-    /// Every worktree of an item, its size, caches and state, and what is in the folder besides. Walks the
-    /// worktrees (seconds for a hundred GB); never under the lock.
+    /// Every worktree of an item, its size, caches and state, and what is in the folder besides,
+    /// inspected by the colocated Node.
     pub fn disk_report(&self) -> Result<DiskReport> {
-        let root = self.config().worktrees.clone();
+        let Some(port) = self.node_housekeeping() else {
+            return Err(CoreError::NoNodeAvailable(steve_i18n::t!(
+                "core.workspace.node_unconnected_disk"
+            )));
+        };
+        let root = self.config().worktrees.to_string_lossy().into_owned();
         let (mut entries, mut scratch) = {
             let t = self.tx();
             (t.workspace_entries()?, t.scratch_entries()?)
         };
-        let procs = process_dirs();
-        for (e, in_scratch) in entries
-            .iter_mut()
-            .map(|e| (e, false))
-            .chain(scratch.iter_mut().map(|e| (e, true)))
-            .filter(|(e, _)| e.exists)
-        {
-            let wt = Path::new(&e.path);
-            let caches = if in_scratch {
-                scratch_cache_dirs(wt)
-            } else {
-                cache_dirs(wt)
-            };
-            e.cache_bytes = caches.iter().map(|c| dir_bytes(c)).sum();
-            e.caches = caches
+        let req = DiskInspectRequest {
+            worktrees_root: root.clone(),
+            entries: entries
                 .iter()
-                .filter_map(|c| c.strip_prefix(wt).ok())
-                .map(|c| c.to_string_lossy().to_string())
-                .collect();
-            e.bytes = dir_bytes(wt);
-            e.in_use = procs.as_deref().map(|p| in_use(wt, p));
-        }
-        let known: Vec<PathBuf> = entries.iter().map(|e| PathBuf::from(&e.path)).collect();
-        let mut orphans = vec![];
-        if let Ok(rd) = fs::read_dir(&root) {
-            for d in rd.flatten() {
-                let p = d.path();
-                if d.file_name() == TRASH || !p.is_dir() || known.contains(&p) {
-                    continue;
+                .map(|e| steve_node_api::DiskInspectTarget {
+                    item: e.item.clone(),
+                    path: e.path.clone(),
+                    repo: String::new(),
+                    branch: String::new(),
+                })
+                .collect(),
+            scratch: scratch
+                .iter()
+                .map(|e| steve_node_api::DiskInspectTarget {
+                    item: e.item.clone(),
+                    path: e.path.clone(),
+                    repo: String::new(),
+                    branch: String::new(),
+                })
+                .collect(),
+        };
+        let resp = crate::node_git::block_on(port.disk_inspect(req))
+            .ok_or_else(|| CoreError::Msg("workspace disk inspect runtime unavailable".into()))?
+            .map_err(|e| {
+                if e.code == steve_node_api::Code::Unavailable {
+                    CoreError::NoNodeAvailable(steve_i18n::t!(
+                        "core.workspace.node_offline",
+                        detail = e.safe_detail.as_str()
+                    ))
+                } else {
+                    CoreError::Msg(e.safe_detail)
                 }
-                orphans.push(Orphan {
-                    path: p.to_string_lossy().into(),
-                    bytes: dir_bytes(&p),
-                });
+            })?;
+        self.record_free(resp.free);
+        let apply = |list: &mut [Entry], measures: Vec<steve_node_api::DiskEntryMeasure>| {
+            let mut by_item: HashMap<String, steve_node_api::DiskEntryMeasure> =
+                measures.into_iter().map(|m| (m.item.clone(), m)).collect();
+            for e in list {
+                if let Some(m) = by_item.remove(&e.item) {
+                    e.exists = m.exists;
+                    e.bytes = m.bytes;
+                    e.cache_bytes = m.cache_bytes;
+                    e.caches = m.caches;
+                    e.in_use = m.in_use;
+                }
             }
-        }
-        orphans.sort_by(|a, b| a.path.cmp(&b.path));
-        let sp = space(&root);
+        };
+        apply(&mut entries, resp.entries);
+        apply(&mut scratch, resp.scratch);
         let pol = self.config().disk;
         Ok(DiskReport {
-            root: root.to_string_lossy().into(),
-            free: sp.map(|s| s.0),
-            total: sp.map(|s| s.1),
-            pressure: sp.map(|s| pol.pressure(s.0)),
+            root,
+            free: resp.free,
+            total: resp.total,
+            pressure: resp.free.map(|f| pol.pressure(f)),
             policy: pol,
-            git: git::version().map(|(a, b)| format!("{a}.{b}")),
-            trash: dir_bytes(&trash_dir(&root)),
+            git: resp.git,
+            trash: resp.trash,
             entries,
             scratch,
-            orphans,
+            orphans: resp
+                .orphans
+                .into_iter()
+                .map(|o| Orphan {
+                    path: o.path,
+                    bytes: o.bytes,
+                })
+                .collect(),
             measured_at: now(),
         })
     }
@@ -766,8 +561,6 @@ impl Core {
             .modules()
             .map(|m| m.clock.clone())
             .unwrap_or_else(|| std::sync::Arc::new(steve_runtime::SystemClock));
-        // what was said last in this episode: nothing, low, or the floor (F1: low is said too,
-        // before anything is refused)
         let warned = std::sync::Arc::new(std::sync::Mutex::new(Pressure::Ok));
         steve_runtime::every(
             "core.workspaces",
@@ -783,6 +576,10 @@ impl Core {
                     let r = match tokio::task::spawn_blocking(move || c.reclaim_workspaces()).await
                     {
                         Ok(Ok(r)) => r,
+                        Ok(Err(CoreError::NoNodeAvailable(why))) => {
+                            tracing::debug!("reclaim skipped: {why}");
+                            return;
+                        }
                         Ok(Err(e)) => {
                             tracing::error!("reclaim {e}");
                             return;
@@ -823,7 +620,6 @@ impl Core {
         self.watch_workspaces().await;
     }
 
-    /// Below `low` but above the floor: nothing is refused yet; what Steve could give back it did.
     fn warn_low(&self, free: u64) -> Result<()> {
         let t = self.tx();
         let text = steve_i18n::stored(|| {
@@ -866,38 +662,115 @@ impl Tx<'_> {
         Path::new(cwd) == self.cfg().scratch.join(item)
     }
 
-    /// Ended items without a project whose scratch directory exists and that no session works in now.
-    fn scratch_candidates(&self) -> Result<Vec<Candidate>> {
-        let mut out = vec![];
+    #[allow(clippy::type_complexity)]
+    fn build_reclaim_request(
+        &self,
+    ) -> Result<(
+        DiskReclaimRequest,
+        Vec<Kept>,
+        Vec<(
+            crate::repo::Item,
+            crate::repo::Project,
+            Option<String>,
+            String,
+        )>,
+    )> {
+        let pol = self.cfg().disk;
+        let at = now();
+        let mut git_projects = Vec::new();
+        let mut closed_worktrees = Vec::new();
+        let mut backend_candidates = Vec::new();
+        let mut idle_worktrees: Vec<(i64, ReclaimCacheTarget)> = Vec::new();
+        let mut ended_scratch: Vec<(i64, ReclaimCacheTarget)> = Vec::new();
+        let mut extra_kept = Vec::new();
+
         for ws in self.db().workspace_ids()? {
+            for p in self.db().projects(&ws)? {
+                if p.kind == "git" && p.worktree {
+                    git_projects.push(p.path);
+                }
+            }
             for i in self.db().items_all(&ws)? {
-                let Some(cwd) = i.cwd.as_deref().filter(|c| self.own_scratch(&i.id, c)) else {
-                    continue;
-                };
-                if !i.is_closed()
-                    || self.db().project(i.project_id.as_deref())?.is_some()
-                    || !Path::new(cwd).is_dir()
-                    || self
-                        .db()
-                        .sessions_of_item(&i.id)?
-                        .iter()
-                        .any(|s| self.busy(&s.id))
-                {
+                let sessions = self.db().sessions_of_item(&i.id)?;
+                let busy = sessions.iter().any(|s| self.busy(&s.id));
+                if busy {
                     continue;
                 }
-                out.push(Candidate {
-                    item: i.id.clone(),
-                    wt: cwd.into(),
-                    finished: true,
-                    updated: i.updated,
-                    repo: None,
-                });
+                if let Some(cwd) = i.cwd.as_deref().filter(|c| self.under_root(c)) {
+                    if i.is_closed() {
+                        let mut releasing = false;
+                        for s in &sessions {
+                            if self.rt().release(&s.id)? != crate::Released::Gone {
+                                releasing = true;
+                            }
+                        }
+                        if releasing {
+                            extra_kept.push(Kept {
+                                item: i.id.clone(),
+                                reason: "会话正在释放，稍后清理工作区".into(),
+                            });
+                            continue;
+                        }
+                        let project = self.db().project(i.project_id.as_deref())?;
+                        let branch = i.branch.clone().filter(|b| !b.is_empty());
+                        if let Some(p) = project.as_ref()
+                            && self.has_backend_workspace(&i.id)?
+                        {
+                            backend_candidates.push((
+                                i.clone(),
+                                p.clone(),
+                                branch,
+                                cwd.to_string(),
+                            ));
+                            continue;
+                        }
+                        let repo = project.map(|p| p.path).unwrap_or_default();
+                        closed_worktrees.push(ReclaimClosedTarget {
+                            item: i.id.clone(),
+                            path: cwd.to_string(),
+                            repo,
+                            branch: branch.unwrap_or_default(),
+                            keep_unmerged: false,
+                        });
+                    } else if at - i.updated >= pol.idle_ms {
+                        idle_worktrees.push((
+                            i.updated,
+                            ReclaimCacheTarget {
+                                item: i.id.clone(),
+                                path: cwd.to_string(),
+                            },
+                        ));
+                    }
+                } else if let Some(cwd) = i.cwd.as_deref().filter(|c| self.own_scratch(&i.id, c))
+                    && i.is_closed()
+                    && self.db().project(i.project_id.as_deref())?.is_none()
+                {
+                    ended_scratch.push((
+                        i.updated,
+                        ReclaimCacheTarget {
+                            item: i.id.clone(),
+                            path: cwd.to_string(),
+                        },
+                    ));
+                }
             }
         }
-        Ok(out)
+        idle_worktrees.sort_by_key(|(u, _)| *u);
+        ended_scratch.sort_by_key(|(u, _)| *u);
+        Ok((
+            DiskReclaimRequest {
+                worktrees_root: self.cfg().worktrees.to_string_lossy().into_owned(),
+                git_projects,
+                closed_worktrees,
+                idle_worktrees: idle_worktrees.into_iter().map(|(_, t)| t).collect(),
+                ended_scratch: ended_scratch.into_iter().map(|(_, t)| t).collect(),
+                low_bytes: pol.low,
+            },
+            extra_kept,
+            backend_candidates,
+        ))
     }
 
-    /// Items' scratch directories, as the disk report lists them.
     fn scratch_entries(&self) -> Result<Vec<Entry>> {
         let mut out = vec![];
         for ws in self.db().workspace_ids()? {
@@ -918,74 +791,13 @@ impl Tx<'_> {
                     archived: i.archived,
                     branch: None,
                     path: cwd.into(),
-                    exists: Path::new(cwd).is_dir(),
+                    exists: false,
                     bytes: 0,
                     cache_bytes: 0,
                     caches: vec![],
                     busy,
                     in_use: None,
                     updated: i.updated,
-                });
-            }
-        }
-        Ok(out)
-    }
-
-    /// Moves an ended project-less item's scratch caches to the trash, checking under the lock that it
-    /// is still ended and idle.
-    fn shed_scratch_caches(&mut self, item: &str, dir: &Path) -> Result<bool> {
-        let Some(i) = self.db().item(item)? else {
-            return Ok(false);
-        };
-        if !i.is_closed()
-            || self.db().project(i.project_id.as_deref())?.is_some()
-            || self
-                .db()
-                .sessions_of_item(item)?
-                .iter()
-                .any(|s| self.busy(&s.id))
-        {
-            return Ok(false);
-        }
-        let moved = to_trash(
-            &trash_dir(&self.cfg().worktrees),
-            item,
-            dir,
-            &scratch_cache_dirs(dir),
-        );
-        Ok(!moved.is_empty())
-    }
-
-    /// Items whose worktree exists under Steve's worktrees folder and that no session works in now.
-    fn workspace_candidates(&self) -> Result<Vec<Candidate>> {
-        let mut out = vec![];
-        for ws in self.db().workspace_ids()? {
-            for i in self.db().items_all(&ws)? {
-                let Some(cwd) = i.cwd.as_deref().filter(|c| self.under_root(c)) else {
-                    continue;
-                };
-                if !Path::new(cwd).is_dir()
-                    || self
-                        .db()
-                        .sessions_of_item(&i.id)?
-                        .iter()
-                        .any(|s| self.busy(&s.id))
-                {
-                    continue;
-                }
-                let repo = match (
-                    self.db().project(i.project_id.as_deref())?,
-                    i.branch.as_deref().filter(|b| !b.is_empty()),
-                ) {
-                    (Some(p), Some(b)) => Some((PathBuf::from(p.path), b.to_string())),
-                    _ => None,
-                };
-                out.push(Candidate {
-                    item: i.id.clone(),
-                    wt: cwd.into(),
-                    finished: i.is_closed(),
-                    updated: i.updated,
-                    repo,
                 });
             }
         }
@@ -1012,7 +824,7 @@ impl Tx<'_> {
                     archived: i.archived,
                     branch: i.branch.clone(),
                     path: cwd.into(),
-                    exists: Path::new(cwd).is_dir(),
+                    exists: false,
                     bytes: 0,
                     cache_bytes: 0,
                     caches: vec![],
@@ -1025,57 +837,8 @@ impl Tx<'_> {
         Ok(out)
     }
 
-    /// Every git project path configured with worktrees, so `reclaim_pass` can run
-    /// `git worktree prune` outside the core state lock.
-    fn git_worktree_projects(&self) -> Result<Vec<PathBuf>> {
-        let mut out = Vec::new();
-        for ws in self.db().workspace_ids()? {
-            for p in self.db().projects(&ws)? {
-                if p.kind == "git" && p.worktree {
-                    out.push(PathBuf::from(p.path));
-                }
-            }
-        }
-        Ok(out)
-    }
-
-    /// Moves an idle open item's caches to the trash, checking under the lock that it is still idle.
-    fn shed_caches(&mut self, item: &str, wt: &Path) -> Result<bool> {
-        let Some(i) = self.db().item(item)? else {
-            return Ok(false);
-        };
-        if i.is_closed()
-            || now() - i.updated < self.cfg().disk.idle_ms
-            || self
-                .db()
-                .sessions_of_item(item)?
-                .iter()
-                .any(|s| self.busy(&s.id))
-        {
-            return Ok(false);
-        }
-        let moved = to_trash(&trash_dir(&self.cfg().worktrees), item, wt, &cache_dirs(wt));
-        Ok(!moved.is_empty())
-    }
-
-    /// Moves a closed item's caches to the trash (the caller already checked nothing runs in `wt`); the
-    /// paths moved.
-    pub(crate) fn shed_closed_caches(&mut self, item: &str, wt: &Path) -> Vec<String> {
-        to_trash(&trash_dir(&self.cfg().worktrees), item, wt, &cache_dirs(wt))
-    }
-
-    /// Why a closed item's worktree stays.
-    fn why_kept(&self, wt: &Path) -> String {
-        let dirty = git::git_read(wt, &["status", "--porcelain"]).map(|s| !s.is_empty());
-        match dirty {
-            Ok(true) => "有未提交的改动，保留工作区".into(),
-            Ok(false) => "工作区未能删除，下次再试".into(),
-            Err(_) => "看不出工作区的状态，保留".into(),
-        }
-    }
-
     /// One timeline note per item for the space its caches freed.
-    pub(crate) fn note_freed(&self, freed: &[Freed]) -> Result<()> {
+    pub(crate) fn note_freed(&self, freed: &[steve_node_api::DiskFreed]) -> Result<()> {
         for f in freed.iter().filter(|f| f.bytes > 0) {
             if self.db().item(&f.item)?.is_none() {
                 continue;
@@ -1095,6 +858,99 @@ impl Tx<'_> {
                 ),
                 None,
             )?;
+        }
+        Ok(())
+    }
+
+    fn note_reclaim_outcomes(&self, resp: &DiskReclaimResponse) -> Result<()> {
+        for (item, branch) in &resp.deleted_branches {
+            let Some(i) = self.db().item(item)? else {
+                continue;
+            };
+            let text = steve_i18n::stored(|| match i.cwd.as_deref().filter(|c| !c.is_empty()) {
+                Some(cwd) => steve_i18n::t!(
+                    "core.worktree.removed_merged",
+                    cwd = cwd,
+                    branch = branch.as_str()
+                ),
+                None => steve_i18n::t!("core.worktree.branch_deleted", branch = branch.as_str()),
+            });
+            self.note_cleanup_once(item, &text)?;
+        }
+        for (item, cwd, branch, head) in &resp.kept_branches {
+            if self.db().item(item)?.is_none() {
+                continue;
+            }
+            let text = steve_i18n::stored(|| {
+                if head.is_empty() {
+                    steve_i18n::t!(
+                        "core.worktree.removed_unmerged_no_sha",
+                        cwd = cwd.as_str(),
+                        branch = branch.as_str()
+                    )
+                } else {
+                    steve_i18n::t!(
+                        "core.worktree.removed_unmerged",
+                        cwd = cwd.as_str(),
+                        branch = branch.as_str(),
+                        head = head.as_str()
+                    )
+                }
+            });
+            self.note_cleanup_once(item, &text)?;
+        }
+        for (item, branch, err) in &resp.branch_delete_failed {
+            let Some(i) = self.db().item(item)? else {
+                continue;
+            };
+            let cwd = i.cwd.as_deref().unwrap_or("");
+            let text = steve_i18n::stored(|| {
+                steve_i18n::t!(
+                    "core.worktree.removed_branch_failed",
+                    cwd = cwd,
+                    branch = branch.as_str(),
+                    error = err.as_str()
+                )
+            });
+            self.note_cleanup_once(item, &text)?;
+        }
+        for (item, branch) in &resp.absent_deleted_branches {
+            if self.db().item(item)?.is_none() {
+                continue;
+            }
+            let text = steve_i18n::stored(|| {
+                steve_i18n::t!("core.worktree.branch_deleted", branch = branch.as_str())
+            });
+            self.note_cleanup_once(item, &text)?;
+        }
+        for (item, branch, err) in &resp.absent_branch_delete_failed {
+            if self.db().item(item)?.is_none() {
+                continue;
+            }
+            let text = steve_i18n::stored(|| {
+                steve_i18n::t!(
+                    "core.worktree.branch_delete_failed",
+                    branch = branch.as_str(),
+                    error = err.as_str()
+                )
+            });
+            self.note_cleanup_once(item, &text)?;
+        }
+        for k in &resp.kept {
+            let Some(i) = self.db().item(&k.item)? else {
+                continue;
+            };
+            let cwd = i.cwd.as_deref().unwrap_or("");
+            let text = if k.reason == "in_use" {
+                steve_i18n::stored(|| steve_i18n::t!("core.worktree.cleanup_in_use", cwd = cwd))
+            } else if let Some(detail) = k.detail.as_deref() {
+                steve_i18n::stored(|| {
+                    steve_i18n::t!("core.worktree.cleanup_failed", cwd = cwd, error = detail)
+                })
+            } else {
+                continue;
+            };
+            self.note_cleanup_once(&k.item, &text)?;
         }
         Ok(())
     }

@@ -35,11 +35,16 @@ pub fn hub_private_vars() -> Vec<std::ffi::OsString> {
         .collect()
 }
 
-/// Claude Code permission rules (`permissions.deny`) for [`PROTECTED`] under `steve_home`. Deny rules
-/// hold in every permission mode, `bypassPermissions` included, but only for Claude Code's own file
-/// tools (Read, Edit, Write, Grep, Glob …): a program a Bash command runs (`python3 -c`, `sqlite3`,
-/// `tar`) is not bound by them. Keeping those out needs an OS sandbox (`sandbox-exec`), not rules.
-pub fn claude_deny_rules(steve_home: &Path) -> Vec<String> {
+/// Renders harness-native file-tool deny rules for [`PROTECTED`] paths under `steve_home` from
+/// a harness's declarative rule syntax (`tools`, `abs_prefix`, `dir_suffix`). Deny rules are a
+/// defense-in-depth layer for a harness's own file tools; OS confinement (`steve-confine`)
+/// protects against arbitrary subprocesses.
+pub fn protected_deny_rules(
+    steve_home: &Path,
+    tools: &[String],
+    abs_prefix: &str,
+    dir_suffix: &str,
+) -> Vec<String> {
     let mut roots = vec![steve_home.to_path_buf()];
     let r = steve_confine::canonical_path(steve_home);
     if r != roots[0] {
@@ -50,12 +55,11 @@ pub fn claude_deny_rules(steve_home: &Path) -> Vec<String> {
         let root = root.to_string_lossy();
         let root = root.trim_end_matches('/');
         for p in PROTECTED {
-            // `//` starts an absolute path in a Claude Code rule
             let pattern = match p.strip_suffix('/') {
-                Some(dir) => format!("/{root}/{dir}/**"),
-                None => format!("/{root}/{p}"),
+                Some(dir) => format!("{abs_prefix}{root}/{dir}{dir_suffix}"),
+                None => format!("{abs_prefix}{root}/{p}"),
             };
-            for tool in ["Read", "Edit"] {
+            for tool in tools {
                 out.push(format!("{tool}({pattern})"));
             }
         }
@@ -63,9 +67,27 @@ pub fn claude_deny_rules(steve_home: &Path) -> Vec<String> {
     out
 }
 
-/// The settings object (`--settings`, or the ACP adapter's `_meta.claudeCode.options.settings`).
-pub fn claude_settings(steve_home: &Path) -> serde_json::Value {
-    serde_json::json!({ "permissions": { "deny": claude_deny_rules(steve_home) } })
+/// Builds a `session/new|load` `_meta` object placing [`protected_deny_rules`] at the nested JSON
+/// key path declared in `wrapper`.
+pub fn protected_session_meta(
+    steve_home: &Path,
+    wrapper: &[String],
+    tools: &[String],
+    abs_prefix: &str,
+    dir_suffix: &str,
+) -> serde_json::Value {
+    let mut val = serde_json::Value::Array(
+        protected_deny_rules(steve_home, tools, abs_prefix, dir_suffix)
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect(),
+    );
+    for key in wrapper.iter().rev() {
+        let mut obj = serde_json::Map::new();
+        obj.insert(key.clone(), val);
+        val = serde_json::Value::Object(obj);
+    }
+    val
 }
 
 /// Antigravity CLI `permissions.allow` rules for Steve's own MCP endpoint (`mcp(steve/*)`).
@@ -112,9 +134,14 @@ mod tests {
     }
 
     #[test]
-    fn claude_rules_name_every_protected_path_absolutely() {
+    fn protected_rules_name_every_protected_path_absolutely() {
         let home = Path::new("/nonexistent-steve-home/.steve");
-        let rules = claude_deny_rules(home);
+        let tools = vec!["Read".to_string(), "Edit".to_string()];
+        let wrapper: Vec<String> = ["claudeCode", "options", "settings", "permissions", "deny"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let rules = protected_deny_rules(home, &tools, "/", "/**");
         assert_eq!(rules.len(), PROTECTED.len() * 2);
         assert!(rules.contains(&"Read(//nonexistent-steve-home/.steve/signing/**)".to_string()));
         assert!(rules.contains(&"Read(//nonexistent-steve-home/.steve/steve.env*)".to_string()));
@@ -146,22 +173,26 @@ mod tests {
                 assert!(!r.contains(own), "{r}");
             }
         }
-        let s = claude_settings(home);
+        let s = protected_session_meta(home, &wrapper, &tools, "/", "/**");
         assert_eq!(
-            s["permissions"]["deny"].as_array().unwrap().len(),
+            s["claudeCode"]["options"]["settings"]["permissions"]["deny"]
+                .as_array()
+                .unwrap()
+                .len(),
             rules.len()
         );
     }
 
     #[test]
-    fn claude_rules_also_cover_the_real_path() {
+    fn protected_rules_also_cover_the_real_path() {
         let tmp = std::env::temp_dir().join(format!("steve-harness-{}", std::process::id()));
         let real_dir = tmp.join("real");
         std::fs::create_dir_all(&real_dir).unwrap();
         let link = tmp.join("link");
         let _ = std::fs::remove_file(&link);
         std::os::unix::fs::symlink(&real_dir, &link).unwrap();
-        let rules = claude_deny_rules(&link);
+        let tools = vec!["Read".to_string(), "Edit".to_string()];
+        let rules = protected_deny_rules(&link, &tools, "/", "/**");
         let real = std::fs::canonicalize(&real_dir).unwrap();
         assert!(rules.contains(&format!("Read(/{}/signing/**)", link.display())));
         assert!(rules.contains(&format!("Read(/{}/signing/**)", real.display())));

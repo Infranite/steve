@@ -627,6 +627,121 @@ Ran cargo nextest.
         m.lint_github_event(str(ev_non_pr), env={})
     ok("lint --github-event validates PR titles/trailers, refreshes edited titles, and guards docs/releases/")
 
+    # Node PROTOCOL bump and ordinary_compat baseline fixture guards.
+    bump_patch = "@@ -56,3 +56,3 @@\n /// contract\n-pub const PROTOCOL: u32 = 17;\n+pub const PROTOCOL: u32 = 18;\n"
+    comment_only_patch = "@@ -55,4 +55,4 @@\n-/// old doc\n+/// new doc\n pub const PROTOCOL: u32 = 17;\n"
+    jump_patch = "@@ -56,3 +56,3 @@\n-pub const PROTOCOL: u32 = 17;\n+pub const PROTOCOL: u32 = 19;\n"
+    decrement_patch = "@@ -56,3 +56,3 @@\n-pub const PROTOCOL: u32 = 17;\n+pub const PROTOCOL: u32 = 16;\n"
+    lib_file = "hub-rs/crates/steve-node-api/src/lib.rs"
+    fixture_vitals = "hub-rs/crates/steve-node-api/tests/fixtures/ordinary_compat/node_vitals.json"
+    fixture_proto = "hub-rs/crates/steve-node-api/tests/fixtures/ordinary_compat/protocol.txt"
+    fixture_new = "hub-rs/crates/steve-node-api/tests/fixtures/ordinary_compat/new_payload.json"
+
+    # 1. No PROTOCOL change (doc comment only + adding a brand-new baseline fixture) passes.
+    m.lint_pr(
+        "chore(node-api): clarify protocol rule and add fixture",
+        "Closes #610\n\n## Release note\n\nDocumented protocol bump rules.\n",
+        files=[
+            {"filename": lib_file, "status": "modified", "patch": comment_only_patch},
+            {"filename": fixture_new, "status": "added"},
+        ],
+    )
+
+    # 2. Compliant +1 bump with allowlisted Protocol-Bump: category, concrete reason, Upgrade:, and updated baselines passes.
+    good_bump_body = (
+        "Closes #611\n\n## Release note\n\n"
+        "Narrowed effort field to canonical enum.\n\n"
+        "Protocol-Bump: type-narrowing — Narrow HarnessChoice.effort from String to ReasoningEffort; older Nodes reject new variants\n"
+        "Upgrade: update the Hub and all Nodes together (Node protocol 18).\n"
+    )
+    m.lint_pr(
+        "feat(node-api)!: narrow HarnessChoice.effort",
+        good_bump_body,
+        files=[
+            {"filename": lib_file, "status": "modified", "patch": bump_patch},
+            {"filename": fixture_vitals, "status": "modified"},
+            {"filename": fixture_proto, "status": "modified"},
+        ],
+    )
+    # Protocol-Bump: inside ## Release note is stripped from generated release notes.
+    assert m.extract_release_note(good_bump_body) == "Narrowed effort field to canonical enum.", m.extract_release_note(good_bump_body)
+    # Every allowlisted category and ASCII separator variant is accepted.
+    for cat in m.PROTOCOL_BUMP_CATEGORIES:
+        m.lint_pr(
+            "feat(node-api)!: breaking wire update",
+            f"Closes #612\n\nProtocol-Bump: {cat} -- Remove deprecated wire field from OpenSession payload\nUpgrade: update Hub and Nodes together.\n",
+            files=[{"filename": lib_file, "status": "modified", "patch": bump_patch}],
+        )
+
+    # 3. Missing Protocol-Bump:, fenced/commented Protocol-Bump:, unknown category, short reason, or missing Upgrade: are refused.
+    for label, bad_body, needle in (
+        (
+            "missing Protocol-Bump:",
+            "Closes #613\n\nUpgrade: update Hub and Nodes together.\n",
+            "Protocol-Bump:",
+        ),
+        (
+            "Protocol-Bump: inside code fence",
+            "Closes #613\n\n```\nProtocol-Bump: type-narrowing — Narrow HarnessChoice.effort from String to ReasoningEffort\n```\n\nUpgrade: update Hub and Nodes together.\n",
+            "Protocol-Bump:",
+        ),
+        (
+            "unknown category",
+            "Closes #613\n\nProtocol-Bump: additive-field — Added optional field to NodeVitals struct\nUpgrade: update Hub and Nodes together.\n",
+            "unknown `Protocol-Bump:` category",
+        ),
+        (
+            "too-short justification",
+            "Closes #613\n\nProtocol-Bump: type-narrowing — changed field\nUpgrade: update Hub and Nodes together.\n",
+            "too short",
+        ),
+        (
+            "missing Upgrade:",
+            "Closes #613\n\nProtocol-Bump: required-field — Add required auth_mode field to InstallHarness strict struct\n",
+            "without an `Upgrade:` trailer",
+        ),
+    ):
+        try:
+            m.lint_pr(
+                "feat(node-api)!: breaking wire update",
+                bad_body,
+                files=[{"filename": lib_file, "status": "modified", "patch": bump_patch}],
+            )
+            raise AssertionError(f"invalid protocol bump ({label}) passed lint_pr")
+        except m.Refused as e:
+            assert needle in str(e), (label, e)
+
+    # 4. Jumping (+2) or decrementing (-1) PROTOCOL is refused even with Protocol-Bump: and Upgrade:.
+    for label, bad_patch in (("jump +2", jump_patch), ("decrement -1", decrement_patch)):
+        try:
+            m.lint_pr(
+                "feat(node-api)!: breaking wire update",
+                good_bump_body,
+                files=[{"filename": lib_file, "status": "modified", "patch": bad_patch}],
+            )
+            raise AssertionError(f"non-single-step PROTOCOL ({label}) passed lint_pr")
+        except m.Refused as e:
+            assert "only increment by +1" in str(e), (label, e)
+
+    # 5. Modifying, deleting, or renaming existing ordinary_compat baselines without bumping PROTOCOL is refused.
+    for label, bad_files in (
+        ("modified json", [{"filename": fixture_vitals, "status": "modified"}]),
+        ("deleted json", [{"filename": fixture_vitals, "status": "removed"}]),
+        ("renamed json", [{"filename": fixture_new, "previous_filename": fixture_vitals, "status": "renamed"}]),
+        ("modified protocol.txt", [{"filename": fixture_proto, "status": "modified"}]),
+    ):
+        try:
+            m.lint_pr(
+                "fix(node-api): tweak fixture",
+                "Closes #614\n\n## Release note\n\nTweaked fixture.\n",
+                files=bad_files,
+            )
+            raise AssertionError(f"baseline mutation without bump ({label}) passed lint_pr")
+        except m.Refused as e:
+            assert "without bumping PROTOCOL" in str(e), (label, e)
+
+    ok("lint enforces single-step PROTOCOL bumps, Protocol-Bump:/Upgrade: trailers, and ordinary_compat baseline lock")
+
 
 def integration_checks():
     with tempfile.TemporaryDirectory(prefix="steve-cut-test-") as tmp:
@@ -1527,9 +1642,97 @@ def upgrade_dedupe_and_integration_checks():
         ok("post-1.0 breaking sub-PR triggers MAJOR and fast-forward carrier tie-break picks merge-subject carrier")
 
 
+def protocol_bump_lint_checks():
+    """Git-backed local branch and --pr-body lint checks for PROTOCOL bumps and ordinary_compat baseline lock."""
+    lib_rel = "hub-rs/crates/steve-node-api/src/lib.rs"
+    fix_rel = "hub-rs/crates/steve-node-api/tests/fixtures/ordinary_compat/node_vitals.json"
+    fix_new = "hub-rs/crates/steve-node-api/tests/fixtures/ordinary_compat/extra_payload.json"
+    proto_rel = "hub-rs/crates/steve-node-api/tests/fixtures/ordinary_compat/protocol.txt"
+
+    with tempfile.TemporaryDirectory(prefix="steve-cut-proto-") as tmp:
+        _, a = setup(tmp)
+        commit(
+            a,
+            {
+                lib_rel: "/// wire\npub const PROTOCOL: u32 = 17;\n",
+                fix_rel: "{\"at\": 1}\n",
+                proto_rel: "17\n",
+            },
+            "chore(node-api): seed protocol baseline",
+        )
+        git(a, "push", "-q", "origin", "main")
+
+        pr_body_plain = Path(tmp, "proto-plain-body.md")
+        pr_body_plain.write_text("Closes #700\n\n## Release note\n\nUpdated fixture.\n", encoding="utf-8")
+        pr_body_bump = Path(tmp, "proto-bump-body.md")
+        pr_body_bump.write_text(
+            "Closes #701\n\n## Release note\n\nNarrowed wire type.\n\n"
+            "Protocol-Bump: type-narrowing — Narrow NodeVitals.at field type; older Nodes cannot decode new wire encoding\n"
+            "Upgrade: update the Hub and all Nodes together (Node protocol 18).\n",
+            encoding="utf-8",
+        )
+
+        # Adding a brand-new baseline fixture and editing only PROTOCOL docs passes without a bump.
+        git(a, "checkout", "-q", "-b", "test/proto-additive", "origin/main")
+        commit(
+            a,
+            {
+                lib_rel: "/// wire rules updated\npub const PROTOCOL: u32 = 17;\n",
+                fix_new: "{\"ok\": true}\n",
+            },
+            "chore(node-api): document protocol rules and add baseline fixture",
+        )
+        assert cut(a, "lint").returncode == 0
+        assert cut(a, "lint", "--pr-title", "chore(node-api): document protocol rules", "--pr-body", str(pr_body_plain), "--base", "origin/main").returncode == 0
+
+        # Modifying or deleting an existing baseline without bumping PROTOCOL fails both branch lint and PR lint.
+        git(a, "checkout", "-q", "-b", "test/proto-baseline-edit", "origin/main")
+        commit(a, {fix_rel: "{\"at\": 2}\n"}, "fix(node-api): rewrite baseline without bump")
+        r = cut(a, "lint")
+        assert r.returncode == 1 and "without bumping PROTOCOL" in r.stderr, r
+        r = cut(a, "lint", "--pr-title", "fix(node-api): rewrite baseline without bump", "--pr-body", str(pr_body_plain), "--base", "origin/main")
+        assert r.returncode == 1 and "without bumping PROTOCOL" in r.stderr, r
+
+        git(a, "checkout", "-q", "-b", "test/proto-baseline-delete", "origin/main")
+        commit(a, {fix_rel: None}, "fix(node-api): delete baseline without bump")
+        r = cut(a, "lint")
+        assert r.returncode == 1 and "without bumping PROTOCOL" in r.stderr, r
+
+        # Jumping PROTOCOL 17 -> 19 fails both branch lint and PR lint.
+        git(a, "checkout", "-q", "-b", "test/proto-jump", "origin/main")
+        commit(
+            a,
+            {lib_rel: "/// wire\npub const PROTOCOL: u32 = 19;\n", proto_rel: "19\n"},
+            "feat(node-api)!: skip protocol 18",
+        )
+        r = cut(a, "lint")
+        assert r.returncode == 1 and "only increment by +1" in r.stderr, r
+        r = cut(a, "lint", "--pr-title", "feat(node-api)!: skip protocol 18", "--pr-body", str(pr_body_bump), "--base", "origin/main")
+        assert r.returncode == 1 and "only increment by +1" in r.stderr, r
+
+        # Compliant +1 bump (17 -> 18) with updated baseline passes branch lint, fails PR lint without reason, and passes with Protocol-Bump: + Upgrade:.
+        git(a, "checkout", "-q", "-b", "test/proto-bump-ok", "origin/main")
+        commit(
+            a,
+            {
+                lib_rel: "/// wire\npub const PROTOCOL: u32 = 18;\n",
+                fix_rel: "{\"at\": 2}\n",
+                proto_rel: "18\n",
+            },
+            "feat(node-api)!: narrow field type",
+        )
+        assert cut(a, "lint").returncode == 0
+        r = cut(a, "lint", "--pr-title", "feat(node-api)!: narrow field type", "--pr-body", str(pr_body_plain), "--base", "origin/main")
+        assert r.returncode == 1 and "Protocol-Bump:" in r.stderr and "Upgrade:" in r.stderr, r
+        r = cut(a, "lint", "--pr-title", "feat(node-api)!: narrow field type", "--pr-body", str(pr_body_bump), "--base", "origin/main")
+        assert r.returncode == 0, r
+        ok("git-backed lint catches unbumped baseline edits, PROTOCOL jumps, missing reasons, and accepts compliant +1 bumps")
+
+
 if __name__ == "__main__":
     unit_checks()
     integration_checks()
     latest_tested_checks()
     upgrade_dedupe_and_integration_checks()
+    protocol_bump_lint_checks()
     print("All cut-release checks passed")

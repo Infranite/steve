@@ -6,8 +6,12 @@ use steve_hub::{api::AppState, bus::Bus, config::Config, deliveries::Service};
 use steve_store::Store;
 use steve_store::testkit::hub::deliveries as fixture_db;
 
+#[path = "support/local_node.rs"]
+mod local_node;
+
 struct Env {
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     base: String,
     store: Store,
     svc: Service,
@@ -92,10 +96,13 @@ async fn start(node: bool) -> Env {
     }
     if node {
         vars.remove("STEVE_NO_RESUME");
-        vars.insert("STEVE_NODE_MODE".into(), "local".into());
+        vars.insert("STEVE_LOCAL_NODE_PORT".into(), "0".into());
     }
     let vars = Arc::new(vars);
-    let get = move |k: &str| vars.get(k).cloned();
+    let get = {
+        let vars = vars.clone();
+        move |k: &str| vars.get(k).cloned()
+    };
     let cfg = Arc::new(Config::from_vars(&get).unwrap());
     for p in [&cfg.home, &cfg.data_dir, &cfg.scratch, &cfg.worktrees] {
         std::fs::create_dir_all(p).unwrap();
@@ -104,6 +111,7 @@ async fn start(node: bool) -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get)).unwrap();
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules)
         .with_workspaces(Some(w.workspaces.clone()));
@@ -158,6 +166,7 @@ async fn start(node: bool) -> Env {
         .unwrap();
     Env {
         _home: home,
+        _local_node: local_node,
         base,
         store,
         svc,

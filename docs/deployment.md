@@ -235,7 +235,7 @@ The release workflow checks restic against the pinned upstream checksum before p
 | Manual | Installation state, attachments, workspace outputs and deliveries | Kept until the operator explicitly removes it |
 | Diagnostic | Database only | Seven days, at most four |
 
-Each automatic purpose keeps its latest snapshot. Installation state includes `steve.env`, `secrets`, and the installed signing identity and its keychain file. Workspace caches, the repository itself and the installation key store are excluded. **Settings → Data and privacy** shows the repository size, its destination's free space and the latest daily snapshot. **Settings → About → Health** warns when available space is less than twice the combined size of the current SQLite database and WAL. The estimate allows space for a staged database copy and a full database write into restic. Large attachments may require additional space. The Hub imports metrics from offline backup and restore commands at startup and during its normal metrics collection. The daily setting and `STEVE_BACKUP=off` control daily generation. The upgrade keeps the existing daily schedule settings. Upgrade backups and automatic retention still run.
+Each automatic purpose keeps its latest snapshot. Installation state includes `steve.env`, `secrets`, and the installed signing identity and its keychain file. Workspace caches, the repository itself and the installation key store are excluded. **Settings → Data and privacy** shows the repository size, its destination's free space and the latest daily snapshot. **Devices → Monitor** (and the summary entry under **Settings → About → Health**) warns when available space is less than twice the combined size of the current SQLite database and WAL. The estimate allows space for a staged database copy and a full database write into restic. Large attachments may require additional space. The Hub imports metrics from offline backup and restore commands at startup and during its normal metrics collection. The daily setting and `STEVE_BACKUP=off` control daily generation. The upgrade keeps the existing daily schedule settings. Upgrade backups and automatic retention still run.
 
 Use the installation's environment, including its configured vault key store, when invoking the Hub binary directly. For an immediate manual snapshot or a list of available snapshots, run:
 
@@ -769,7 +769,7 @@ Snapshots are sampled reads, not a distributed transaction. `changed_during_read
 
 ## Several machines
 
-Steve runs work on Nodes. The Hub is always one of them: its own Node, `local`, runs in a process of its own by default, so a Hub restart or upgrade leaves its turns running; `STEVE_NODE_MODE=local` keeps it in the Hub's process. Any other machine can become a Node as well. A typical arrangement is an always-on Hub with other machines added as Nodes, but none is assumed: one machine on its own is a complete Steve.
+Steve runs work on Nodes. The Hub runs its own colocated Node (`local`) in a separate `steve-node --local-node` process (`STEVE_NODE_MODE=service`, the only normal mode), so a Hub restart or upgrade leaves its turns running; only diagnostic `STEVE_NO_RESUME=1` copies start without a colocated Node. Any other machine can become a Node as well. A typical arrangement is an always-on Hub with other machines added as Nodes, but none is assumed: one machine on its own is a complete Steve.
 
 - **Reaching the Hub:** a Node dials the Hub, never the other way round. It can use the Hub's HTTPS address (a reverse proxy that terminates TLS, see [Remote Nodes](#remote-nodes)) or [tailcat](#remote-nodes-over-tailcat) when there is no public address or VPN.
 - **Adding a machine:** pair it from Devices with a code ([Pairing a separate Node](#pairing-a-separate-node)), or let the Hub [install it over tailcat](#installing-a-node-remotely-over-tailcat).
@@ -783,7 +783,7 @@ Steve runs work on Nodes. The Hub is always one of them: its own Node, `local`, 
 
 ### Concurrent sessions and capacity queues
 
-Every session-capable Node, including the Hub's own in-process or service Node, starts with **32 concurrent turns**. In **Devices → Nodes → this machine's Node → Capabilities and admission configuration**, the instance owner can save 1–256 using the current configuration revision; for a paired Node, its owner uses **Devices → Nodes → that Node → Concurrent sessions**. This is resource scheduling, not a new approval or harness permission. It applies to every harness through the same Node contract. Idle/open sessions do not use turn slots; model jobs and command executions keep their separate capacities.
+Every session-capable Node, including the Hub's own colocated service Node, starts with **32 concurrent turns**. In **Devices → Nodes → this machine's Node → Capabilities and admission configuration**, the instance owner can save 1–256 using the current configuration revision; for a paired Node, its owner uses **Devices → Nodes → that Node → Concurrent sessions**. This is resource scheduling, not a new approval or harness permission. It applies to every harness through the same Node contract. Idle/open sessions do not use turn slots; model jobs and command executions keep their separate capacities.
 
 The setting is persisted on the Hub (`devices.max_sessions` for its `hub`/`local` machine, `nodes.max_sessions` for a paired Node). A save needs no restart: the Hub uses it on the next dispatch, normally within one second when its sender is idle. Raising it releases eligible queued turns; lowering it does not interrupt accepted/running turns and starts no more until the count drops below the new setting. The Hub reapplies the setting to the Node's actual limiter before each turn dispatch, including after a Node reconnect or restart. Offline or paused Nodes still wait for their normal link/resume; saving capacity does not connect, resume or move work.
 
@@ -1209,7 +1209,7 @@ The new Node reaches the Hub over tailcat when [Connect over tailcat](#remote-no
 
 ## The Hub's own Node in a process of its own
 
-The Hub's own Node, which runs every session on the Hub's machine, runs as `steve-hub --local-node`, a process of its own (`STEVE_NODE_MODE=service`, the default), so a turn goes on while the Hub restarts or upgrades. `STEVE_NODE_MODE=local` keeps it in the Hub's process instead, where a Hub restart cuts the turns that are running:
+The Hub's own Node, which runs sessions, model/research jobs, git operations, project setup, and `stdio` MCP servers on the Hub's machine, runs as `steve-node --local-node`, a process of its own (`STEVE_NODE_MODE=service`, the only normal mode), so a turn goes on while the Hub restarts or upgrades (`STEVE_NODE_MODE=local` and `STEVE_NODE_MODE=off` have been removed):
 
 - The Hub starts the process when no Node is linked: in a session of its own and, when the Hub runs under systemd, in a scope of its own (`systemd-run --user --scope`). A restart or upgrade of the Hub's service therefore leaves it running. `steve hub stop` (and so the stop before `steve hub uninstall`) stops it too.
 - It keeps the Node's id (`local`) and home (`<data>/node`), so sessions from before carry on there.
@@ -1218,10 +1218,9 @@ The Hub's own Node, which runs every session on the Hub's machine, runs as `stev
 - Its roots follow the Hub's projects through `<data>/node/host-roots.json`.
 - Its log is `<data>/node/logs/local-node.log`, and its pid is in `<data>/node/service.pid`.
 - It shuts down when the Hub's `STEVE_HOME` or the executable it was launched from disappears.
-- Steve's own think and research jobs stay in the Hub's process, under `<data>/node-jobs`. Research is read-only, with one exception: in the instance owner's own main conversation Steve works with the full access of the OS user the Hub runs as (files, commands, network), starting in that user's home directory. Steve's data directory (keys, database, programs) stays out of its reach there too. On an instance with a single user, the owner's private chat with Steve in a channel works the same way. Other members' conversations, shared conversations in channels and research on a remote Node stay read-only.
+- Steve's own think and research jobs run on this same independent Node process over `steve-node-api` (no in-process Hub harness execution). Research is read-only, with one exception: in the instance owner's own main conversation Steve works with the full access of the OS user the Node runs as (files, commands, network), starting in that user's home directory. Steve's data directory (keys, database, programs) stays out of its reach there too. On an instance with a single user, the owner's private chat with Steve in a channel works the same way. Other members' conversations, shared conversations in channels and research on a remote Node stay read-only.
 - An upgrade's drain does not wait for this Node's turns. Once the Node has no turn running, a Node from another build is restarted onto the Hub's build.
-- The remote Node listener must be on (the default; `STEVE_NODE_LISTEN=0` and `service` together refuse to start).
-- Going back to `local` is an ordinary restart with `STEVE_NODE_MODE=local`. Stop it first with `steve hub stop` (or `kill $(cat <data>/node/service.pid)` for a Hub not set up by `steve setup`) so that two Nodes never use one home.
+- The remote Node listener must be on (the default; `STEVE_NODE_LISTEN=0` and `service` together refuse to start). To stop the colocated Node manually on a Hub not set up by `steve setup`, use `steve hub stop` (or `kill $(cat <data>/node/service.pid)`).
 
 ## Setting up a project's directory
 
@@ -1941,7 +1940,7 @@ Open **Activity** on the repository to see the most recent 50 receipts (filter t
 ## Metrics and health
 
 The Hub samples Node vitals once a minute into the same recorder used by `/metrics` and
-Settings → About → Health. Devices displays the latest measurements and a five-minute trend
+**Devices → Monitor** (with a status summary link in **Settings → About → Health** and alert surfacing in **Devices → Overview**). Devices displays the latest measurements and a five-minute trend
 for up to 24 hours. A Hub restart starts a new trend. A missed sample, interface change or
 counter reset leaves a gap in network rates. Device token totals still follow the workspace's
 usage ledger and local day.
@@ -1963,7 +1962,7 @@ Every metric is described in the exposition (`# HELP`); names are `steve_<layer>
 - This process (`steve_process_*`): CPU time, resident memory, descriptors, threads and disk read/written bytes, sampled when read, on Linux and macOS.
 - Web client (`steve_web_*`): long tasks and interaction latency (the samples of INP) the web page reports once a minute.
 
-A task on the existing Tokio runtime folds histogram samples every five seconds and keeps one snapshot a minute for fifteen minutes. `GET /api/system/health` (the instance owner's) compares now with the oldest snapshot and returns each key figure with its limit: request p95 (500 ms), write lock wait p95 (100 ms), live update delay p95 (500 ms), Node event commit p95 (250 ms), cache hit rate (at least 50% once 100 lookups were made), Hub CPU (80% of a core), Hub memory (2 GiB), disk writes per day for the Hub and each Node (5 GiB), web interaction p75 (200 ms) and long tasks (10 a minute), and per Node and plugin: link drops (3), failed commands or calls (20% once 5 were made), undelivered events (10 000), plugin restarts (2) and waiting inbound messages (100). Figures past their limit are listed under `warnings`; Settings · About · Health shows them.
+A task on the existing Tokio runtime folds histogram samples every five seconds and keeps one-minute snapshots for 1 hour (61 snapshots) plus five-minute snapshots for 24 hours (289 snapshots). `GET /api/system/health?window=15m|1h|24h` (default `15m`, instance owner only) compares now with the window baseline and returns `window`, `window_seconds`, `sampled_at`, `checks`, `warnings`, and `series` (time series for `http_p95`, `write_lock_wait_p95`, `hub_cpu`, and `hub_memory`). The checks and limits cover: request p95 (500 ms), write lock wait p95 (100 ms), live update delay p95 (500 ms), Node event commit p95 (250 ms), cache hit rate (at least 50% once 100 lookups were made), Hub CPU (80% of a core), Hub memory (2 GiB), disk writes per day for the Hub and each Node (5 GiB), web interaction p75 (200 ms) and long tasks (10 a minute), and per Node and plugin: link drops (3), failed commands or calls (20% once 5 were made), undelivered events (10 000), plugin restarts (2) and waiting inbound messages (100). Figures past their limit are listed under `warnings`; **Devices → Monitor** pins them first and surfaces alerts in **Devices → Overview** and **Settings → About**.
 
 ## Process-local caches
 

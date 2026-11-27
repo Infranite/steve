@@ -26,8 +26,7 @@ pub use crate::state_dir::StateDirRuntime;
 
 use steve_harness_spec::{
     AdapterProperties, AdapterSpec, Component, Declaration, DefaultCommand, LaunchExtra,
-    ModeChoice, ModeMap, PermissionPolicy, SessionMeta, UsageFallback, builtin, builtins,
-    components,
+    ModeChoice, ModeMap, PermissionPolicy, UsageFallback, builtin, builtins, components,
 };
 
 fn npm_entry(pkg: &str, entry: &str, root: &Path) -> PathBuf {
@@ -1161,12 +1160,18 @@ impl crate::AcpConfig {
 
     /// The `_meta` of `session/new|load` for `id`'s adapter.
     pub fn session_meta(&self, id: &str) -> Option<Value> {
-        match self.adapter_properties(id).session_meta {
-            SessionMeta::None => None,
-            SessionMeta::ClaudeSettings => Some(json!({ "claudeCode": { "options": {
-                "settings": steve_vault::harness::claude_settings(&self.steve_home),
-            } } })),
-        }
+        self.adapter_properties(id)
+            .protected_deny
+            .as_ref()
+            .map(|spec| {
+                steve_vault::harness::protected_session_meta(
+                    &self.steve_home,
+                    &spec.wrapper,
+                    &spec.tools,
+                    &spec.abs_prefix,
+                    &spec.dir_suffix,
+                )
+            })
     }
 
     /// [`Self::session_meta`], with the declared `tools_off_meta` merged in when `tools_off`.
