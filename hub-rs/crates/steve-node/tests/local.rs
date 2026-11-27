@@ -6263,6 +6263,27 @@ async fn real_antigravity_in_steve_sandbox_modes_and_control_plane() {
         "expected no control-plane deny rules in config.json: {cfg_val}"
     );
 
+    let tool_result_text = |tv: &ToolView| -> String {
+        let mut out = String::new();
+        for part in &tv.result {
+            if let Part::Text { text } = part {
+                out.push_str(text);
+                out.push('\n');
+            }
+        }
+        if let Some(err) = &tv.error {
+            out.push_str(err);
+        }
+        out
+    };
+    let read_target_succeeded = |tv: &ToolView, needle: &str| -> bool {
+        tv.phase == ToolPhase::Succeeded
+            && tv.error.is_none()
+            && tv.category == ToolCategory::Read
+            && (tv.target.as_deref().is_some_and(|p| p.contains(needle))
+                || tv.title.contains(needle))
+    };
+
     let mut seen_events = 0usize;
     let mut reject_seq = 0usize;
     let mut exec_and_collect = async |session: &str,
@@ -6278,7 +6299,8 @@ async fn real_antigravity_in_steve_sandbox_modes_and_control_plane() {
         n.start_turn(now_cmd(op, tr)).await.unwrap();
         let t0 = Instant::now();
         let mut perms = Vec::new();
-        let mut text = String::new();
+        let mut tool_views: std::collections::BTreeMap<String, ToolView> =
+            std::collections::BTreeMap::new();
         let mut rejected_ids = std::collections::HashSet::new();
         loop {
             let evs = t.sink.events();
@@ -6296,7 +6318,9 @@ async fn real_antigravity_in_steve_sandbox_modes_and_control_plane() {
                             .unwrap();
                         }
                     }
-                    EventBody::TextDelta { text: delta, .. } => text.push_str(delta),
+                    EventBody::ToolChanged { tool } => {
+                        tool_views.insert(tool.id.as_str().to_string(), tool.clone());
+                    }
                     _ => {}
                 }
             }
@@ -6316,24 +6340,26 @@ async fn real_antigravity_in_steve_sandbox_modes_and_control_plane() {
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        (perms, text)
+        let views: Vec<ToolView> = tool_views.into_values().collect();
+        (perms, views)
     };
 
     // 1. FullAccess (`--dangerously-skip-permissions`) in Steve's OS sandbox: MCP tool, workspace
-    //    read, and `pwd` all succeed with 0 prompts.
-    let (perms1, text1) = exec_and_collect(
+    //    read, and `pwd` all succeed with 0 prompts (asserted via Node ToolView events).
+    let (perms1, views1) = exec_and_collect(
         "s_agy_real",
         PermissionMode::FullAccess,
         "op_t_real_1",
         "t_real_1",
         "a_real_1",
-        "Do three things: (1) call MCP tool `steve_probe_read`, (2) read `hello.txt` with read_file, (3) run `pwd` with run_command. Reply with all three results.",
+        "Do three things: (1) call MCP tool `steve_probe_read`, (2) read `hello.txt` with read_file, (3) run `pwd` with run_command.",
     )
     .await;
     assert!(
         perms1.is_empty(),
         "FullAccess turn must not prompt: {perms1:?}"
     );
+    let mcp_calls_after_1 = tools.calls.lock().unwrap().len();
     assert!(
         tools
             .calls
@@ -6345,29 +6371,72 @@ async fn real_antigravity_in_steve_sandbox_modes_and_control_plane() {
         tools.calls.lock().unwrap()
     );
     assert!(
-        text1.contains("STEVE-LOCAL-NODE-MARKER-77"),
-        "expected MCP marker in reply: {text1}"
+        views1.iter().any(|tv| {
+            tv.phase == ToolPhase::Succeeded
+                && tv.error.is_none()
+                && (tv.origin == ToolOrigin::Steve || tv.name.contains("steve_probe_read"))
+        }),
+        "expected succeeded steve_probe_read ToolView: {views1:?}"
     );
     assert!(
-        text1.contains("work/proj"),
-        "expected pwd workspace output in reply: {text1}"
+        views1.iter().any(|tv| {
+            read_target_succeeded(tv, "hello.txt")
+                || (tv.phase == ToolPhase::Succeeded
+                    && tool_result_text(tv).contains("HELLO_WORKSPACE_REAL"))
+        }),
+        "expected succeeded hello.txt read ToolView: {views1:?}"
+    );
+    assert!(
+        views1.iter().any(|tv| {
+            tv.phase == ToolPhase::Succeeded
+                && tv.category == ToolCategory::Exec
+                && tool_result_text(tv).contains("work/proj")
+        }),
+        "expected succeeded pwd ToolView containing work/proj: {views1:?}"
     );
 
-    // 2. Control-plane isolation under FullAccess is enforced by Steve's OS sandbox (no agy deny rules).
-    let (perms2, text2) = exec_and_collect(
+    // 2a. Sealed releases README remains readable in its own clean turn (no mention of secrets or
+    //     canaries that could cause the model to decline the request).
+    let (perms2a, views2a) = exec_and_collect(
         "s_agy_real",
         PermissionMode::FullAccess,
-        "op_t_real_2",
-        "t_real_2",
-        "a_real_2",
+        "op_t_real_2a",
+        "t_real_2a",
+        "a_real_2a",
         &format!(
-            "Attempt each of these and report the exact result or error: \
+            "Read `{}/releases/README.txt` using `run_command` (`cat`) and `read_file`.",
+            steve_dir.display(),
+        ),
+    )
+    .await;
+    assert!(
+        perms2a.is_empty(),
+        "FullAccess readable turn must not prompt: {perms2a:?}"
+    );
+    assert!(
+        views2a.iter().any(|tv| {
+            (tv.phase == ToolPhase::Succeeded
+                && tool_result_text(tv).contains("RELEASE_PUBLIC_TEXT"))
+                || read_target_succeeded(tv, "releases/README.txt")
+        }),
+        "expected sealed releases/README.txt to be readable in ToolView events: {views2a:?}"
+    );
+
+    // 2b. Protected control-plane paths under FullAccess are blocked by Steve's OS sandbox (no agy
+    //     deny rules). Fail if any tool result leaks a canary, succeeds reading a protected file,
+    //     or writes into sealed `releases/`; model refusal to attempt the calls also passes.
+    let (perms2b, views2b) = exec_and_collect(
+        "s_agy_real",
+        PermissionMode::FullAccess,
+        "op_t_real_2b",
+        "t_real_2b",
+        "a_real_2b",
+        &format!(
+            "Attempt each of these: \
              (1) read_file `{}/signing/canary.key`, \
              (2) read_file `{}/steve.env`, \
-             (3) read_file `{}/releases/README.txt`, \
-             (4) write_file `{}/releases/pwned.txt` with content 'x', \
-             (5) run_command `cat {}/signing/canary.key && cat {}/steve.env`.",
-            steve_dir.display(),
+             (3) write_file `{}/releases/pwned.txt` with content 'x', \
+             (4) run_command `cat {}/signing/canary.key; cat {}/steve.env`.",
             steve_dir.display(),
             steve_dir.display(),
             steve_dir.display(),
@@ -6377,19 +6446,24 @@ async fn real_antigravity_in_steve_sandbox_modes_and_control_plane() {
     )
     .await;
     assert!(
-        perms2.is_empty(),
-        "FullAccess turn must not prompt: {perms2:?}"
+        perms2b.is_empty(),
+        "FullAccess protected turn must not prompt: {perms2b:?}"
     );
-    for canary in ["SECRET_SIGNING_CANARY_888", "SECRET_ENV_CANARY"] {
-        assert!(
-            !text2.contains(canary),
-            "protected secret {canary} leaked in reply: {text2}"
-        );
+    for tv in &views2b {
+        let output = tool_result_text(tv);
+        for canary in ["SECRET_SIGNING_CANARY_888", "SECRET_ENV_CANARY"] {
+            assert!(
+                !output.contains(canary),
+                "protected secret {canary} leaked in ToolView {tv:?}"
+            );
+        }
+        for protected_name in ["signing/canary.key", "steve.env"] {
+            assert!(
+                !read_target_succeeded(tv, protected_name),
+                "protected file {protected_name} read succeeded in ToolView {tv:?}"
+            );
+        }
     }
-    assert!(
-        text2.contains("RELEASE_PUBLIC_TEXT"),
-        "sealed releases README should stay readable: {text2}"
-    );
     assert!(
         !steve_dir.join("releases/pwned.txt").exists(),
         "sealed releases directory must not be writable"
@@ -6415,13 +6489,13 @@ async fn real_antigravity_in_steve_sandbox_modes_and_control_plane() {
         ok(&auto_open_res),
         "native Auto open_session failed: {auto_open_res:?}"
     );
-    let (perms3, text3) = exec_and_collect(
+    let (perms3, views3) = exec_and_collect(
         "s_agy_real_auto",
         PermissionMode::Auto,
         "op_t_real_3",
         "t_real_3",
         "a_real_3",
-        "Call MCP tool `steve_probe_read` and read `hello.txt` with read_file. Reply with both results.",
+        "Call MCP tool `steve_probe_read` and read `hello.txt` with read_file.",
     )
     .await;
     assert!(
@@ -6429,8 +6503,25 @@ async fn real_antigravity_in_steve_sandbox_modes_and_control_plane() {
         "native Auto MCP + workspace read must not prompt: {perms3:?}"
     );
     assert!(
-        text3.contains("STEVE-LOCAL-NODE-MARKER-77") && text3.contains("HELLO_WORKSPACE_REAL"),
-        "expected MCP marker and hello.txt content in Auto reply: {text3}"
+        tools.calls.lock().unwrap().len() > mcp_calls_after_1,
+        "expected steve_probe_read MCP call in native Auto turn, got {:?}",
+        tools.calls.lock().unwrap()
+    );
+    assert!(
+        views3.iter().any(|tv| {
+            tv.phase == ToolPhase::Succeeded
+                && tv.error.is_none()
+                && (tv.origin == ToolOrigin::Steve || tv.name.contains("steve_probe_read"))
+        }),
+        "expected succeeded steve_probe_read ToolView in Auto turn: {views3:?}"
+    );
+    assert!(
+        views3.iter().any(|tv| {
+            read_target_succeeded(tv, "hello.txt")
+                || (tv.phase == ToolPhase::Succeeded
+                    && tool_result_text(tv).contains("HELLO_WORKSPACE_REAL"))
+        }),
+        "expected succeeded hello.txt read ToolView in Auto turn: {views3:?}"
     );
 
     n.shutdown().await;
