@@ -263,11 +263,9 @@ fn bound_label(raw: &str) -> String {
 }
 
 fn tool_label(tool: &ToolView) -> String {
-    let name = tool
-        .name
-        .strip_prefix("mcp__steve__")
-        .unwrap_or(&tool.name)
-        .trim();
+    // Steve's own tools arrive already named without the MCP transport prefix (the ACP
+    // normalizer strips it), so the label uses the name as the Node reported it.
+    let name = tool.name.trim();
     let detail = tool
         .target
         .as_deref()
