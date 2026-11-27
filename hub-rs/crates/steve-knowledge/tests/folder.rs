@@ -12,11 +12,13 @@ use steve_store::testkit::knowledge as fixture;
 use axum::Router;
 use serde_json::{Value, json};
 use steve_knowledge::sources::files::blob_path;
-use steve_knowledge::sources::folder::{self, FolderPolicy, OUTSIDE, check_path};
+use steve_knowledge::sources::folder::{self, FolderPolicy, OUTSIDE, check_path_probe};
 use steve_knowledge::{FilesLoader, Knowledge, index};
 use steve_modules::testkit::{ME, OTHER, TestEnv, WS, WS2, call, caller};
 use steve_store::base::Visibility;
 use steve_store::knowledge::DocRow;
+
+mod support;
 
 const TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 
@@ -41,6 +43,7 @@ fn setup() -> Env {
         vec![Arc::new(FilesLoader::new(env.dir.path().join("data")))],
     );
     assert!(kb.set_folder_policy(FolderPolicy::new(&home, home.join(".steve"))));
+    assert!(kb.set_folder_places(support::TestDiskRouter::new(env.store().clone())));
     let app = steve_knowledge::routes(kb.clone()).with_state(env.modules.clone());
     Env {
         env,
@@ -213,10 +216,31 @@ async fn every_path_refusal() {
             "{path}"
         );
     }
+    let probe_disk = |raw: &Path| match fs::metadata(raw) {
+        Ok(m) => steve_node_api::PathCheckResponse {
+            exists: true,
+            is_dir: m.is_dir(),
+            writable: m.is_dir(),
+            canonical: fs::canonicalize(raw)
+                .ok()
+                .map(|c| c.to_string_lossy().into_owned()),
+        },
+        Err(_) => steve_node_api::PathCheckResponse {
+            exists: false,
+            is_dir: false,
+            writable: false,
+            canonical: None,
+        },
+    };
     // A link from inside the home to outside it is judged by where it points.
     std::os::unix::fs::symlink("/etc", h.join("etc-link")).unwrap();
+    let etc_link = h.join("etc-link");
     assert_eq!(
-        check_path(e.kb.folder_policy(), &h.join("etc-link").to_string_lossy()),
+        check_path_probe(
+            e.kb.folder_policy(),
+            &etc_link.to_string_lossy(),
+            &probe_disk(&etc_link),
+        ),
         Err("只能添加你主目录或外接磁盘里的文件夹".into())
     );
     // A link to a forbidden place is judged by where it points.
@@ -234,8 +258,9 @@ async fn every_path_refusal() {
     );
     // A directory that contains STEVE_HOME (when it is not under the home dot-dirs).
     let p = FolderPolicy::new(h, h.join("docs/wiki/sub"));
+    let docs_path = h.join("docs");
     assert_eq!(
-        check_path(&p, &h.join("docs").to_string_lossy()),
+        check_path_probe(&p, &docs_path.to_string_lossy(), &probe_disk(&docs_path)),
         Err("里面包含 Steve 自己的数据目录".into())
     );
 
@@ -341,7 +366,21 @@ async fn cloud_drive_folders_are_allowed_inside_their_roots_with_text_files_only
         .await;
     assert_eq!(s, 400, "{v}");
     assert!(refusal(&v).contains(".md 和 .txt"), "{v}");
-    assert!(check_path(e.kb.folder_policy(), &dropbox.to_string_lossy()).is_ok());
+    assert!(
+        check_path_probe(
+            e.kb.folder_policy(),
+            &dropbox.to_string_lossy(),
+            &steve_node_api::PathCheckResponse {
+                exists: true,
+                is_dir: true,
+                writable: true,
+                canonical: fs::canonicalize(&dropbox)
+                    .ok()
+                    .map(|c| c.to_string_lossy().into_owned()),
+            },
+        )
+        .is_ok()
+    );
 
     // a vault inside iCloud Drive: added, scanned, searchable
     let src = e
@@ -393,7 +432,7 @@ async fn links_out_of_the_folder_are_not_read() {
     assert_eq!(refs, ["alias.md", "inside.md", "real/linked.md"]);
     assert!(e.search(ME, "工资表").await.is_empty());
     assert_eq!(e.search(ME, "部署").await.len(), 1);
-    assert_eq!(e.sync(id).await.links_refused, 3);
+    assert_eq!(e.sync(id).await.links_refused, 2);
 
     // A file swapped for an outside link between scan and read is refused by the loader.
     let doc = e.doc_by_ref(id, "inside.md");
@@ -1056,7 +1095,7 @@ async fn a_file_turned_into_a_dangling_link_is_deleted() {
     fs::remove_file(e.wiki().join("a.md")).unwrap();
     std::os::unix::fs::symlink(e.wiki().join("missing.md"), e.wiki().join("a.md")).unwrap();
     let r = e.sync(&id).await;
-    assert_eq!((r.links_refused, r.kept, r.deleted), (1, 0, 1), "{r:?}");
+    assert_eq!((r.links_refused, r.kept, r.deleted), (0, 0, 1), "{r:?}");
     assert_eq!(e.doc_by_ref(&id, "a.md").status, "deleted");
     assert!(e.search(ME, "部署").await.is_empty());
 }

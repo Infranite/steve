@@ -137,6 +137,16 @@ async fn a_start_failure_is_stored_in_zh_cn() {
             .unwrap()
     })
     .await;
+    let s = k.db().sessions_of_item(&i.id).unwrap().pop().unwrap();
+    en(|| {
+        k.core
+            .workspace_failed(
+                &s.id,
+                crate::WorkspaceFailure::DirMissing("/nonexistent/steve-test"),
+            )
+            .unwrap()
+    })
+    .await;
     let why = "开不了会话：项目目录不存在：/nonexistent/steve-test";
     assert_eq!(k.open_fails(&i.id), vec![why]);
     let tl: Vec<String> = k

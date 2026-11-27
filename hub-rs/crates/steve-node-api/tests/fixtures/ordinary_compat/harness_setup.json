@@ -1,0 +1,12 @@
+{
+  "state": "ready",
+  "components": [
+    {
+      "id": "adapter",
+      "name": "ACP Adapter",
+      "package": "@example/acp-adapter",
+      "status": "installed"
+    }
+  ],
+  "can_install": true
+}

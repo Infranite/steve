@@ -1036,6 +1036,19 @@ pub fn effect_of(c: &mut impl Read, decision: &str) -> Result<Option<EffectRow>>
     )
 }
 
+/// Earliest `next_at` (ms) among pending or unknown effects, or `None` when none are scheduled.
+pub fn next_due_effect(c: &mut impl Read) -> Result<Option<i64>> {
+    Ok(c.one(
+        Query::select()
+            .expr(Func::min(Expr::col("next_at")))
+            .from("gh_effects")
+            .and_where(Expr::col("state").is_in(["pending", "unknown"]))
+            .and_where(Expr::col("next_at").is_not_null()),
+        |row| row.get::<Option<i64>>(0),
+    )?
+    .flatten())
+}
+
 /// The effects to try now: pending or unknown, due, oldest first.
 pub fn due_effects(c: &mut impl Read, now: i64, limit: i64) -> Result<Vec<EffectRow>> {
     c.all(

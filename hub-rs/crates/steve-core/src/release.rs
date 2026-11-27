@@ -10,7 +10,7 @@
 
 use crate::error::Result;
 use crate::gateway::{jstr, truthy};
-use crate::git::{self, Rebase};
+use crate::git::Rebase;
 use crate::occupancy::Hold;
 use crate::orchestrator::To;
 use crate::repo::{Decision, Item, WS};
@@ -135,7 +135,7 @@ impl Tx<'_> {
         let Some(branch) = i.branch.as_deref().filter(|b| !b.is_empty()) else {
             return Ok(false);
         };
-        let Some(p) = self.db().project(i.project_id.as_deref())? else {
+        let Some(_p) = self.db().project(i.project_id.as_deref())? else {
             return Ok(false);
         };
         if self.git_on_node(&i.id) {
@@ -145,17 +145,7 @@ impl Tx<'_> {
             return Ok(matches!(self.git_take(i), Some(Ok(Some(s)))
                 if s.want.branch.as_deref() == Some(branch.as_str()) && s.changes == Some(false)));
         }
-        if p.device_id != HUB_DEVICE {
-            /* no Node for it and its paths name the other device's files: git here can't tell; the
-            release request is refused */
-            return Ok(false);
-        }
-        let wt = i
-            .cwd
-            .as_deref()
-            .filter(|c| !c.is_empty() && *c != p.path)
-            .map(Path::new);
-        Ok(git::has_changes(Path::new(&p.path), wt, branch, "main") == Some(false))
+        Ok(false)
     }
 
     /// Rebase the item's branch onto main in its worktree; on any problem the agent is sent back and nothing is released.
@@ -177,10 +167,10 @@ impl Tx<'_> {
         {
             return Ok(true);
         }
+        if i.branch.as_deref() != Some(branch) {
+            return Ok(true);
+        }
         if self.git_on_node(item_id) {
-            if i.branch.as_deref() != Some(branch) {
-                return Ok(true);
-            }
             /* on its Node, off the lock: the release starts when the rebase comes back done */
             let Some(d) = self.open_release(item_id)? else {
                 return Ok(false);
@@ -188,21 +178,14 @@ impl Tx<'_> {
             self.rebase_on_node(item_id, branch, to, &d.id);
             return Ok(false);
         }
-        let Some(cwd) = i
-            .cwd
-            .as_deref()
-            .filter(|c| !c.is_empty() && Path::new(c).exists())
-        else {
-            return Ok(true);
-        };
-        if i.branch.as_deref() != Some(branch) {
+        if i.cwd.as_deref().is_none_or(str::is_empty) {
             return Ok(true);
         }
         self.rebase_outcome(
             item_id,
             branch,
             to,
-            git::rebase_onto(Path::new(cwd), "main"),
+            Rebase::Error(steve_i18n::t!("core.release.no_node_rebase")),
         )
     }
 

@@ -552,8 +552,6 @@ steve-github/src/config.rs	"检查失败时"	1
 steve-github/src/config.rs	"要"	1
 steve-github/src/config.rs	"（无）"	1
 steve-hub/src/api/items.rs	"类型"	1
-steve-hub/src/api/outputs.rs	"分支"	1
-steve-hub/src/api/outputs.rs	"提交"	1
 steve-hub/src/api/outputs/node.rs	"分支"	1
 steve-hub/src/api/outputs/node.rs	"提交"	1
 steve-hub/src/catalog.rs	"其他"	1

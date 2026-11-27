@@ -1,9 +1,9 @@
 use super::*;
 
-install! { install(reg, _cx) [auth, backend, built, core, harnesses, jobs, local_node, local_runtime, mcp, module_routes, nodes, routed, workspaces] => [] {
-    let history = local_runtime.as_ref()
-        .map(|r| r.node() as Arc<dyn steve_node_api::Discovery>)
-        .or_else(|| local_node.clone().map(|n| n as Arc<dyn steve_node_api::Discovery>));
+install! { install(reg, _cx) [auth, backend, built, core, harnesses, jobs, local_runtime, mcp, module_routes, nodes, routed, workspaces] => [] {
+    let history = local_runtime
+        .as_ref()
+        .map(|r| r.node() as Arc<dyn steve_node_api::Discovery>);
     let tasks = Arc::new(crate::jobs::Tasks::default());
     reg.wired = Some(Wired {
         history,
@@ -16,7 +16,6 @@ install! { install(reg, _cx) [auth, backend, built, core, harnesses, jobs, local
             plugins: built.plugins.clone(),
             routed,
             harnesses: harnesses.clone(),
-            node: local_node,
             nodes: nodes.clone(),
             lifecycle: built.lifecycle.clone(),
             thread_recover_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),

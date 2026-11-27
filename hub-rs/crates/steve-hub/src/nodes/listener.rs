@@ -307,6 +307,9 @@ async fn serve_after(
     svc.registry.remove(node.as_str(), generation);
     record_seen(&svc, &node, generation, true).await;
     remote.detach(generation);
+    if node.as_str() == crate::wire::local_service::NODE_ID {
+        svc.local_status.wake();
+    }
     if remote.generation().is_none() {
         ::metrics::gauge!("steve_node_link_protocol_delta", "node" => node.to_string()).set(0.0);
     }
@@ -354,11 +357,13 @@ async fn accept_link(
 
 /// How long the Hub waits for a Node to say what machine it is.
 const HOST_ASK: Duration = Duration::from_secs(15);
+/// How long the Hub waits for initial capability negotiation after an ordinary link attaches.
+const CAPABILITIES_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Asks the Node over `conn` what machine it is ([`Discovery::host`]) and keeps the answer with it, for
 /// while it is away too. A Node that does not answer keeps what it said before.
-/// What an ordinary link starts once installed: learning the host, the pause state the welcome no
-/// longer carries, and catching up on what the Node did while away.
+/// What an ordinary link starts once installed: learning the host, negotiating capabilities,
+/// the pause state the welcome no longer carries, and catching up on what the Node did while away.
 fn start_ordinary(
     svc: &Arc<NodeService>,
     node: &NodeId,
@@ -367,12 +372,42 @@ fn start_ordinary(
     paused: bool,
 ) {
     tokio::spawn(learn_host(svc.clone(), node.clone(), conn.clone()));
+    tokio::spawn(learn_capabilities(
+        svc.clone(),
+        node.clone(),
+        remote.clone(),
+        conn.clone(),
+    ));
     conn.notify("paused", serde_json::json!({ "paused": paused }));
     if remote.is_reconciling() {
         match svc.fleet.runtime_for(node.as_str()) {
             Some(rt) => tokio::spawn(reconcile_again(rt, remote.clone(), conn.clone())),
             None => tokio::spawn(catch_up(svc.store.clone(), remote.clone(), conn.clone())),
         };
+    }
+}
+
+async fn learn_capabilities(
+    svc: Arc<NodeService>,
+    node: NodeId,
+    remote: Arc<steve_node_wire::RemoteNode>,
+    conn: Arc<Conn>,
+) {
+    let generation = conn.generation();
+    match tokio::time::timeout(CAPABILITIES_PROBE_TIMEOUT, remote.probe(false)).await {
+        Ok(Ok(_)) => {
+            if node.as_str() == crate::wire::local_service::NODE_ID
+                && svc.registry.current(node.as_str()) == Some(generation)
+            {
+                svc.local_status.wake();
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::debug!(node = %node, "initial capability probe: {}", e.safe_detail);
+        }
+        Err(_) => {
+            tracing::debug!(node = %node, "initial capability probe timed out");
+        }
     }
 }
 

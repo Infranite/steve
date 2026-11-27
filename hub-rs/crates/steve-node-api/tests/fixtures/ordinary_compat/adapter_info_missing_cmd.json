@@ -1,0 +1,9 @@
+{
+  "title": "Codex",
+  "status": "adapter_missing",
+  "missing_command": {
+    "command": "codex",
+    "service_path": "/usr/bin:/bin",
+    "refresh_command": "steve node refresh-env"
+  }
+}

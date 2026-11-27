@@ -46,7 +46,7 @@ const events: REvent[] = [
     title: "后台校验报告模板", actor: "Bash", progress: "npm run lint:report",
     can_cancel: false, duration_ms: done ? 1950 : undefined,
   } }),
-  tool(18, { name: "mcp__steve__steve_update", origin: "steve", category: "steve", title: "update", action: { type: "tool", args: { now: "写上线报告", plan: [{ step: "读瑞典订单历史", done: true }, { step: "搜本地市场资料", done: true }, { step: "对比瑞典与挪威", done: true }, { step: "写上线报告", done: false }] } } }),
+  tool(18, { name: "steve_update", origin: "steve", category: "steve", title: "update", action: { type: "tool", args: { now: "写上线报告", plan: [{ step: "读瑞典订单历史", done: true }, { step: "搜本地市场资料", done: true }, { step: "对比瑞典与挪威", done: true }, { step: "写上线报告", done: false }] } } }),
   ev(19, "text", { role: "assistant", text: "订单和市场都看完了，开始写报告。" }),
   edit(20, "/repo/reports/sweden-insight.md"), edit(22, "/repo/reports/summary.md"),
   run(24, "npm run build:report", "生成 PDF 报告"), run(26, "ls reports", "检查产物", !done),
@@ -63,7 +63,7 @@ const research: Msg = { id: "r1", k: "steve", t: "", created: T, steps: { ms: 41
     { name: "Read", kind: "read", args: { brief: "web/src/chat2.tsx" }, status: "ok", ms: 30 }, { name: "Read", kind: "read", args: { brief: "web/src/ui.tsx" }, status: "ok", ms: 40 }, { name: "Read", kind: "read", args: { brief: "web/src/thread/parts.tsx" }, status: "ok", ms: 20 },
     { name: "Grep", kind: "search", args: { brief: "TraceLine" }, status: "ok", ms: 80 }, { name: "Grep", kind: "search", args: { brief: "researchSummary" }, status: "ok", ms: 60 },
     { name: "Bash", kind: "exec", args: { brief: "git log --oneline -5" }, status: "failed", error: "transport", ms: 200 },
-    { name: "mcp__steve__steve_knowledge_search", args: { brief: "思考过程展示" }, status: "ok", ms: 300 },
+    { name: "steve_knowledge_search", kind: "steve", args: { brief: "思考过程展示" }, status: "ok", ms: 300 },
   ] } }
 seedMessages([research])
 updateChat({ live: { mid: "m", run: "live", startedAt: T - 14000, tools: [{ name: "Read", brief: "web/src/chat2.tsx", ok: true, kind: "read" }, { name: "Read", brief: "web/src/ui.tsx", ok: true, kind: "read" }, { name: "Grep", brief: "StepsBlock", ok: true, kind: "search" }], now: { name: "Grep", brief: "LiveSteps", kind: "search" } } })

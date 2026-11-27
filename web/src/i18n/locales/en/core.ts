@@ -342,9 +342,7 @@ export default {
   transcript: {
     earlier: "Load earlier turns",
     recentFiles: "Files changed in loaded turns ({{count}})",
-    tool: { ToolSearch: "Load tools", TodoWrite: "Update todos", Skill: "Skill" },
     read: "Read",
-    write: "Write",
     edit: "Edit",
     webSearch: "Web search",
     search: "Search",
@@ -420,7 +418,7 @@ export default {
     finished: "Finished",
     more_one: "+{{count}} more",
     more_other: "+{{count}} more",
-    live: { read: "Reading", write: "Writing", edit: "Editing", search: "Searching", webSearch: "Searching the web", run: "Running" },
+    live: { read: "Reading", edit: "Editing", search: "Searching", webSearch: "Searching the web", run: "Running" },
     group: {
       read_one: "Read {{count}} file",
       read_other: "Read {{count}} files",

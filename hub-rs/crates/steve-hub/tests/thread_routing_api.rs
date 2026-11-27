@@ -15,8 +15,12 @@ use steve_hub::config::Config;
 
 const ADAPTER_MODELS: [&str; 2] = ["fixture-smart", "fixture-fast"];
 
+#[path = "support/local_node.rs"]
+mod local_node;
+
 struct Env {
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     db: std::path::PathBuf,
     base: String,
     http: reqwest::Client,
@@ -127,8 +131,6 @@ async fn start() -> Env {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         // Route and execute only on the isolated local Node with the fixture adapter.
-        ("STEVE_NODE_MODE", "local".into()),
-        ("STEVE_NODE_LISTEN", "0".into()),
         ("STEVE_NO_RESUME", "0".into()),
         ("STEVE_LOCAL_NODE_PORT", service_port.to_string()),
         ("STEVE_BACKUP", "off".into()),
@@ -156,15 +158,14 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
     w.domain
         .harnesses(true)
         .await
         .expect("probe model catalogue");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
-    for job in w.jobs {
-        job.start(&st.jobs);
-    }
+    local_node::start_jobs(w.jobs, &st.jobs);
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
         let _ = axum::serve(
@@ -193,6 +194,7 @@ async fn start() -> Env {
         .expect("session cookie");
     Env {
         _home: home,
+        _local_node: local_node,
         db: cfg.db_path(),
         base,
         http,

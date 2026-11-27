@@ -89,16 +89,38 @@ impl Home {
 
 const VERSION: &str = "0.9.0";
 
-/// A running Hub process (its own process group, reaped by [`ProcessGuard`]).
-struct Hub(Option<ProcessGuard>);
+/// A running Hub process (its own process group, reaped by [`ProcessGuard`]) paired with its
+/// colocated service Node.
+struct Hub {
+    child: Option<ProcessGuard>,
+    node_pid_file: PathBuf,
+}
 
 impl Hub {
-    /// SIGKILL the Hub and its agents through [`ProcessGuard`]'s process-group/watchdog teardown.
+    /// SIGKILL the Hub, its colocated service Node, and any agents to simulate an abrupt machine stop.
     fn kill(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+        if let Ok(text) = std::fs::read_to_string(&self.node_pid_file)
+            && let Some(pid) = text
+                .lines()
+                .next()
+                .and_then(|l| l.trim().parse::<i32>().ok())
+            && pid > 0
+        {
+            unsafe {
+                libc::killpg(pid, libc::SIGKILL);
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
+impl Drop for Hub {
+    fn drop(&mut self) {
+        self.kill();
     }
 }
 
@@ -126,9 +148,8 @@ fn spawn(h: &Home, upgrade: Option<&str>) -> Hub {
         // a turn that ends without a delivery is not continued by Steve: the queue stays the test's
         .env("STEVE_TAKEOVER_CONTINUES", "0")
         .env_remove("STEVE_NO_RESUME")
-        // the local Node, the default
-        // the Node in the Hub's process: killing the Hub cuts its turns, which is what is tested
-        .env("STEVE_NODE_MODE", "local")
+        .env_remove("STEVE_NODE_MODE")
+        .env("STEVE_LOCAL_NODE_PORT", "0")
         .env_remove("STEVE_NODE")
         .env_remove("STEVE_UPGRADE_ID")
         .env_remove("CLAUDE_CONFIG_DIR")
@@ -145,7 +166,10 @@ fn spawn(h: &Home, upgrade: Option<&str>) -> Hub {
     if let Some(id) = upgrade {
         c.env("STEVE_UPGRADE_ID", id);
     }
-    Hub(Some(c.spawn().expect("spawn hub")))
+    Hub {
+        child: Some(c.spawn().expect("spawn hub")),
+        node_pid_file: h.steve().join("data/node/service.pid"),
+    }
 }
 
 async fn health(h: &Home) -> Option<Value> {
@@ -379,6 +403,22 @@ async fn nothing_is_sent_behind_the_upgrade_gate_and_what_waited_goes_once_commi
         "assets": [],
     });
     atomic(&target.join("release.json"), &manifest);
+    let node_bin = target.join("bin/steve-node");
+    std::fs::create_dir_all(node_bin.parent().unwrap()).expect("bin dir");
+    std::fs::write(
+        &node_bin,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"version\":\"{VERSION}\",\"commit\":\"{}\"}}'\n",
+            "a".repeat(40)
+        ),
+    )
+    .expect("write steve-node stub");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&node_bin, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod steve-node stub");
+    }
     let op_path = h
         .steve()
         .join("updates/operations")

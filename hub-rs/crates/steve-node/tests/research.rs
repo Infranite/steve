@@ -1237,7 +1237,7 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
     let cases: Vec<(JobSpec, Code)> = vec![
         (
             refused(|s| research(s).cwd = Some(at("nowhere"))),
-            Code::Invalid,
+            Code::NotFound,
         ),
         (
             refused(|s| {

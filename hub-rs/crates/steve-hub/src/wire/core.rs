@@ -145,6 +145,10 @@ fn cerr(e: CoreError) -> BackendError {
             status: 409,
             message,
         },
+        CoreError::NoNodeAvailable(message) => BackendError {
+            status: 503,
+            message,
+        },
         e => BackendError::msg(e.to_string()),
     }
 }
@@ -254,13 +258,20 @@ impl super::node_runtime::NodeDomain for HubHost {
                     {
                         core.workspace_binding_failed(&session, &detail)
                     } else {
-                        core.workspace_failed(
-                            &session,
-                            error
-                                .as_ref()
-                                .is_some_and(|e| e.code == steve_node_api::Code::Exhausted),
-                            &detail,
-                        )
+                        let failure = match error.as_ref() {
+                            Some(e) if e.code == steve_node_api::Code::Exhausted => {
+                                steve_core::WorkspaceFailure::DiskLow
+                            }
+                            Some(e)
+                                if e.reason.as_ref().is_some_and(|r| {
+                                    r.is(steve_node_api::NodeReason::DirectoryMissing)
+                                }) =>
+                            {
+                                steve_core::WorkspaceFailure::DirMissing(&e.safe_detail)
+                            }
+                            _ => steve_core::WorkspaceFailure::Other(&detail),
+                        };
+                        core.workspace_failed(&session, failure)
                     }
                 }
                 WorkspaceFact::Tidied {
@@ -337,7 +348,7 @@ impl super::node_runtime::NodeDomain for HubHost {
 /// new one no Node takes is refused ([`steve_core::AgentRuntime::refusal`]). Holds and counts
 /// cover every Node.
 pub struct RoutedRuntime {
-    /// The local Node's coordinator (`STEVE_NODE_MODE=local`).
+    /// The colocated local Node's coordinator.
     pub node: Option<Arc<super::node_runtime::NodeRuntime>>,
     /// The remote Nodes' coordinators (enabled by default).
     pub fleet: Option<Arc<crate::nodes::NodeFleet>>,
@@ -517,6 +528,59 @@ impl RoutedRuntime {
             };
             steve_i18n::t!("hub.node.refused", why = why)
         })
+    }
+    /// Asynchronously probes a single session's colocated working directory outside Core's lock
+    /// so [`steve_core::AgentRuntime::cwd_usable`] reads a fresh cached value without blocking.
+    pub async fn prefetch_cwd_usable(&self, session_id: &str) {
+        let cwd = match self.store.sessions().get(session_id) {
+            Ok(Some(s)) if !s.cwd.is_empty() => s.cwd,
+            _ => return,
+        };
+        if let Some(node) = node_of(&self.store, session_id).filter(|n| !n.is_empty())
+            && node != super::local_service::NODE_ID
+        {
+            return;
+        }
+        if self
+            .node_for(session_id)
+            .is_some_and(|n| n.pending_workspace_prepare(session_id).unwrap_or(false))
+        {
+            return;
+        }
+        let _ = self.workspaces.probe_cwd_usable(&cwd).await;
+    }
+
+    /// Asynchronously probes working directories of all sessions that currently have queued
+    /// messages, outside Core's lock, before `flush_queued` runs inside a Core transaction.
+    pub async fn prefetch_queued_cwds(&self) {
+        let sids = match self
+            .store
+            .read(|r| steve_store::session_repo::with_queued_input(r))
+        {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let mut seen = std::collections::HashSet::new();
+        for sid in sids {
+            let cwd = match self.store.sessions().get(&sid) {
+                Ok(Some(s)) if s.status != "ended" && !s.cwd.is_empty() => s.cwd,
+                _ => continue,
+            };
+            if let Some(node) = node_of(&self.store, &sid).filter(|n| !n.is_empty())
+                && node != super::local_service::NODE_ID
+            {
+                continue;
+            }
+            if self
+                .node_for(&sid)
+                .is_some_and(|n| n.pending_workspace_prepare(&sid).unwrap_or(false))
+            {
+                continue;
+            }
+            if seen.insert(cwd.clone()) {
+                let _ = self.workspaces.probe_cwd_usable(&cwd).await;
+            }
+        }
     }
 }
 
@@ -821,6 +885,38 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         self.node_for(session_id)
             .is_some_and(|n| n.is_uncertain(session_id))
     }
+    fn cwd_usable(&self, session_id: &str, cwd: &str) -> bool {
+        if cwd.is_empty() {
+            return false;
+        }
+        // Only check colocated local Node paths; remote Nodes verify workspace usability on
+        // open/turn without stalling the Core lock on WAN RTT.
+        if let Some(node) = node_of(&self.store, session_id).filter(|n| !n.is_empty())
+            && node != super::local_service::NODE_ID
+        {
+            return true;
+        }
+        if self
+            .node_for(session_id)
+            .is_some_and(|n| n.pending_workspace_prepare(session_id).unwrap_or(false))
+        {
+            return true;
+        }
+        // Never block Core's lock/transaction on a Node RPC: read the bounded TTL cache populated
+        // asynchronously by `prefetch_cwd_usable` / `prefetch_queued_cwds`, and on a cold miss
+        // trigger an async background refresh while defaulting to `true`.
+        if let Some(usable) = self.workspaces.cached_cwd_usable(cwd) {
+            return usable;
+        }
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let ws = self.workspaces.clone();
+            let path = cwd.to_string();
+            handle.spawn(async move {
+                let _ = ws.probe_cwd_usable(&path).await;
+            });
+        }
+        true
+    }
     /// Not `route()`: its park-on-doubt suits messages (undone by a later call), but here a yes
     /// drops the session's resume intent for good, so an unreadable binding counts as unbound.
     fn recovers_itself(&self, session_id: &str) -> bool {
@@ -830,13 +926,10 @@ impl steve_core::AgentRuntime for RoutedRuntime {
         self.node.as_ref().map_or(0, |n| n.running_turns())
             + self.fleet.as_ref().map_or(0, |f| f.running_turns())
     }
-    /// What a release waits for: the Hub's own Node's work, unless that Node runs in a process
-    /// of its own (B1), whose turns go on through the Hub's restart.
+    /// The local Node runs in its own `steve-node --local-node` process and outlives Hub restarts
+    /// and upgrades, so its running turns and open permission cards never block Hub upgrade drain.
     fn node_working(&self) -> usize {
-        if self.host.local_node.get().is_some_and(|n| !n.in_process()) {
-            return 0;
-        }
-        self.node.as_ref().map_or(0, |n| n.working())
+        0
     }
     fn flush(&self, session_id: &str, lead: Option<(&str, &str)>) -> steve_core::Flushed {
         use super::node_runtime::Planned;
@@ -900,10 +993,7 @@ pub struct CoreDomain {
     pub harnesses: Arc<crate::harnesses::HubHarnesses>,
     /// The runtime the core runs sessions on.
     pub routed: Arc<RoutedRuntime>,
-    /// The local Node (`STEVE_NODE_MODE=local`): stopped with the Hub, its harnesses
-    /// with it.
-    pub node: Option<Arc<steve_node::LocalNode>>,
-    /// Remote Nodes linked to this Hub, when the Node listener is enabled.
+    /// Remote Nodes (and the colocated service Node) linked to this Hub.
     pub nodes: Option<Arc<crate::nodes::NodeService>>,
     /// The connections' runs (long connections, pollers): stopped with the Hub.
     pub lifecycle: Option<steve_channels::lifecycle::ConnectionRuntime>,
@@ -911,9 +1001,6 @@ pub struct CoreDomain {
     /// instead of aborting startup before the Hub serves or the Node reconciles.
     pub thread_recover_failed: Arc<std::sync::atomic::AtomicBool>,
 }
-
-/// How long the Hub's shutdown waits for the local Node to stop its harnesses.
-const NODE_SHUTDOWN: Duration = Duration::from_secs(5);
 
 fn refs(files: Vec<Value>) -> BResult<Vec<steve_core::repo::FileRef>> {
     files.into_iter().map(from_json).collect()
@@ -1014,7 +1101,6 @@ impl CoreDomain {
             core,
             harnesses,
             routed,
-            node: None,
             nodes: None,
             lifecycle: None,
             thread_recover_failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -1055,6 +1141,7 @@ impl CoreDomain {
                 .maintenance_hold(true)
                 .map_err(|e| BackendError::msg(e.to_string()))?;
         } else if action == "cancel" {
+            self.routed.prefetch_queued_cwds().await;
             store
                 .maintenance_set(false)
                 .map_err(|e| BackendError::msg(e.to_string()))?;
@@ -1075,11 +1162,14 @@ impl CoreDomain {
             .read(|r| steve_store::mail::unknown_draft_count(r))
             .map_err(|e| BackendError::msg(e.to_string()))?;
         let sealed = quiet && self.core.node_working() == 0 && store.maintenance_seal();
-        let mut blockers = self
-            .routed
-            .node
-            .as_ref()
-            .map_or_else(Vec::new, |n| n.working_details());
+        let mut blockers = if node > 0 {
+            self.routed
+                .node
+                .as_ref()
+                .map_or_else(Vec::new, |n| n.working_details())
+        } else {
+            Vec::new()
+        };
         for (kind, count) in &running {
             if *count > 0 {
                 blockers.push(json!({"kind":"activity","state":kind,"count":count,"reason":"waiting_for_activity"}));
@@ -1094,6 +1184,7 @@ impl CoreDomain {
     /// Never fails the Hub: what could not be resumed is logged and reported on `/healthz`
     /// (`recovery`), and its durable intent stays for the next boot.
     pub async fn ready(&self) -> BResult<()> {
+        self.routed.prefetch_queued_cwds().await;
         let c = self.core.clone();
         let recover_failed = self.thread_recover_failed.clone();
         let r = blocking(move || {
@@ -1109,29 +1200,17 @@ impl CoreDomain {
         Ok(())
     }
     pub async fn shutdown(&self) {
-        let node = async {
-            match &self.node {
-                Some(n) => tokio::time::timeout(NODE_SHUTDOWN, n.shutdown())
-                    .await
-                    .is_ok(),
-                None => true,
-            }
-        };
         let lifecycle = async {
             if let Some(rt) = &self.lifecycle {
                 rt.shutdown().await;
             }
         };
-        let (research_stopped, node_stopped, ()) = tokio::join!(
+        let (research_stopped, ()) = tokio::join!(
             self.core.shutdown_research(Duration::from_secs(5)),
-            node,
             lifecycle,
         );
         if !research_stopped {
             tracing::error!("research process groups did not confirm shutdown before deadline");
-        }
-        if !node_stopped {
-            tracing::error!("the local Node did not stop its harnesses before the deadline");
         }
         // Consumers stay live while the Node and connection runtimes flush their final events.
         self.jobs.stop().await;
@@ -1512,6 +1591,7 @@ impl CoreDomain {
         to_obj(blocking(move || c.queued_remove(&sid, &id, &actor)).await?)
     }
     pub async fn queued_send_now(&self, session: &str, id: &str) -> BResult<Obj> {
+        self.routed.prefetch_cwd_usable(session).await;
         let (c, sid, id) = (self.core.clone(), session.to_string(), id.to_string());
         to_obj(
             match blocking(move || c.queued_send_now(&sid, &id)).await? {
@@ -1830,12 +1910,9 @@ impl CoreDomain {
 
     pub async fn harnesses(&self, fresh: bool) -> BResult<Vec<steve_core::harnesses::Harness>> {
         if fresh {
-            let local = self
-                .node
-                .as_ref()
-                .map(|n| n.as_ref() as &dyn steve_node_api::Node);
+            let local = self.routed.workspaces.local_node();
             self.harnesses
-                .refresh_all(local, self.nodes.as_deref(), true)
+                .refresh_all(local.as_deref(), self.nodes.as_deref(), true)
                 .await;
         }
         Ok(self.core.models().harnesses())
@@ -2319,7 +2396,7 @@ mod routed_tests {
         let home = dir.path().join("node");
         std::fs::create_dir_all(&home).unwrap();
         std::fs::write(
-            home.join(steve_node_cli::dial::LINK_STATUS),
+            home.join(steve_node_wire::LINK_STATUS),
             r#"{"at":5,"error":"internal: control message hello is 69214 bytes, over the 65536 limit"}"#,
         )
         .unwrap();
@@ -2489,5 +2566,87 @@ mod routed_tests {
             assert_eq!(got_en.status, status);
             assert_eq!(got_en.message, en);
         }
+    }
+
+    /// N3: `RoutedRuntime::cwd_usable` never blocks on a Node RPC inside Core's lock; it reads
+    /// the bounded TTL cache populated asynchronously by `Workspaces::probe_cwd_usable` /
+    /// `RoutedRuntime::prefetch_cwd_usable`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cwd_usable_reads_prefetched_cache_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            steve_store::Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher)
+                .unwrap();
+        let node = Arc::new(
+            steve_node::LocalNode::open(steve_node::NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
+                node: steve_node_api::NodeId::new("local").unwrap(),
+                home: dir.path().join("node"),
+                acp: steve_acp::AcpConfig {
+                    declared: Default::default(),
+                    adapters: Default::default(),
+                    node: "node".into(),
+                    claude_executable: "/usr/bin/false".into(),
+                    claude_config_dir: None,
+                    steve_home: dir.path().join("steve"),
+                    codex_home: dir.path().join("codex"),
+                    user_home: dir.path().to_path_buf(),
+                    version: "test".into(),
+                },
+                roots: vec![],
+                capacity: steve_node_api::Capacity {
+                    sessions: 0,
+                    jobs: 0,
+                    execs: 0,
+                },
+                storage: Default::default(),
+            })
+            .unwrap(),
+        );
+        node.enable_host_ops();
+        let nr = super::super::node_runtime::NodeRuntime::new(
+            store.clone(),
+            node.clone(),
+            Arc::new(super::super::node_tools::tests::Ends),
+        );
+        let ws = super::super::workspaces::Workspaces::new(
+            store.clone(),
+            Some(super::super::workspaces::LocalFace {
+                node,
+                runtime: nr.clone(),
+            }),
+            None,
+            vec![],
+        );
+        let host = Arc::new(super::HubHost {
+            store: store.clone(),
+            data_dir: dir.path().into(),
+            core: OnceLock::new(),
+            flow: OnceLock::new(),
+            approval: Default::default(),
+            local_node: OnceLock::new(),
+        });
+        let rt = super::RoutedRuntime {
+            node: Some(nr),
+            fleet: None,
+            store,
+            host,
+            workspaces: ws.clone(),
+            worktrees: None,
+            dispatch_harnesses: None,
+        };
+        let target = dir.path().join("missing-cwd");
+        let target_str = target.to_string_lossy().to_string();
+        // Before prefetch (cold cache): non-blocking default returns true rather than blocking.
+        assert_eq!(ws.cached_cwd_usable(&target_str), None);
+        // Async prefetch outside Core's lock detects missing directory and caches `false`.
+        assert!(!ws.probe_cwd_usable(&target_str).await);
+        assert!(!rt.cwd_usable("s1", &target_str));
+        // Creating the directory and re-probing asynchronously updates cache to `true`.
+        std::fs::create_dir_all(&target).unwrap();
+        assert!(ws.probe_cwd_usable(&target_str).await);
+        assert!(rt.cwd_usable("s1", &target_str));
+        // Empty cwd is immediately rejected without RPC.
+        assert!(!rt.cwd_usable("s1", ""));
     }
 }

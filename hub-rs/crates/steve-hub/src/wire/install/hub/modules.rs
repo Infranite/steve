@@ -14,6 +14,7 @@ install! { install(reg, cx) [auth_cfg, backend, core, db, host, node_host, node_
         openviking: cfg.openviking.clone(),
         assembly: asm,
         workspaces: node_host.as_ref().map(|_| workspaces.clone()),
+        secrets: Some(secrets.clone()),
         // with the local Node on, `cmd` steps run on the Node that holds the project
         cmd_node: node_host.as_ref().map(|_| {
             flow_cmd::FlowCmd::new(db.clone(), workspaces.clone())
