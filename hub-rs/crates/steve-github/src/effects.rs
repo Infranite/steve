@@ -17,22 +17,29 @@
 //! request still on its way has landed); after [`outbox::MAX_ATTEMPTS`] it stays unknown and the
 //! item's timeline says so — a person decides.
 
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use serde_json::{Value, json};
 use steve_modules::ApiError;
+use steve_runtime::{
+    due::{DueError, DueSource, due_loop},
+    policy::{Backoff, Jitter},
+};
 use steve_store::outbox;
 
-use crate::GitHub;
 use crate::api::GhError;
+use crate::{GitHub, Inner};
 use steve_store::github::EffectRow;
 
 pub const OPEN: &str = "open";
 pub const MERGE: &str = "merge";
 pub const COMMENT: &str = "comment";
 
-/// How often the runner looks for due effects besides being woken.
-pub const EVERY: Duration = Duration::from_secs(2);
+/// Fallback ceiling for the due loop (re-exported for callers inspecting the loop bound).
+pub const EVERY: Duration = steve_runtime::due::FALLBACK;
+const RETRY_BASE: Duration = Duration::from_secs(1);
+const RETRY_MAX: Duration = Duration::from_secs(60);
 /// Effects taken per pass.
 const BATCH: i64 = 20;
 
@@ -315,27 +322,50 @@ impl GitHub {
             })
     }
 
-    /// The runner: recovers once, then runs due effects when woken and every [`EVERY`]. Holds the
-    /// service weakly; stops when it is dropped.
+    /// The runner: recovers once, then drives due effects via [`due_loop`], woken on every
+    /// queued write. Holds the service weakly; stops when cancelled.
     pub async fn run_effects_job(self) {
-        let weak = std::sync::Arc::downgrade(&self.0);
         self.recover_effects();
+        let clock = self.0.conns.modules().clock.clone();
+        let wake = self.0.effect_wake.clone();
+        let source = Arc::new(EffectsDueSource(Arc::downgrade(&self.0)));
+        drop(self);
+        let backoff = Backoff {
+            base: RETRY_BASE,
+            max: RETRY_MAX,
+            factor: 2,
+            jitter: Jitter::Equal,
+            attempts: None,
+            reset_after: None,
+        };
+        due_loop(source, clock, wake, backoff).await;
+    }
+}
 
-        loop {
-            let wake = {
-                let Some(inner) = weak.upgrade() else { break };
-                let gh = GitHub(inner);
-                steve_runtime::round("github.effects", async {
-                    while gh.run_effects().await > 0 {}
-                })
-                .await;
-                gh.0.effect_wake.clone()
-            };
-            tokio::select! {
-                _ = wake.notified() => {}
-                _ = tokio::time::sleep(EVERY) => {}
-            }
-        }
+struct EffectsDueSource(Weak<Inner>);
+
+impl DueSource for EffectsDueSource {
+    fn name(&self) -> &'static str {
+        "github.effects"
+    }
+
+    async fn next_due(&self) -> Result<Option<i64>, DueError> {
+        let Some(inner) = self.0.upgrade() else {
+            return Ok(None);
+        };
+        let gh = GitHub(inner);
+        gh.store()
+            .read(|r| steve_store::github::next_due_effect(r))
+            .map_err(|e| DueError(e.to_string()))
+    }
+
+    async fn run_due(&self, _now: i64) -> Result<(), DueError> {
+        let Some(inner) = self.0.upgrade() else {
+            return Ok(());
+        };
+        let gh = GitHub(inner);
+        gh.run_effects().await;
+        Ok(())
     }
 }
 

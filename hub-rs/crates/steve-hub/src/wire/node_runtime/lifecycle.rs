@@ -598,7 +598,7 @@ impl NodeRuntime {
 }
 
 /// `/healthz`'s `node` block: what rollout and rollback decisions read instead of the database.
-/// `local`: the local Node's coordinator when `STEVE_NODE_MODE=local`; `remote`: remote Nodes are
+/// `local`: the colocated local Node's coordinator; `remote`: remote Nodes are
 /// listened for (unless `STEVE_NODE_LISTEN=0`). The counts come from the store, so they are there with
 /// the Node off too:
 ///
@@ -614,11 +614,13 @@ pub fn health(
     store: &Store,
     local: Option<&NodeRuntime>,
     remote: bool,
+    linked: bool,
 ) -> Result<Value, StoreError> {
     let counts = store.read(|r| sessions::health(r, local.is_some(), remote))?;
     Ok(json!({
         "enabled": local.is_some(),
         "remote": remote,
+        "linked": local.is_some() && linked,
         "reconciled": local.map(|n| n.is_reconciled()),
         "stopped": local.is_some_and(|n| n.is_stopped()),
         "holding": local.is_some_and(|n| n.is_holding()),

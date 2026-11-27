@@ -98,6 +98,23 @@ pub(crate) fn said(e: &Error) -> String {
     steve_i18n::stored(|| match NodeStop::of(e) {
         Some(stop) => stop_text(stop),
         None if workspace_binding_conflict(e) => steve_i18n::t!("hub.node.workspace_conflict"),
+        None if e
+            .reason
+            .as_ref()
+            .is_some_and(|r| r.is(NodeReason::LocalNodeUpdating)) =>
+        {
+            steve_i18n::t!("hub.node.local_updating")
+        }
+        None if e
+            .reason
+            .as_ref()
+            .is_some_and(|r| r.is(NodeReason::DirectoryMissing)) =>
+        {
+            steve_i18n::t!(
+                "hub.project.project_dir_missing",
+                path = e.safe_detail.as_str()
+            )
+        }
         None => e.safe_detail.clone(),
     })
 }
@@ -295,6 +312,9 @@ pub struct NodeRuntime {
     roles: Mutex<HashMap<(String, String), Role>>,
     /// What the Hub measures of this Node's batches and commands.
     meters: meters::Meters,
+    /// Optional wake signal fired whenever a turn ends on this Node (used by the colocated
+    /// local-service supervisor to replace an older Node immediately once turns drain).
+    on_turn_ended: OnceLock<Arc<tokio::sync::Notify>>,
 }
 
 /// An attempt's deadline by default: none in practice, like research's ([`super::research::NO_WALL_LIMIT`]).
@@ -374,6 +394,7 @@ impl NodeRuntime {
             jobs: node_jobs::Waiters::default(),
             roles: Mutex::new(HashMap::new()),
             meters: meters::Meters::new(node_id.as_str()),
+            on_turn_ended: OnceLock::new(),
             node_id,
         })
     }
@@ -688,9 +709,17 @@ impl NodeRuntime {
         );
     }
 
+    /// Register a wake signal notified whenever a logical turn completes on this Node.
+    pub fn set_turn_end_notify(&self, notify: Arc<tokio::sync::Notify>) {
+        let _ = self.on_turn_ended.set(notify);
+    }
+
     fn tell_end(&self, e: End) {
         self.domain
             .turn_ended(&e.session, e.attempt.as_deref(), &e.stop, e.error);
+        if let Some(notify) = self.on_turn_ended.get() {
+            notify.notify_one();
+        }
     }
 
     pub fn hold(&self, on: bool) {

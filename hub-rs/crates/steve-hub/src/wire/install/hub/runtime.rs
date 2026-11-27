@@ -1,52 +1,16 @@
 use super::*;
 
-install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mut node_jobs, secrets] => [core_cfg, db, fleet, gateway, harnesses, host, mode, model_node, node_host, node_jobs, nodes, preflight, routed, secrets, workspaces] {
+install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, mut node_jobs, secrets] => [core_cfg, db, fleet, gateway, harnesses, host, node_host, node_jobs, nodes, preflight, routed, secrets, workspaces] {
     let HubEnv { cfg, bus, vars, .. } = *cx;
-    // The Hub handles fallback by dispatching a Node job for each model attempt.
-    let gateway: Arc<dyn steve_core::ModelGateway> = match &model_node {
-        Some(h) => {
-            let models = steve_core::models::Models::new(
-                db.clone(),
-                steve_core::models::Defaults::of(&core_cfg),
-            );
-            models.set_harnesses(harnesses.source());
-            tracing::info!("conversation model calls stream through local Node jobs");
-            let model = steve_core::SingleModelGateway {
-                one: node_runtime::NodePrint {
-                    runtime: h.runtime.clone(),
-                    data_dir: cfg.data_dir.clone(),
-                },
-                fast: cfg.models.fast.clone(),
-                smart: cfg.models.smart.clone(),
-                models: Some(models),
-            };
-            Arc::new(steve_core::stats::RecordingGateway::new(Arc::new(model), db.clone()))
-        }
-        None => Arc::new(DiagnosticGateway),
-    };
     let nodes = remote_nodes(cfg, &db, host.clone(), &vars);
     if let Some(s) = &nodes {
         let _ = s.secrets.set(secrets.clone());
     }
-    if model_node.is_some() || nodes.is_some() {
-        let harnesses_job = harnesses.clone();
-        let local_node_ref = model_node
-            .as_ref()
-            .map(|h| h.node.clone() as Arc<dyn steve_node_api::Node>);
-        let nodes_ref = nodes.clone();
-        node_jobs.push(Job::task("harnesses.follow", move || {
-            harnesses_job.follow_task(local_node_ref, nodes_ref)
-        }));
-    }
     let fleet = nodes.as_ref().map(|s| s.fleet.clone());
-    // where the Hub's own Node runs sessions: in this process, or in one of its own (B1)
+    // The Hub's colocated Node always runs in its own `steve-node --local-node` process and links
+    // over loopback through the Node listener.
     let node_host: Option<SessionHost> = match mode {
         None => None,
-        Some(NodeMode::Local) => model_node.as_ref().map(|h| SessionHost {
-            runtime: h.runtime.clone(),
-            node: h.node.clone(),
-            tools: h.tools.clone(),
-        }),
         Some(NodeMode::Service) => {
             let svc = nodes.as_ref().ok_or_else(|| {
                 BackendError::msg(
@@ -63,6 +27,36 @@ install! { install(reg, cx) [core_cfg, db, harnesses, host, mode, model_node, mu
     };
     if let Some(h) = &node_host {
         let _ = host.local_node.set(h.node.clone());
+    }
+    // The Hub handles model calls by dispatching a job to the colocated Node process.
+    let gateway: Arc<dyn steve_core::ModelGateway> = match &node_host {
+        Some(h) => {
+            let models = steve_core::models::Models::new(
+                db.clone(),
+                steve_core::models::Defaults::of(&core_cfg),
+            );
+            models.set_harnesses(harnesses.source());
+            tracing::info!("conversation model calls stream through the colocated Node");
+            let model = steve_core::SingleModelGateway {
+                one: node_runtime::NodePrint {
+                    runtime: h.runtime.clone(),
+                    data_dir: cfg.data_dir.clone(),
+                },
+                fast: cfg.models.fast.clone(),
+                smart: cfg.models.smart.clone(),
+                models: Some(models),
+            };
+            Arc::new(steve_core::stats::RecordingGateway::new(Arc::new(model), db.clone()))
+        }
+        None => Arc::new(DiagnosticGateway),
+    };
+    if node_host.is_some() || nodes.is_some() {
+        let harnesses_job = harnesses.clone();
+        let local_node_ref = node_host.as_ref().map(|h| h.node.node());
+        let nodes_ref = nodes.clone();
+        node_jobs.push(Job::task("harnesses.follow", move || {
+            harnesses_job.follow_task(local_node_ref, nodes_ref)
+        }));
     }
     let workspaces = workspaces::Workspaces::new(
         db.clone(),

@@ -8,15 +8,7 @@ use sha2::Digest as _;
 use steve_node_api::*;
 
 /// A directory the Node lets the Hub use, by logical id.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct Root {
-    pub id: RootId,
-    pub path: PathBuf,
-    /// How it is shown (`~/code`).
-    pub display: String,
-    /// A read-only root is listed, read and scanned; no workspace is prepared in it.
-    pub access: RootAccess,
-}
+pub use steve_node_api::HostRoot as Root;
 
 /// The directory name for a resource: readable when it is simple, always unique (a hash suffix).
 pub(crate) fn dir_name(resource: &str) -> String {
@@ -60,9 +52,13 @@ pub fn resolve(roots: &[Root], at: &RootPath, write: bool) -> ApiResult<PathBuf>
         .canonicalize()
         .map_err(|e| Error::new(Code::Invalid, format!("root unavailable: {e}")))?;
     let p = base.join(rel);
-    let real = p
-        .canonicalize()
-        .map_err(|_| Error::new(Code::Invalid, "no such directory"))?;
+    let real = p.canonicalize().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            Error::from(NodeReason::directory_missing(p.to_string_lossy()))
+        } else {
+            Error::new(Code::Invalid, format!("directory unavailable: {e}"))
+        }
+    })?;
     if !real.starts_with(&base) {
         return Err(Error::new(Code::Forbidden, "outside the root"));
     }
@@ -150,7 +146,7 @@ pub(crate) struct Commands {
     pub inner: std::sync::Arc<crate::Inner>,
     pub op: OperationId,
 }
-fn common_git_dir(dir: &Path) -> Option<PathBuf> {
+pub(crate) fn common_git_dir(dir: &Path) -> Option<PathBuf> {
     let resolve_common = |gitdir: &Path| -> PathBuf {
         let common = match std::fs::read_to_string(gitdir.join("commondir")) {
             Ok(rel) => {
@@ -620,31 +616,77 @@ pub(crate) fn fresh_base(commands: &Commands, repo: &Path) -> ApiResult<String> 
     .unwrap_or_else(|| "HEAD".into()))
 }
 
+/// Two spellings of the same directory (a symlinked temp dir, say).
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (a.canonicalize(), b.canonicalize()),
+            (Ok(x), Ok(y)) if x == y
+        )
+}
+
+/// Preserve the requested branch unless another worktree already owns it. Separate installations
+/// sharing a repository and item numbers must never steal each other's branch; when occupied by
+/// another worktree, namespace the branch under `steve/<sha12(parent)>-<suffix>`.
+pub(crate) fn choose_worktree_branch(
+    commands: &Commands,
+    repo: &Path,
+    target: &Path,
+    requested: &str,
+) -> String {
+    // Branch names cannot contain newlines. Avoid parsing porcelain paths: older Git lacks -z,
+    // and its C quoting of Unicode/control characters does not name the literal directory.
+    let listing = commands
+        .git(repo, &["worktree", "list", "--porcelain"])
+        .unwrap_or_default();
+    let occupied = listing
+        .lines()
+        .any(|l| l.strip_prefix("branch refs/heads/") == Some(requested));
+    let same_worktree = occupied
+        && target.exists()
+        && commands
+            .git(target, &["rev-parse", "--show-toplevel"])
+            .is_ok_and(|root| same_dir(Path::new(&root), target))
+        && commands
+            .git(target, &["symbolic-ref", "--short", "HEAD"])
+            .is_ok_and(|head| head == requested);
+    if !occupied || same_worktree {
+        return requested.to_string();
+    }
+    let parent = target.parent().unwrap_or(target);
+    let namespace = hex::encode(sha2::Sha256::digest(parent.to_string_lossy().as_bytes()));
+    let suffix = requested.strip_prefix("steve/").unwrap_or(requested);
+    format!("steve/{}-{suffix}", &namespace[..12])
+}
+
 /// A worktree of `repo` at `path` on `branch` (created from `base`, else from [`fresh_base`], when
 /// new). One that is there already is adopted only if it is a worktree of that very repository on
-/// that branch.
+/// that branch. If `branch` is already checked out in a different worktree, a namespaced branch is
+/// chosen automatically and returned.
 pub(crate) fn add_worktree(
     commands: &Commands,
     repo: &Path,
     path: &Path,
     branch: &str,
     base: Option<&str>,
-) -> ApiResult<()> {
+) -> ApiResult<String> {
     let invalid = |e| Error::new(Code::Invalid, format!("git worktree: {e}"));
+    let actual_branch = choose_worktree_branch(commands, repo, path, branch);
     if path.exists() {
-        return check_worktree(commands, repo, path, branch).map_err(invalid);
+        check_worktree(commands, repo, path, &actual_branch).map_err(invalid)?;
+        return Ok(actual_branch);
     }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| invalid(e.to_string()))?;
     }
     let p = path.to_string_lossy();
     if commands
-        .git(repo, &["rev-parse", "--verify", branch])
+        .git(repo, &["rev-parse", "--verify", &actual_branch])
         .is_ok()
     {
         commands
-            .git(repo, &["worktree", "add", &p, branch])
-            .map(|_| ())
+            .git(repo, &["worktree", "add", &p, &actual_branch])
+            .map(|_| actual_branch)
             .map_err(invalid)
     } else {
         let base = match base {
@@ -655,9 +697,17 @@ pub(crate) fn add_worktree(
         commands
             .git(
                 repo,
-                &["worktree", "add", "--no-track", "-b", branch, &p, &base],
+                &[
+                    "worktree",
+                    "add",
+                    "--no-track",
+                    "-b",
+                    &actual_branch,
+                    &p,
+                    &base,
+                ],
             )
-            .map(|_| ())
+            .map(|_| actual_branch)
             .map_err(invalid)
     }
 }
@@ -675,7 +725,8 @@ pub(crate) fn add_worktree_above(
     branch: &str,
     base: Option<&str>,
     floor: Option<(u64, FreeBytes)>,
-) -> ApiResult<()> {
+) -> ApiResult<String> {
+    let actual_branch = choose_worktree_branch(commands, repo, path, branch);
     if let Some((floor, free)) = floor
         && !path.exists()
         && commands
@@ -685,7 +736,7 @@ pub(crate) fn add_worktree_above(
                     "rev-parse",
                     "--verify",
                     "--quiet",
-                    &format!("refs/heads/{branch}"),
+                    &format!("refs/heads/{actual_branch}"),
                 ],
             )
             .is_err()
@@ -697,7 +748,7 @@ pub(crate) fn add_worktree_above(
             format!("disk low: {free} bytes free, the floor is {floor}"),
         ));
     }
-    add_worktree(commands, repo, path, branch, base)
+    add_worktree(commands, repo, path, &actual_branch, base)
 }
 
 /// `path` is a worktree of `repo` with `branch` checked out.
@@ -1067,7 +1118,118 @@ fn update_meta_hash(hasher: &mut sha2::Sha256, path: &Path) {
 
 #[cfg(test)]
 mod tests {
-    use super::{fingerprint, git_touches_worktrees};
+    use super::*;
+    use std::process::Command as StdCommand;
+
+    fn git_ok(dir: &Path, args: &[&str]) {
+        let out = StdCommand::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("spawn git");
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    fn init_repo(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        git_ok(dir, &["init", "-b", "main"]);
+        git_ok(dir, &["config", "user.email", "test@example.com"]);
+        git_ok(dir, &["config", "user.name", "Test"]);
+        std::fs::write(dir.join("README.md"), "hello\n").unwrap();
+        git_ok(dir, &["add", "README.md"]);
+        git_ok(dir, &["commit", "-m", "init"]);
+    }
+
+    #[test]
+    fn resolve_returns_directory_missing_reason_when_path_is_absent() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = Root {
+            id: RootId::new("r1").unwrap(),
+            display: "r1".into(),
+            path: dir.path().to_path_buf(),
+            access: RootAccess::ReadWrite,
+        };
+        let err = resolve(
+            &[root],
+            &RootPath {
+                root: RootId::new("r1").unwrap(),
+                rel: RelPath::new("no-such-folder").unwrap(),
+            },
+            true,
+        )
+        .unwrap_err();
+        assert!(
+            err.reason
+                .as_ref()
+                .is_some_and(|r| r.is(NodeReason::DirectoryMissing)),
+            "expected DirectoryMissing reason, got: {err:?}"
+        );
+        assert!(err.safe_detail.contains("no-such-folder"));
+    }
+
+    #[test]
+    fn occupied_worktree_branch_is_namespaced_and_unicode_worktree_reuses_its_own_branch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo(&repo);
+        let first_parent = tmp.path().join("安装一");
+        let second_parent = tmp.path().join("安装二");
+        std::fs::create_dir_all(&first_parent).unwrap();
+        std::fs::create_dir_all(&second_parent).unwrap();
+
+        let node_cfg = crate::NodeConfig {
+            ceiling: crate::PolicyCeiling::unlimited(),
+            node: NodeId::new("n1").unwrap(),
+            home: tmp.path().join("node-home"),
+            acp: steve_acp::AcpConfig {
+                declared: Default::default(),
+                adapters: Default::default(),
+                node: "node".into(),
+                claude_executable: PathBuf::from("/usr/bin/false"),
+                claude_config_dir: None,
+                steve_home: tmp.path().join("steve"),
+                codex_home: tmp.path().join("codex"),
+                user_home: tmp.path().to_path_buf(),
+                version: "0.0.0".into(),
+            },
+            roots: vec![],
+            capacity: Capacity {
+                sessions: Capacity::SESSIONS_DEFAULT,
+                jobs: 0,
+                execs: 4,
+            },
+            storage: crate::Storage::default(),
+        };
+        let node = crate::LocalNode::open(node_cfg).unwrap();
+        let commands = Commands {
+            inner: node.0.clone(),
+            op: OperationId::new("op_wt_test").unwrap(),
+        };
+
+        let first_wt = first_parent.join("ST-1");
+        let first_branch =
+            add_worktree(&commands, &repo, &first_wt, "steve/st-1", Some("main")).unwrap();
+        assert_eq!(first_branch, "steve/st-1");
+
+        // Re-running on the same Unicode worktree directory preserves `steve/st-1`.
+        let reused = add_worktree(&commands, &repo, &first_wt, "steve/st-1", Some("main")).unwrap();
+        assert_eq!(reused, "steve/st-1");
+
+        // A second installation's worktree requesting the same branch gets a namespaced branch
+        // instead of failing or stealing the first installation's branch.
+        let second_wt = second_parent.join("ST-1");
+        let second_branch =
+            add_worktree(&commands, &repo, &second_wt, "steve/st-1", Some("main")).unwrap();
+        assert_ne!(second_branch, "steve/st-1");
+        assert!(
+            second_branch.starts_with("steve/") && second_branch.ends_with("-st-1"),
+            "unexpected namespaced branch: {second_branch}"
+        );
+    }
 
     #[test]
     fn workspace_fingerprint_detects_git_and_non_git_mutations() {

@@ -328,5 +328,12 @@
   "core.stop.turn_stall_no_progress": "可观察执行时间内无可核实进展，Steve 已请求停止",
   "core.stop.error": "上一回合出错：%{error}",
   "core.stop.ended_without_delivery": "上一回合结束后没有交付、提问，也没有后续工作",
-  "core.stop.idle": "会话空闲：没有回合在运行、没有排队输入，也没有交付或提问"
+  "core.stop.idle": "会话空闲：没有回合在运行、没有排队输入，也没有交付或提问",
+  "core.node.local_updating": "本机 Node 正在更新，等当前回合结束后会自动完成切换，请稍候再试。",
+  "core.workspace.node_unconnected_inspect": "本地设备节点未连接，无法检查工作区状态",
+  "core.workspace.node_unconnected_clean": "本地设备节点未连接，无法清理工作区",
+  "core.workspace.node_unconnected_reclaim": "本地设备节点未连接，无法执行工作区回收",
+  "core.workspace.node_unconnected_disk": "本地设备节点未连接，无法检查工作区磁盘占用",
+  "core.workspace.node_offline": "本地设备节点离线：%{detail}",
+  "core.release.no_node_rebase": "没有可用的设备节点执行 rebase"
 }

@@ -69,6 +69,9 @@ impl Store {
         g.active = on;
         drop(g);
         self.inner.maintenance.wake.notify_waiters();
+        if !on {
+            self.inner.outbox_wake.notify_one();
+        }
         Ok(())
     }
     /// Atomically close even continuation admission at the final ready boundary. The caller

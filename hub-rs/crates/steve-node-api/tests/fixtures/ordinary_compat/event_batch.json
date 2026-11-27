@@ -1,0 +1,187 @@
+{
+  "events": [
+    {
+      "schema": 1,
+      "id": "ev_batch_1",
+      "at": 1764200000001,
+      "cursor": {
+        "stream": "stream_1",
+        "epoch": "ep_1",
+        "seq": 1
+      },
+      "subject": {
+        "of": "session",
+        "session": "s_compat_1"
+      },
+      "body": {
+        "type": "session_changed",
+        "view": {
+          "id": "s_compat_1",
+          "revision": "rev_1",
+          "phase": "active",
+          "effective": {
+            "harness": "claude-code",
+            "model": "claude-sonnet-4-6",
+            "effort": "high"
+          },
+          "effort_mapping": {
+            "requested": "high",
+            "strategy": "acp_option",
+            "supported": true,
+            "native_effort": "high",
+            "effective": "high"
+          },
+          "effective_permissions": "accept_edits"
+        }
+      }
+    },
+    {
+      "schema": 1,
+      "id": "ev_batch_2",
+      "at": 1764200000002,
+      "cursor": {
+        "stream": "stream_1",
+        "epoch": "ep_1",
+        "seq": 2
+      },
+      "subject": {
+        "of": "execution",
+        "type": "turn",
+        "session": "s_compat_1",
+        "turn": "turn_1",
+        "attempt": "att_compat_1"
+      },
+      "body": {
+        "type": "tool_changed",
+        "tool": {
+          "id": "call_1",
+          "origin": "harness",
+          "name": "Read",
+          "category": "read",
+          "title": "Read README",
+          "phase": "succeeded"
+        }
+      }
+    },
+    {
+      "schema": 1,
+      "id": "ev_batch_3",
+      "at": 1764200000003,
+      "cursor": {
+        "stream": "stream_1",
+        "epoch": "ep_1",
+        "seq": 3
+      },
+      "subject": {
+        "of": "execution",
+        "type": "turn",
+        "session": "s_compat_1",
+        "turn": "turn_1",
+        "attempt": "att_compat_1"
+      },
+      "body": {
+        "type": "subtask_changed",
+        "subtask": {
+          "id": "sub_1",
+          "origin": "subagent",
+          "status": "running",
+          "title": "Explore repository"
+        }
+      }
+    },
+    {
+      "schema": 1,
+      "id": "ev_batch_4",
+      "at": 1764200000004,
+      "cursor": {
+        "stream": "stream_1",
+        "epoch": "ep_1",
+        "seq": 4
+      },
+      "subject": {
+        "of": "execution",
+        "type": "turn",
+        "session": "s_compat_1",
+        "turn": "turn_1",
+        "attempt": "att_compat_1"
+      },
+      "body": {
+        "type": "permission_requested",
+        "request": {
+          "id": "perm_1",
+          "execution": {
+            "type": "turn",
+            "session": "s_compat_1",
+            "turn": "turn_1",
+            "attempt": "att_compat_1"
+          },
+          "invocation": "call_2",
+          "title": "Run tests",
+          "action": {
+            "type": "exec",
+            "command": "cargo test",
+            "network": {
+              "type": "denied"
+            }
+          },
+          "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+          "choices": [
+            "allow_once",
+            "reject"
+          ],
+          "expires_at": 1764200060000
+        }
+      }
+    },
+    {
+      "schema": 1,
+      "id": "ev_batch_5",
+      "at": 1764200000005,
+      "cursor": {
+        "stream": "stream_1",
+        "epoch": "ep_1",
+        "seq": 5
+      },
+      "subject": {
+        "of": "execution",
+        "type": "turn",
+        "session": "s_compat_1",
+        "turn": "turn_1",
+        "attempt": "att_compat_1"
+      },
+      "body": {
+        "type": "usage",
+        "report": {
+          "report_id": "u_1",
+          "meter_epoch": "ep_1",
+          "scope": "main",
+          "measurement": "final",
+          "tokens": {
+            "input": 100,
+            "output": 50
+          }
+        }
+      }
+    },
+    {
+      "schema": 1,
+      "id": "ev_batch_6",
+      "at": 1764200000006,
+      "cursor": {
+        "stream": "stream_1",
+        "epoch": "ep_1",
+        "seq": 6
+      },
+      "subject": {
+        "of": "session",
+        "session": "s_compat_1"
+      },
+      "body": {
+        "type": "diagnostic",
+        "severity": "warning",
+        "code": "unsupported_update",
+        "safe_text": "Unknown adapter update."
+      }
+    }
+  ]
+}

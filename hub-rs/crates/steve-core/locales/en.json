@@ -328,5 +328,12 @@
   "core.stop.turn_stall_no_progress": "No verified progress within the observable window; Steve requested a stop",
   "core.stop.error": "The previous turn failed: %{error}",
   "core.stop.ended_without_delivery": "The previous turn ended without a delivery, a question, or follow-up work",
-  "core.stop.idle": "Session is idle: no turn is running, no input is queued, and there is no delivery or question"
+  "core.stop.idle": "Session is idle: no turn is running, no input is queued, and there is no delivery or question",
+  "core.node.local_updating": "The local Node is updating and will switch automatically once active turns finish. Please try again shortly.",
+  "core.workspace.node_unconnected_inspect": "Local device Node is not connected; cannot inspect workspace status",
+  "core.workspace.node_unconnected_clean": "Local device Node is not connected; cannot clean workspace",
+  "core.workspace.node_unconnected_reclaim": "Local device Node is not connected; cannot reclaim workspaces",
+  "core.workspace.node_unconnected_disk": "Local device Node is not connected; cannot inspect workspace disk usage",
+  "core.workspace.node_offline": "Local device Node is offline: %{detail}",
+  "core.release.no_node_rebase": "No device Node available to run rebase"
 }

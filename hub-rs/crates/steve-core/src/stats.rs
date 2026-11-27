@@ -144,6 +144,7 @@ impl CallAccount {
                 Err(CoreError::Gateway(GatewayError::Timeout(_))) => "timeout",
                 Err(CoreError::Gateway(GatewayError::MissingCapability)) => "missing_capability",
                 Err(CoreError::Gateway(GatewayError::ToolDenied)) => "tool_denied",
+                Err(CoreError::Gateway(GatewayError::LocalNodeUpdating)) => "local_node_updating",
                 Err(CoreError::Gateway(GatewayError::Startup(_))) => "startup",
                 Err(_) => "error",
             },
@@ -169,6 +170,9 @@ fn gateway_outcome(result: &Result<Printed>) {
         }
         Err(CoreError::Gateway(GatewayError::ToolDenied)) => {
             metrics::counter!("steve_gateway_preflight_rejections_total", "reason" => "tool_denied").increment(1);
+        }
+        Err(CoreError::Gateway(GatewayError::LocalNodeUpdating)) => {
+            metrics::counter!("steve_gateway_preflight_rejections_total", "reason" => "local_node_updating").increment(1);
         }
         _ => {}
     }

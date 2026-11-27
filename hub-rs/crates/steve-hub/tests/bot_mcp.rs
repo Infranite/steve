@@ -258,12 +258,58 @@ for line in sys.stdin:
             .unwrap()
             .unwrap()
     };
+    let node_id = NodeId::new("local").unwrap();
+    let node_dir = tempfile::tempdir().unwrap();
+    let (node_cfg, _) = local_config(node_dir.path(), &node_id);
+    let local = Arc::new(LocalNode::open(node_cfg).unwrap());
+    local.enable_host_ops();
+    local.enable_capability_sandbox();
+    let secrets = NodeSecrets::new();
+    local.connect_secrets(secrets.for_node(node_id.clone()));
+    let service_node =
+        steve_hub::wire::host_node::ServiceNode::new(node_id, local.clone(), node_dir.path());
+    struct NoDomain;
+    impl steve_hub::wire::node_runtime::NodeDomain for NoDomain {
+        fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
+    }
+    let runtime = steve_hub::wire::node_runtime::NodeRuntime::new(
+        h.store.clone(),
+        local.clone(),
+        Arc::new(NoDomain),
+    );
+    let workspaces = steve_hub::wire::workspaces::Workspaces::new(
+        h.store.clone(),
+        Some(steve_hub::wire::workspaces::LocalFace {
+            node: service_node,
+            runtime,
+        }),
+        None,
+        vec![],
+    );
     let library = LibraryMcp::new(
         caps.clone(),
-        None,
+        Some(workspaces),
+        Some(secrets),
         Arc::new(steve_runtime::cache::Caches::new(Default::default())),
     );
     let current = get();
+    if !steve_confine::available() {
+        let err = library
+            .tools_within(&current, "one", Duration::from_secs(5))
+            .await
+            .expect_err("stdio MCP must be refused when OS sandbox is unavailable");
+        assert!(
+            err.to_string().contains("sandbox"),
+            "unexpected refusal without OS sandbox: {err}"
+        );
+        assert_eq!(
+            node_checks::secret_uses_count_by_actor(&h.store, &id).unwrap(),
+            0,
+            "secrets must not be consumed when stdio MCP is refused for missing sandbox"
+        );
+        local.shutdown().await;
+        return;
+    }
     let (a, b) = tokio::join!(
         library.tools_within(&current, "one", Duration::from_secs(5)),
         library.tools_within(&current, "two", Duration::from_secs(5))
@@ -292,7 +338,7 @@ for line in sys.stdin:
     .unwrap();
     let changed = get();
     assert!(changed.updated > current.updated);
-    library.sweep();
+    library.sweep().await;
     assert!(
         library.cached(&changed).await.is_none(),
         "the previous revision's list is not reused"
@@ -311,9 +357,10 @@ for line in sys.stdin:
         "an edit reopens the server"
     );
     caps.mcp_delete("default", "u1", id).unwrap();
-    library.sweep();
+    library.sweep().await;
     assert!(
         library.cached(&changed).await.is_none(),
         "deletion drops the cache too"
     );
+    local.shutdown().await;
 }

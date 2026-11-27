@@ -1,0 +1,11 @@
+{
+  "id": "s_compat_1",
+  "revision": "rev_1",
+  "phase": "ready",
+  "effective": {
+    "harness": "claude-code",
+    "model": "claude-sonnet-4-6",
+    "effort": "high"
+  },
+  "effective_permissions": "accept_edits"
+}

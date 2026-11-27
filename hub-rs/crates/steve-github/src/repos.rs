@@ -171,25 +171,6 @@ pub fn parse_remote(url: &str) -> Option<String> {
     steve_node_api::github_repo(url)
 }
 
-/// `git -C <path> remote get-url origin`, parsed. `None` on any problem.
-fn project_remote(path: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
-        .env_remove("STEVE_SUPERVISOR_PID")
-        .env_remove("STEVE_UPGRADE_ID")
-        .arg("-C")
-        .arg(path)
-        .args(["remote", "get-url", "origin"])
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .stdin(std::process::Stdio::null())
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    parse_remote(&String::from_utf8_lossy(&out.stdout))
-}
-
 fn gh_err(e: GhError) -> ApiError {
     match e {
         GhError::Status { status: 404, .. } => ApiError::not_found("仓库"),
@@ -357,7 +338,6 @@ impl GitHub {
         let mut suggestions = Vec::new();
         if !projects.is_empty() {
             let ids: Vec<String> = projects.iter().map(|(id, _)| id.clone()).collect();
-            // each project's directory read on its Node; the Hub's own git with the local Node off
             let on_nodes = match self.git_nodes() {
                 Some(n) => n.origins(&ids).await,
                 None => None,
@@ -368,14 +348,7 @@ impl GitHub {
                     .zip(found)
                     .filter_map(|(id, r)| r.map(|r| (id, r)))
                     .collect(),
-                None => tokio::task::spawn_blocking(move || {
-                    projects
-                        .into_iter()
-                        .filter_map(|(id, path)| project_remote(&path).map(|r| (id, r)))
-                        .collect::<Vec<_>>()
-                })
-                .await
-                .unwrap_or_default(),
+                None => Vec::new(),
             };
             if !remotes.is_empty() {
                 for c in &conns {

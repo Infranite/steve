@@ -1,6 +1,8 @@
 //! GitHub pull-request linking, explicit approvals and effect reconciliation.
 //! Pushes go only to the fake's local bare repository.
 
+mod support_git_nodes;
+
 use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
@@ -179,6 +181,7 @@ async fn setup() -> H {
     slot.expect("slot").bind(&gh);
     gh.set_flow(flow.clone());
     gh.set_event_sink(Arc::new(flow::FlowSink(Arc::new(flow.clone()))));
+    gh.set_git_nodes(support_git_nodes::TestGitNodes::new(env.store().clone()));
     let api = manifest::routes(gh.clone())
         .merge(repos::routes(gh.clone()))
         .merge(connections::routes(conns.clone()))
@@ -877,6 +880,7 @@ async fn an_approved_write_waits_for_a_paused_connection() {
 /// A Node whose push ends unknown ([`push::PushError::Lost`]); it may have landed first. Reads
 /// are the Hub's own git (`None`).
 struct LostPush {
+    inner: Arc<support_git_nodes::TestGitNodes>,
     land: Option<std::path::PathBuf>,
     work: std::path::PathBuf,
     pushes: std::sync::atomic::AtomicUsize,
@@ -888,18 +892,18 @@ struct LostPush {
 impl steve_github::push::GitNodes for LostPush {
     async fn ahead(
         &self,
-        _item: &str,
-        _base: &str,
-        _branch: &str,
+        item: &str,
+        base: &str,
+        branch: &str,
     ) -> Option<Result<bool, steve_github::push::PushError>> {
-        None
+        self.inner.ahead(item, base, branch).await
     }
     async fn head_of(
         &self,
-        _item: &str,
-        _branch: &str,
+        item: &str,
+        branch: &str,
     ) -> Option<Result<String, steve_github::push::PushError>> {
-        None
+        self.inner.head_of(item, branch).await
     }
     async fn push(
         &self,
@@ -921,8 +925,8 @@ impl steve_github::push::GitNodes for LostPush {
         }
         Some(Err(steve_github::push::PushError::Lost))
     }
-    async fn origins(&self, _projects: &[String]) -> Option<Vec<Option<String>>> {
-        None
+    async fn origins(&self, projects: &[String]) -> Option<Vec<Option<String>>> {
+        self.inner.origins(projects).await
     }
 }
 
@@ -932,6 +936,7 @@ impl steve_github::push::GitNodes for LostPush {
 async fn a_lost_push_that_landed_opens_the_pr() {
     let h = setup().await;
     let nodes = Arc::new(LostPush {
+        inner: support_git_nodes::TestGitNodes::new(h.env.store().clone()),
         land: Some(h.fake.bare_remote(REPO).expect("bare")),
         work: h.work.path().to_path_buf(),
         pushes: Default::default(),
@@ -956,6 +961,7 @@ async fn a_lost_push_that_landed_opens_the_pr() {
 async fn a_lost_push_that_did_not_land_is_not_pushed_again() {
     let h = setup().await;
     let nodes = Arc::new(LostPush {
+        inner: support_git_nodes::TestGitNodes::new(h.env.store().clone()),
         land: None,
         work: h.work.path().to_path_buf(),
         pushes: Default::default(),
@@ -981,6 +987,7 @@ async fn a_lost_push_that_did_not_land_is_not_pushed_again() {
 async fn a_push_still_running_is_asked_again_not_compared() {
     let h = setup().await;
     let nodes = Arc::new(LostPush {
+        inner: support_git_nodes::TestGitNodes::new(h.env.store().clone()),
         land: Some(h.fake.bare_remote(REPO).expect("bare")),
         work: h.work.path().to_path_buf(),
         pushes: Default::default(),

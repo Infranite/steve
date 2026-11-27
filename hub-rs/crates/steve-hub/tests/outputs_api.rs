@@ -1,5 +1,5 @@
 //! `/api/items/:id/artifacts/:art/preview` and `/raw` on the wired Hub, with the local Node off
-//! and on (`STEVE_NODE_MODE=local`, N0e-E5b): the same files give the same JSON, the same bytes
+//! and with a colocated local Node attached (N0e-E5b): the same files give the same JSON, the same bytes
 //! and the same Range. Temp STEVE_HOME, no agent, no real host.
 
 use std::collections::HashMap;
@@ -35,8 +35,12 @@ fn g(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_string()
 }
 
+#[path = "support/local_node.rs"]
+mod local_node;
+
 struct Env {
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     home: std::path::PathBuf,
     db: std::path::PathBuf,
     /// Where files are: its local roots are built again when asked (`follow` is not run here).
@@ -99,7 +103,7 @@ async fn start() -> Env {
     start_with(false).await
 }
 
-/// `node`: with the local Node on (`STEVE_NODE_MODE=local`, so not a `STEVE_NO_RESUME` copy).
+/// `node`: with the colocated local Node attached (not a `STEVE_NO_RESUME` copy).
 async fn start_with(node: bool) -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().unwrap();
@@ -127,7 +131,7 @@ async fn start_with(node: bool) -> Env {
     }
     if node {
         vars.remove("STEVE_NO_RESUME");
-        vars.insert("STEVE_NODE_MODE".into(), "local".into());
+        vars.insert("STEVE_LOCAL_NODE_PORT".into(), "0".into());
     }
     let vars = Arc::new(vars);
     let get = {
@@ -142,6 +146,7 @@ async fn start_with(node: bool) -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).unwrap();
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_modules(w.modules)
         .with_workspaces(Some(w.workspaces.clone()));
@@ -170,6 +175,7 @@ async fn start_with(node: bool) -> Env {
         .unwrap();
     Env {
         _home: home,
+        _local_node: local_node,
         home: h,
         db: cfg.data_dir.join("steve.sqlite3"),
         workspaces: w.workspaces,
@@ -349,39 +355,67 @@ async fn durable_report_opens_from_hub_with_node_enabled() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn the_local_node_shows_outputs_as_the_hub_did() {
     let f = fixture();
+    // Without a colocated local Node (`STEVE_NO_RESUME=1`), the Hub never falls back to local
+    // filesystem or git probes on project directories.
     let off = start().await;
-    outputs(&off, &f).await;
+    let (s, v) = off
+        .call(
+            "POST",
+            "/api/projects",
+            Some(json!({"name": "Repo", "path": f.repo.to_string_lossy()})),
+        )
+        .await;
+    assert_eq!(s, 503, "inert Hub must refuse local project probes: {v}");
+    assert_eq!(v["code"], "unavailable", "{v}");
+
     let on = start_with(true).await;
     outputs(&on, &f).await;
     /* the new project is a root of the local Node (as its roots follow the project event) */
     on.workspaces.refresh_roots().unwrap();
-    let want = answers(&off).await;
     let got = answers(&on).await;
-    assert_eq!(want.len(), got.len());
-    for (w, g) in want.iter().zip(&got) {
-        assert_eq!(g, w);
-    }
-    /* what was compared is what the Hub has always shown */
-    assert_eq!(want[0]["body"]["text"], "# 标题\n\n正文");
-    assert_eq!(want[1]["body"]["type"], "dir");
-    assert_eq!(want[7]["body"]["type"], "missing");
-    assert_eq!(want[8]["body"]["type"], "missing");
-    assert_eq!(want[10]["body"]["from"], "git steve/st-1");
-    assert_eq!(want[12]["body"]["type"], "branch");
-    assert_eq!(want[13]["body"]["type"], "commit");
-    assert_eq!(want[14]["body"]["text"], "临时");
-    let span = &want[PREVIEWS.len() + 1];
+    assert_eq!(got.len(), PREVIEWS.len() + 9);
+    assert_eq!(got[0]["body"]["text"], "# 标题\n\n正文");
+    assert_eq!(got[1]["body"]["type"], "dir");
+    let entry_names: Vec<&str> = got[1]["body"]["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["name"].as_str())
+        .collect();
+    assert_eq!(entry_names, vec!["a.png", "b.bin"]);
+    assert_eq!(got[2]["body"]["type"], "image");
+    assert_eq!(got[3]["body"]["type"], "binary");
+    assert_eq!(got[4]["body"]["type"], "text");
+    assert_eq!(got[4]["body"]["text"], "x");
+    assert_eq!(got[5]["body"]["type"], "missing");
+    assert_eq!(got[6]["body"]["text"], "# 标题\n\n正文");
+    assert_eq!(got[7]["body"]["type"], "missing");
+    assert_eq!(got[8]["body"]["type"], "missing");
+    assert_eq!(got[9]["body"]["type"], "office");
+    assert_eq!(got[10]["body"]["from"], "git steve/st-1");
+    assert_eq!(got[11]["body"]["type"], "missing");
+    assert_eq!(got[12]["body"]["type"], "branch");
+    assert_eq!(got[13]["body"]["type"], "commit");
+    assert_eq!(got[14]["body"]["text"], "临时");
+    let whole = &got[PREVIEWS.len()];
+    assert_eq!(whole["status"], 200);
+    assert_eq!(whole["body"], json!((0u8..100).collect::<Vec<_>>()));
+    let span = &got[PREVIEWS.len() + 1];
     assert_eq!(span["status"], 206);
     assert_eq!(span["body"], json!((10u8..20).collect::<Vec<_>>()));
-    assert_eq!(want[PREVIEWS.len() + 5]["status"], 404);
-    /* the one place they differ: a link from the project into the Hub's temp directory was read
-    by the Hub, the Node keeps to the project */
+    let tail = &got[PREVIEWS.len() + 2];
+    assert_eq!(tail["status"], 206);
+    assert_eq!(tail["body"], json!((95u8..100).collect::<Vec<_>>()));
+    assert_eq!(got[PREVIEWS.len() + 3]["status"], 200);
+    assert_eq!(got[PREVIEWS.len() + 4]["status"], 200);
+    assert_eq!(got[PREVIEWS.len() + 5]["status"], 404);
+    assert_eq!(got[PREVIEWS.len() + 6]["status"], 404);
+    assert_eq!(got[PREVIEWS.len() + 7]["status"], 404);
+    assert_eq!(got[PREVIEWS.len() + 8]["status"], 200);
+    /* a link from the project into the temp directory stays confined to the project root */
     std::os::unix::fs::symlink(&f.tmp, f.repo.join("tmp-link.txt")).unwrap();
-    for e in [&off, &on] {
-        fixtures::seed_output_artifact(&e.db, "tl", "文件", "x", "tmp-link.txt").unwrap();
-    }
+    fixtures::seed_output_artifact(&on.db, "tl", "文件", "x", "tmp-link.txt").unwrap();
     let path = "/api/items/i1/artifacts/tl/preview";
-    assert_eq!(off.call("GET", path, None).await.1["text"], "临时");
     assert_eq!(on.call("GET", path, None).await.1["type"], "missing");
     let _ = std::fs::remove_file(&f.tmp);
 }
@@ -415,8 +449,9 @@ async fn an_output_on_a_device_that_is_not_there_says_device_offline() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_large_recording_plays_by_range_and_only_images_and_office_say_large() {
     let f = fixture();
-    let e = start().await;
+    let e = start_with(true).await;
     outputs(&e, &f).await;
+    e.workspaces.refresh_roots().unwrap();
     // sparse files over the inline limit (64 MiB): nothing is written to disk
     let big = 65 * 1024 * 1024u64;
     for rel in ["media/long.mov", "media/long.png", "media/long.docx"] {
