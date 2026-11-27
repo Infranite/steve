@@ -50,6 +50,7 @@ pub(super) fn target(e: &DomainEvent) -> Dirty<'_> {
                 Dirty::SessionsOfNode(steve_store::runtime::HUB_NODE)
             }
             DevicesEvent::ReleaseHold { .. }
+            | DevicesEvent::LocalNodeUpdating { .. }
             | DevicesEvent::Device { .. }
             | DevicesEvent::Client { .. } => Dirty::None,
         },

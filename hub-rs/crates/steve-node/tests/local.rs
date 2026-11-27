@@ -3333,10 +3333,20 @@ async fn a_worktree_goes_where_it_is_named_above_the_disk_floor_and_comes_back_a
             ))
             .await
             .unwrap_err();
-        assert!(
-            matches!(e.code, Code::Forbidden | Code::Invalid),
-            "{rel}: {e:?}"
-        );
+        if rel == "nowhere/ST-4" {
+            assert_eq!(e.code, Code::NotFound, "{rel}: {e:?}");
+            assert!(
+                e.reason
+                    .as_ref()
+                    .is_some_and(|r| r.is(NodeReason::DirectoryMissing)),
+                "{rel}: {e:?}"
+            );
+        } else {
+            assert!(
+                matches!(e.code, Code::Forbidden | Code::Invalid),
+                "{rel}: {e:?}"
+            );
+        }
     }
 }
 
@@ -3938,7 +3948,13 @@ async fn listings_page_and_do_not_follow_linked_directories() {
     assert_eq!(names, ["b/c.md"]);
     // a directory that is not there
     let e = n.list_root(kb_at("nope"), page(10)).await.unwrap_err();
-    assert_eq!(e.code, Code::Invalid);
+    assert_eq!(e.code, Code::NotFound);
+    assert!(
+        e.reason
+            .as_ref()
+            .is_some_and(|r| r.is(NodeReason::DirectoryMissing)),
+        "{e:?}"
+    );
     // a read-only root is listed, read and scanned, but a bad pattern is refused
     let bad = ScanSpec {
         include: vec!["../*.md".into()],

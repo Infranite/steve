@@ -6,6 +6,8 @@
 //!
 //! Only the fake GitHub and its local bare remote; nothing here talks to github.com.
 
+mod support_git_nodes;
+
 use std::path::Path;
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -178,6 +180,7 @@ async fn setup() -> H {
     slot.expect("slot").bind(&gh);
     let sink = Arc::new(Sink::default());
     gh.set_session_sink(sink.clone());
+    gh.set_git_nodes(support_git_nodes::TestGitNodes::new(env.store().clone()));
     let api = manifest::routes(gh.clone())
         .merge(repos::routes(gh.clone()))
         .merge(comment::routes(gh.clone()))

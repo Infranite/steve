@@ -283,7 +283,13 @@ impl NodeFleet {
     /// kept in memory, so a Hub restart forgets it until the Node reports again).
     pub fn link_failure(&self, node: &str) -> Option<(i64, String)> {
         if node == crate::wire::local_service::NODE_ID {
-            return steve_node_cli::dial::link_status(&self.data_dir.join("node"));
+            let bytes = std::fs::read(
+                self.data_dir
+                    .join("node")
+                    .join(steve_node_wire::LINK_STATUS),
+            )
+            .ok()?;
+            return steve_node_wire::parse_link_status(&bytes);
         }
         let nodes = self.nodes.lock().unwrap();
         nodes.get(node).and_then(|e| e.link_failure.clone())
@@ -314,14 +320,14 @@ impl NodeFleet {
         self.nodes.lock().unwrap().keys().cloned().collect()
     }
 
-    pub(crate) fn sink_for(&self, node: &NodeId) -> Arc<dyn EventSink> {
+    pub fn sink_for(&self, node: &NodeId) -> Arc<dyn EventSink> {
         match self.runtime_for(node.as_str()) {
             Some(rt) => Arc::new(Sink(Arc::downgrade(&rt))),
             None => Arc::new(NoRuntime),
         }
     }
 
-    pub(crate) fn tools_for(&self, node: &NodeId) -> Arc<dyn HubTools> {
+    pub fn tools_for(&self, node: &NodeId) -> Arc<dyn HubTools> {
         if let Some(t) = self.entry(node, |e| e.tools.clone()) {
             return t;
         }
@@ -345,7 +351,7 @@ impl NodeFleet {
         self.entry(node, |e| e.tools.get_or_insert(t).clone())
     }
 
-    pub(crate) fn files_for(&self, node: &NodeId) -> Arc<dyn HubFiles> {
+    pub fn files_for(&self, node: &NodeId) -> Arc<dyn HubFiles> {
         // begin/chunk/finish are separate RPCs (and a reconnect can replay them). Keep one
         // bounded transfer registry per authenticated Node for the lifetime of this Hub.
         self.entry(node, |entry| {

@@ -16,7 +16,7 @@ import { st, toast, useStore } from "@/store"
 import { capsApi, type SteveServer, type SteveTool } from "@/api/caps"
 import { useHubQuery } from "@/data/use-hub-query"
 import { errText } from "./common"
-import { CLIENTS, FILE, LANGUAGE, mcpUrl, snippet, type ClientKind } from "./snippets"
+import { CLIENTS, FILE, LANGUAGE, WRAP, mcpUrl, snippet, type ClientKind } from "./snippets"
 
 import { toolDescKey, toolCount } from "./tool-catalog"
 import { steveToolIcon } from "@/tool-icons"
@@ -80,7 +80,7 @@ export function OutsideConnect() {
   useStore()
   const d = useHubQuery(["caps", "steve"], () => capsApi.steve(), { events: ["bot"], debounceMs: 300 })
   const [at, setAt] = useState(0)
-  const [client, setClient] = useState<ClientKind>("generic")
+  const [client, setClient] = useState<ClientKind>(() => CLIENTS[0] ?? "generic")
   const [name, setName] = useState(() => t("caps:outside.tokenNameDefault"))
   const [token, setToken] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
@@ -114,9 +114,9 @@ export function OutsideConnect() {
         </div>
         <div className="flex min-w-0 flex-col gap-2">
           <div className="flex flex-wrap items-center justify-between gap-2"><span className="type-label text-muted-foreground">{t("caps:outside.client")}</span>
-            <div className="-mx-1 max-w-full overflow-x-auto px-1 [scrollbar-width:none]"><Segmented size="sm" className="w-max" value={client} onChange={setClient} label={t("caps:outside.client")} options={CLIENTS.map((c) => [c, t(`caps:outside.c_${c}`)] as const)} /></div></div>
-          <CodeBlock code={code} language={LANGUAGE[client]} filename={FILE[client]} wrap={client === "claudeCode"} onCopy={() => toast(t("caps:outside.copied"))} data-outside-snippet={client} />
-          <span className="type-footnote text-muted-foreground" data-outside-where>{t(`caps:outside.where_${client}`)}</span>
+            <div className="-mx-1 max-w-full overflow-x-auto px-1 [scrollbar-width:none]"><Segmented size="sm" className="w-max" value={client} onChange={setClient} label={t("caps:outside.client")} options={CLIENTS.map((c) => [c, t(`caps:outside.c_${c}`, { defaultValue: c })] as const)} /></div></div>
+          <CodeBlock code={code} language={LANGUAGE[client]} filename={FILE[client]} wrap={WRAP[client]} onCopy={() => toast(t("caps:outside.copied"))} data-outside-snippet={client} />
+          <span className="type-footnote text-muted-foreground" data-outside-where>{t(`caps:outside.where_${client}`, { defaultValue: "" })}</span>
         </div>
         <Disclosure label={t("caps:outside.scope", { count: v.outside.length })} data-outside-scope>
           <div className="pt-1"><span className="mb-1 block type-footnote text-muted-foreground">{t("caps:outside.scopeNote")}</span><ToolList tools={v.outside} /></div>

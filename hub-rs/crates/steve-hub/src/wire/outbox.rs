@@ -7,11 +7,19 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use steve_runtime::{
+    SystemClock,
+    due::{DueError, DueSource, due_loop},
+    policy::{Backoff, Jitter},
+};
 use steve_store::Store;
 use steve_store::outbox::{self, Dispatcher};
 
 /// A pass without a wake-up, in case one was missed (a commit through a repository hook).
-pub const FALLBACK: Duration = Duration::from_secs(60);
+pub const FALLBACK: Duration = steve_runtime::due::FALLBACK;
+
+const RETRY_BASE: Duration = Duration::from_secs(1);
+const RETRY_MAX: Duration = Duration::from_secs(60);
 
 /// The consumers of this Hub, registered: those new to the database start at the beginning of their
 /// topic, so nothing this version emitted before is skipped. `modules`: the other modules' consumers
@@ -28,10 +36,6 @@ pub fn dispatcher(
     let d = Arc::new(Dispatcher::new(consumers));
     d.register(store)?;
     Ok(d)
-}
-
-fn now_ms() -> i64 {
-    steve_store::now()
 }
 
 /// The text of the one notice a consumer's first dead delivery in a workspace gets (stored: zh-CN).
@@ -75,41 +79,53 @@ async fn notice_dead(store: &Store, groups: &[outbox::DeadGroup]) {
     }
 }
 
-/// The `outbox.dispatch` job. Each drain pass records per-round metrics and panics are recovered
-/// by the supervising task.
+struct OutboxSource {
+    dispatcher: Arc<Dispatcher>,
+    store: Store,
+}
+
+impl DueSource for OutboxSource {
+    fn name(&self) -> &'static str {
+        "outbox.dispatch"
+    }
+
+    async fn next_due(&self) -> Result<Option<i64>, DueError> {
+        let (d, s) = (self.dispatcher.clone(), self.store.clone());
+        tokio::task::spawn_blocking(move || d.next_due(&s))
+            .await
+            .map_err(|e| DueError(format!("outbox next_due panicked: {e}")))?
+            .map_err(|e| DueError(e.to_string()))
+    }
+
+    async fn run_due(&self, now: i64) -> Result<(), DueError> {
+        let (d, s) = (self.dispatcher.clone(), self.store.clone());
+        let pumped = tokio::task::spawn_blocking(move || d.pump(&s, now))
+            .await
+            .map_err(|e| DueError(format!("outbox pass panicked: {e}")))?
+            .map_err(|e| DueError(e.to_string()))?;
+        notice_dead(&self.store, &pumped.newly_dead).await;
+        Ok(())
+    }
+}
+
+/// The `outbox.dispatch` job, driven by [`due_loop`] and woken on every outbox commit.
 pub async fn run(d: Arc<Dispatcher>, store: Store, flow: Arc<steve_flow::FlowCx>) {
     flow.recovered().await;
     let wake = store.outbox_wake();
     tracing::info!("outbox dispatcher started");
-    loop {
-        steve_runtime::round("outbox.dispatch", async {
-            // drain: a full batch may leave more behind
-            loop {
-                let (d2, s2) = (d.clone(), store.clone());
-                match tokio::task::spawn_blocking(move || d2.pump(&s2, now_ms())).await {
-                    Ok(Ok(p)) => {
-                        notice_dead(&store, &p.newly_dead).await;
-                        if p.done + p.retried + p.dead < outbox::BATCH {
-                            break;
-                        }
-                    }
-                    Ok(Err(e)) => {
-                        tracing::error!("outbox pass: {e}");
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::error!("outbox pass panicked: {e}");
-                        break;
-                    }
-                }
-            }
-        })
-        .await;
-        tokio::select! {
-            _ = wake.notified() => {}
-            _ = tokio::time::sleep(FALLBACK) => {}
-        }
-    }
+    let source = Arc::new(OutboxSource {
+        dispatcher: d,
+        store,
+    });
+    let backoff = Backoff {
+        base: RETRY_BASE,
+        max: RETRY_MAX,
+        factor: 2,
+        jitter: Jitter::Equal,
+        attempts: None,
+        reset_after: None,
+    };
+    due_loop(source, Arc::new(SystemClock), wake, backoff).await;
 }
 
 #[cfg(test)]

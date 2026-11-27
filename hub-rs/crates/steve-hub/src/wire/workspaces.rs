@@ -3,7 +3,7 @@
 //! device is a paired remote Node, through N2's [`NodeFleet`]. A Node that is not there gives
 //! [`PlacementError::Offline`] (`设备离线`), never a fallback to the Hub's own disk.
 //!
-//! The local Node's workspace faces open with it, only with `STEVE_NODE_MODE=local` and never on
+//! The local Node's workspace faces open with the colocated `steve-node` process and never on
 //! a `STEVE_NO_RESUME` copy (D8): without it, the Hub's own device answers
 //! [`PlacementError::LocalOff`] and callers keep their own path.
 //!
@@ -22,6 +22,16 @@
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+/// Bounded timeout for async colocated Node `path_check` probes before entering Core's lock.
+const CWD_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
+/// How long a `cwd_usable` answer read inside Core's lock may be reused: long enough to cover
+/// one flush of queued messages after its prefetch, short enough that a directory removed since
+/// is noticed on the next attempt.
+const CWD_CACHE_TTL: Duration = Duration::from_secs(5);
+/// Distinct working directories remembered at once; one per active colocated session is plenty.
+const CWD_CACHE_MAX_ENTRIES: u64 = 256;
 
 use steve_node_api::*;
 use steve_store::{Read, Store, StoreError, node_sessions::placements};
@@ -33,7 +43,7 @@ use crate::nodes::NodeFleet;
 /// The id of the Hub's own device (`projects.device_id`, `sessions.device_id`).
 pub const HUB_DEVICE: &str = "hub";
 
-/// The local Node: the Node itself (host bridges such as [`steve_node::LocalNode::set_roots`])
+/// The local Node: the Node itself (host bridges such as [`HostNode::set_roots`])
 /// and its coordinator.
 pub struct LocalFace {
     pub node: Arc<dyn super::host_node::HostNode>,
@@ -157,6 +167,9 @@ pub struct Workspaces {
     /// Held from reading the store to setting the roots, so a rebuild that read earlier never
     /// replaces a later one ([`Workspaces::follow`] and a session's bind both rebuild).
     rebuild: Mutex<()>,
+    /// Bounded TTL cache of colocated Node `path_check` usability results populated asynchronously
+    /// outside Core's lock so [`crate::wire::core::RoutedRuntime::cwd_usable`] never blocks on RPC.
+    cwd_cache: steve_runtime::cache::SyncTtlCache<String, bool>,
 }
 
 /// Where a thing is, as the store says, before any Node is asked.
@@ -178,7 +191,43 @@ impl Workspaces {
             fleet,
             extra,
             rebuild: Mutex::new(()),
+            cwd_cache: steve_runtime::cache::SyncTtlCache::new(
+                CWD_CACHE_MAX_ENTRIES,
+                CWD_CACHE_TTL,
+            ),
         })
+    }
+
+    /// Probes `cwd` on the colocated Node asynchronously (outside any Core/SQLite lock) and
+    /// caches the result for [`Self::cached_cwd_usable`]. Returns `true` when the local Node is
+    /// offline/updating/timed out so normal queueing handles transient unavailability.
+    pub async fn probe_cwd_usable(&self, cwd: &str) -> bool {
+        if cwd.is_empty() {
+            return false;
+        }
+        let Some(local) = self.local_node() else {
+            return true;
+        };
+        match tokio::time::timeout(
+            CWD_CHECK_TIMEOUT,
+            local.path_check(PathCheckRequest {
+                path: cwd.to_string(),
+            }),
+        )
+        .await
+        {
+            Ok(Ok(resp)) => {
+                let usable = resp.exists && resp.is_dir && resp.writable;
+                self.cwd_cache.insert(cwd.to_string(), usable);
+                usable
+            }
+            _ => true,
+        }
+    }
+
+    /// Non-blocking cache lookup for [`crate::wire::core::RoutedRuntime::cwd_usable`].
+    pub fn cached_cwd_usable(&self, cwd: &str) -> Option<bool> {
+        self.cwd_cache.get(cwd)
     }
 
     /// The Node and the place of `what`.
@@ -239,9 +288,14 @@ impl Workspaces {
         })
     }
 
+    /// The colocated Node handle, when enabled (not a diagnostic copy).
+    pub fn local_node(&self) -> Option<Arc<dyn Node>> {
+        self.local.as_ref().map(|l| l.node.node())
+    }
+
     /// The local Node's roots as the Hub configures them now (what [`Workspaces::refresh_roots`]
     /// gives it). [`PlacementError::LocalOff`] without a local Node.
-    pub fn local_roots(&self) -> Result<Vec<steve_node::Root>, PlacementError> {
+    pub fn local_roots(&self) -> Result<Vec<HostRoot>, PlacementError> {
         if self.local.is_none() {
             return Err(PlacementError::LocalOff);
         }
@@ -385,11 +439,31 @@ impl steve_knowledge::sources::folder_node::FolderPlaces for KbFolders {
             Err(PlacementError::Store(e)) => Err(Unplaced::Failed(e.to_string())),
         }
     }
+
+    async fn check_path(
+        &self,
+        path: &str,
+    ) -> Result<Option<PathCheckResponse>, steve_knowledge::sources::folder_node::Unplaced> {
+        use steve_knowledge::sources::folder_node::Unplaced;
+        let Some(node) = self.0.local_node() else {
+            return Err(Unplaced::Offline);
+        };
+        match node
+            .path_check(PathCheckRequest {
+                path: path.to_string(),
+            })
+            .await
+        {
+            Ok(resp) => Ok(Some(resp)),
+            Err(e) if e.code == Code::Unavailable => Err(Unplaced::Offline),
+            Err(e) => Err(Unplaced::Failed(e.safe_detail)),
+        }
+    }
 }
 
 /// `path` (absolute, normalized) as a place under the deepest root that holds it; the match is by
 /// whole path components, made on the names alone.
-pub(crate) fn within(roots: &[steve_node::Root], path: &Path) -> Option<RootPath> {
+pub(crate) fn within(roots: &[HostRoot], path: &Path) -> Option<RootPath> {
     roots
         .iter()
         .filter_map(|r| {
@@ -560,6 +634,7 @@ mod tests {
             })
             .unwrap(),
         );
+        node.enable_host_ops();
         let runtime = NodeRuntime::new(store.clone(), node.clone(), Arc::new(Ends));
         let fleet = remote.then(|| {
             NodeFleet::new(

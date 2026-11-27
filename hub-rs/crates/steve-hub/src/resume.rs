@@ -1,28 +1,22 @@
 //! The harness's own session behind a Steve session, so the user can pick it up in the harness itself
-//! (ST-28). The ACP session id Steve keeps is the harness's id: claude-agent-acp hands its id to Claude
-//! Code as `--session-id` (`~/.claude/projects/<cwd>/<id>.jsonl`), codex-acp answers with the Codex
-//! thread id (`$CODEX_HOME/sessions/…/rollout-<time>-<id>.jsonl`). An imported session has no ACP id;
+//! (ST-28). The ACP session id Steve keeps is the harness's id. An imported session has no ACP id;
 //! its import key names the transcript file, whose name carries the id.
 //!
-//! `info` also reads the transcript the id points to, so the page says whether it is really there and
-//! belongs to the same directory. Only ids and `cwd` fields are parsed; nothing else is kept or returned.
+//! Filesystem checks (`cwd_exists`, state-directory env overrides, and transcript lookup) are
+//! executed exclusively by the Node via [`steve_node_api::Discovery::resume_probe`]. The Hub renders
+//! the resume/fork CLI commands from declared harness metadata and the Node's probe response without
+//! reading project or harness directories itself.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::UNIX_EPOCH;
 
 use serde_json::{Value, json};
 
 use crate::wire::store::Obj;
 
-/// Where the harnesses keep their sessions: what the Hub's own environment gives its agents.
+/// Harness manifest declarations needed to render CLI resume/fork commands.
 #[derive(Debug, Clone, Default)]
 pub struct Homes {
-    pub home: PathBuf,
-    /// `$CLAUDE_CONFIG_DIR`, default `~/.claude`.
-    pub claude_dir: PathBuf,
-    /// `$CODEX_HOME`, default `~/.codex`.
-    pub codex_home: PathBuf,
     /// Manifest declarations (`harness.json`), so custom or overridden `resume_cli` / `fork_cli` /
     /// `state` work on the resume page too.
     pub declared: BTreeMap<String, steve_harness_spec::Declaration>,
@@ -30,13 +24,7 @@ pub struct Homes {
 
 impl Homes {
     pub fn of(cfg: &crate::config::Config) -> Homes {
-        let home = crate::config::home_dir();
         Homes {
-            claude_dir: std::env::var_os("CLAUDE_CONFIG_DIR")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(".claude")),
-            codex_home: cfg.codex_home.clone(),
-            home,
             declared: cfg.declared_adapters.clone(),
         }
     }
@@ -80,63 +68,20 @@ fn sh(s: &str) -> String {
 }
 
 fn render_cli(
-    h: &Homes,
-    props: &steve_harness_spec::AdapterProperties,
     template: Option<&str>,
     id: &str,
     cwd: &str,
-    principal_state_dir: Option<&Path>,
+    state_env: &[(String, String)],
 ) -> Option<String> {
     if !valid_id(id) {
         return None;
     }
     let template = template?;
     let run = template.replace("{id}", &sh(id));
-    let env = match (props.state.as_ref(), principal_state_dir) {
-        (Some(state), Some(pdir)) => {
-            let mut pairs = Vec::new();
-            for (k, v) in state.isolation_env(pdir) {
-                let vp = PathBuf::from(v);
-                let vp = if vp.is_relative() {
-                    std::path::absolute(&vp).unwrap_or(vp)
-                } else {
-                    vp
-                };
-                pairs.push(format!(
-                    "{}={} ",
-                    k.to_string_lossy(),
-                    sh(&vp.to_string_lossy())
-                ));
-            }
-            pairs.concat()
-        }
-        (Some(state), None) if !state.env.is_empty() => {
-            let default = if state.home_override {
-                h.home.clone()
-            } else {
-                h.home.join(&state.default)
-            };
-            let dir = match state.env.as_str() {
-                "CLAUDE_CONFIG_DIR" => h.claude_dir.clone(),
-                "CODEX_HOME" => h.codex_home.clone(),
-                other => std::env::var_os(other)
-                    .filter(|v| !v.is_empty())
-                    .map(PathBuf::from)
-                    .unwrap_or_else(|| default.clone()),
-            };
-            if dir == default {
-                String::new()
-            } else {
-                let abs = if dir.is_relative() {
-                    std::path::absolute(&dir).unwrap_or_else(|_| h.home.join(&dir))
-                } else {
-                    dir
-                };
-                format!("{}={} ", state.env, sh(&abs.to_string_lossy()))
-            }
-        }
-        _ => String::new(),
-    };
+    let env: String = state_env
+        .iter()
+        .map(|(k, v)| format!("{k}={} ", sh(v)))
+        .collect();
     let cd = if cwd.is_empty() {
         String::new()
     } else if cwd.starts_with(['-', '+']) {
@@ -147,37 +92,13 @@ fn render_cli(
     Some(format!("{cd}{env}{run}"))
 }
 
-/// `cd <cwd> && [VAR=dir] <harness command>`; the variable only when the Hub's agents use another one.
+/// `cd <cwd> && <harness command>` with default harness state paths.
 pub fn command(h: &Homes, harness: &str, id: &str, cwd: &str) -> Option<String> {
     let props = crate::harnesses::adapter_spec(harness, h.declared.get(harness)).properties;
-    render_cli(h, &props, props.resume_cli.as_deref(), id, cwd, None)
+    render_cli(props.resume_cli.as_deref(), id, cwd, &[])
 }
 
-fn node_homes(
-    h: &Homes,
-    props: &steve_harness_spec::AdapterProperties,
-    principal_state_dir: Option<&Path>,
-) -> steve_node::history::Homes {
-    let mut nh = steve_node::history::Homes {
-        user_home: h.home.clone(),
-        steve_home: PathBuf::new(),
-        claude_dir: h.claude_dir.clone(),
-        codex_home: h.codex_home.clone(),
-    };
-    if let (Some(state), Some(pdir)) = (props.state.as_ref(), principal_state_dir) {
-        for (k, v) in state.isolation_env(pdir) {
-            match k.to_str() {
-                Some("HOME") => nh.user_home = PathBuf::from(v),
-                Some("CLAUDE_CONFIG_DIR") => nh.claude_dir = PathBuf::from(v),
-                Some("CODEX_HOME") => nh.codex_home = PathBuf::from(v),
-                _ => {}
-            }
-        }
-    }
-    nh
-}
-
-/// The transcript part of [`info`]: where it is, when it changed, and what it records.
+/// The transcript part of the resume response: where it is, when it changed, and what it records.
 fn transcript(
     path: &str,
     updated: Option<i64>,
@@ -191,17 +112,18 @@ fn transcript(
     json!({ "path": path, "updated": updated, "id": rid, "cwd": rcwd, "matches": same })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn page(
     harness: &str,
     cwd: &str,
     h: &Homes,
     id: Option<&str>,
+    cwd_exists: bool,
+    state_env: &[(String, String)],
     transcript: Value,
-    principal_state_dir: Option<&Path>,
     transcript_checked: bool,
 ) -> Value {
     let props = crate::harnesses::adapter_spec(harness, h.declared.get(harness)).properties;
-    let cwd_exists = !cwd.is_empty() && Path::new(cwd).is_dir();
     let Some(id) = id else {
         return json!({
             "harness": harness,
@@ -219,77 +141,19 @@ fn page(
         "id": id,
         "cwd": cwd,
         "cwd_exists": cwd_exists,
-        "command": render_cli(h, &props, props.resume_cli.as_deref(), id, cwd, principal_state_dir),
-        "fork_command": render_cli(h, &props, props.fork_cli.as_deref(), id, cwd, principal_state_dir),
+        "command": render_cli(props.resume_cli.as_deref(), id, cwd, state_env),
+        "fork_command": render_cli(props.fork_cli.as_deref(), id, cwd, state_env),
         "transcript": transcript,
         "transcript_checked": transcript_checked,
     })
 }
 
-/// What the session page shows to resume a session in its harness. Blocking: reads the harness's files.
-pub fn info(h: &Homes, s: &Obj) -> Value {
-    info_for_state(h, s, &SessionState::AmbientLocal)
-}
-
-pub fn info_with_state(h: &Homes, s: &Obj, principal_state_dir: Option<&Path>) -> Value {
-    match principal_state_dir {
-        Some(dir) => info_for_state(
-            h,
-            s,
-            &SessionState::IsolatedLocal {
-                harness_dir: dir.to_path_buf(),
-                expose_path: true,
-            },
-        ),
-        None => info_for_state(h, s, &SessionState::AmbientLocal),
-    }
-}
-
-pub fn info_for_state(h: &Homes, s: &Obj, state: &SessionState) -> Value {
-    let harness = text(s, "harness").unwrap_or_default();
-    let cwd = text(s, "cwd").unwrap_or_default();
-    let id = native_id(s);
-    let props = crate::harnesses::adapter_spec(harness, h.declared.get(harness)).properties;
-    let (pdir, check) = match state {
-        SessionState::AmbientLocal => (None, props.local_transcript),
-        SessionState::IsolatedLocal {
-            harness_dir,
-            expose_path: true,
-        } => (Some(harness_dir.as_path()), props.local_transcript),
-        SessionState::IsolatedLocal {
-            expose_path: false, ..
-        }
-        | SessionState::RemoteNode => (None, false),
-    };
-    let found = if check {
-        let nh = node_homes(h, &props, pdir);
-        let file = id
-            .as_deref()
-            .and_then(|id| steve_node::history::find_transcript(&nh, harness, id, cwd));
-        match (&id, file) {
-            (Some(id), Some(f)) => {
-                let (rid, rcwd) = steve_node::history::recorded(&f, harness);
-                let updated = std::fs::metadata(&f)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-                    .map(|d| d.as_millis() as i64);
-                transcript(&f.to_string_lossy(), updated, rid, rcwd, id, cwd)
-            }
-            _ => Value::Null,
-        }
-    } else {
-        Value::Null
-    };
-    page(harness, cwd, h, id.as_deref(), found, pdir, check)
-}
-
-/// [`info`] with the transcript found by the local Node ([`Discovery::locate`] of
-/// `session:<id>`), the Hub reading none of the harness's files.
+/// Resume info resolved via `node` (`Discovery::resume_probe`), reading no harness or project
+/// files from the Hub process.
 pub async fn info_on(
     h: &Homes,
     s: &Obj,
-    node: &dyn steve_node_api::Discovery,
+    node: Option<&dyn steve_node_api::Discovery>,
     principal_state_dir: Option<&Path>,
 ) -> Value {
     let state = match principal_state_dir {
@@ -305,73 +169,129 @@ pub async fn info_on(
 pub async fn info_on_state(
     h: &Homes,
     s: &Obj,
-    node: &dyn steve_node_api::Discovery,
+    node: Option<&dyn steve_node_api::Discovery>,
     state: &SessionState,
 ) -> Value {
-    match state {
-        SessionState::IsolatedLocal { .. } | SessionState::RemoteNode => {
-            let h = h.clone();
-            let s = s.clone();
-            let state = state.clone();
-            return tokio::task::spawn_blocking(move || info_for_state(&h, &s, &state))
-                .await
-                .unwrap_or(Value::Null);
-        }
-        SessionState::AmbientLocal => {}
-    }
     let harness = text(s, "harness").unwrap_or_default();
     let cwd = text(s, "cwd").unwrap_or_default();
     let id = native_id(s);
     let props = crate::harnesses::adapter_spec(harness, h.declared.get(harness)).properties;
-    let mut found = Value::Null;
-    if props.local_transcript
-        && let Some(id) = &id
-    {
-        let at = node
-            .locate(steve_node_api::HistoryRef {
-                harness: harness.into(),
-                key: format!("session:{id}"),
+    let (pdir, check, hide_env, probe_node) = match state {
+        SessionState::AmbientLocal => (None, props.local_transcript, false, node),
+        SessionState::IsolatedLocal {
+            harness_dir,
+            expose_path: true,
+        } => (
+            Some(harness_dir.to_string_lossy().into_owned()),
+            props.local_transcript,
+            false,
+            node,
+        ),
+        SessionState::IsolatedLocal {
+            expose_path: false, ..
+        } => (None, false, true, node),
+        SessionState::RemoteNode => (None, false, true, None),
+    };
+
+    let (cwd_exists, state_env, found, transcript_checked) = if let Some(node) = probe_node {
+        match node
+            .resume_probe(steve_node_api::ResumeProbeRequest {
+                harness: harness.to_string(),
+                session_id: id.clone(),
+                cwd: cwd.to_string(),
+                principal_state_dir: pdir,
+                check_transcript: check,
             })
-            .await;
-        if let Ok(l) = at {
-            found = transcript(
-                &l.display,
-                l.updated.map(|t| t.0),
-                l.recorded_id,
-                l.recorded_cwd,
-                id,
-                cwd,
-            );
+            .await
+        {
+            Ok(resp) => {
+                let env = if hide_env { Vec::new() } else { resp.state_env };
+                let found = if check {
+                    match (&id, resp.transcript) {
+                        (Some(id), Some(l)) => transcript(
+                            &l.display,
+                            l.updated.map(|t| t.0),
+                            l.recorded_id,
+                            l.recorded_cwd,
+                            id,
+                            cwd,
+                        ),
+                        _ => Value::Null,
+                    }
+                } else {
+                    Value::Null
+                };
+                (resp.cwd_exists, env, found, check)
+            }
+            Err(_) => (false, Vec::new(), Value::Null, false),
         }
-    }
+    } else {
+        (false, Vec::new(), Value::Null, false)
+    };
+
     page(
         harness,
         cwd,
         h,
         id.as_deref(),
+        cwd_exists,
+        &state_env,
         found,
-        None,
-        props.local_transcript,
+        transcript_checked,
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::fs;
-    use steve_node::history::claude_project;
+    use steve_acp::AcpConfig;
+    use steve_acp::adapter::claude_code::claude_project;
+    use steve_node::{LocalNode, NodeConfig, PolicyCeiling};
+    use steve_node_api::NodeId;
 
     fn obj(v: Value) -> Obj {
         v.as_object().cloned().unwrap()
     }
 
-    fn homes(root: &Path) -> Homes {
-        Homes {
-            home: root.into(),
-            claude_dir: root.join(".claude"),
-            codex_home: root.join(".codex"),
-            declared: BTreeMap::new(),
-        }
+    fn test_node(root: &Path, codex_home: PathBuf) -> LocalNode {
+        let node = LocalNode::open(NodeConfig {
+            ceiling: PolicyCeiling::unlimited(),
+            node: NodeId::new("local").unwrap(),
+            home: root.join("node"),
+            acp: AcpConfig {
+                declared: HashMap::new(),
+                adapters: HashMap::new(),
+                node: "node".into(),
+                claude_executable: "claude".into(),
+                claude_config_dir: Some(root.join(".claude")),
+                steve_home: root.join("steve"),
+                codex_home: codex_home.clone(),
+                user_home: root.to_path_buf(),
+                version: "test".into(),
+            },
+            roots: vec![],
+            capacity: steve_node_api::Capacity {
+                sessions: steve_node_api::Capacity::SESSIONS_DEFAULT,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Default::default(),
+        })
+        .unwrap();
+        node.set_discovery(steve_node::history::DiscoveryConfig {
+            homes: steve_node::history::Homes {
+                user_home: root.to_path_buf(),
+                steve_home: root.join("steve"),
+                state_dirs: BTreeMap::from([
+                    ("claude-code".to_string(), root.join(".claude")),
+                    ("codex".to_string(), codex_home),
+                ]),
+            },
+            binaries: Default::default(),
+        });
+        node
     }
 
     #[test]
@@ -398,9 +318,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn commands_per_harness() {
-        let h = homes(Path::new("/h"));
+    #[tokio::test]
+    async fn commands_per_harness() {
+        let h = Homes::default();
         assert_eq!(
             command(&h, "claude-code", "id-1", "/w/ST-1").as_deref(),
             Some("cd /w/ST-1 && claude --resume id-1")
@@ -422,15 +342,7 @@ mod tests {
             Some("cd /w && agy --resume id")
         );
         assert_eq!(command(&h, "unknown-harness", "id", "/w"), None);
-        let other = Homes {
-            codex_home: "/srv/codex's".into(),
-            ..h.clone()
-        };
-        assert_eq!(
-            command(&other, "codex", "id", "/w").as_deref(),
-            Some(r"cd /w && CODEX_HOME='/srv/codex'\''s' codex resume id")
-        );
-        // option injection, tilde expansion, dash-prefixed cwd, and principal isolation env
+        // option injection, tilde expansion, dash-prefixed cwd
         assert_eq!(
             command(&h, "claude-code", "--dangerously-skip-permissions", "/w"),
             None
@@ -444,11 +356,29 @@ mod tests {
             command(&h, "claude-code", "FOO=bar", "+cwd").as_deref(),
             Some("cd -- '+cwd' && claude --resume 'FOO=bar'")
         );
-        let iso = info_with_state(
+
+        // Non-default state_dir env and isolated principal state via Node resume_probe
+        let tmp = tempfile::tempdir().unwrap();
+        let node = test_node(tmp.path(), PathBuf::from("/srv/codex's"));
+        let cx = info_on(
+            &h,
+            &obj(json!({ "harness": "codex", "cwd": "/w", "acp_session_id": "id" })),
+            Some(&node),
+            None,
+        )
+        .await;
+        assert_eq!(
+            cx["command"],
+            r"cd /w && CODEX_HOME='/srv/codex'\''s' codex resume id"
+        );
+
+        let iso = info_on(
             &h,
             &obj(json!({ "harness": "opencode", "cwd": "/w", "acp_session_id": "s-1" })),
+            Some(&node),
             Some(Path::new("/h/data/node/state/p1/harness")),
-        );
+        )
+        .await;
         let cmd = iso["command"].as_str().unwrap();
         assert!(
             cmd.contains("XDG_DATA_HOME=/h/data/node/state/p1/harness/xdg/data"),
@@ -462,15 +392,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn finds_and_checks_the_transcript() {
-        let root = std::env::temp_dir().join(format!("steve-resume-{}", std::process::id()));
-        let _ = fs::remove_dir_all(&root);
-        let h = homes(&root);
+    #[tokio::test]
+    async fn finds_and_checks_the_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let h = Homes::default();
         let cwd = root.join("w/ST-1");
         fs::create_dir_all(&cwd).unwrap();
         let cwd = cwd.to_string_lossy().into_owned();
-        let pdir = h.claude_dir.join("projects").join(claude_project(&cwd));
+        let pdir = root.join(".claude/projects").join(claude_project(&cwd));
         fs::create_dir_all(&pdir).unwrap();
         // a pasted screenshot: a line of two megabytes before the first `cwd`
         let image = "A".repeat(2 << 20);
@@ -481,37 +411,47 @@ mod tests {
             ),
         )
         .unwrap();
-        let day = h.codex_home.join("sessions/2026/11/04");
+        let day = root.join(".codex/sessions/2026/11/04");
         fs::create_dir_all(&day).unwrap();
         fs::write(
             day.join("rollout-2026-11-04T10-00-00-x-2.jsonl"),
             "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x-2\",\"cwd\":\"/elsewhere\"}}\n",
         )
         .unwrap();
+        let node = test_node(root, root.join(".codex"));
 
-        let cc = info(
+        let cc = info_on(
             &h,
             &obj(json!({ "harness": "claude-code", "cwd": cwd, "acp_session_id": "c-1" })),
-        );
+            Some(&node),
+            None,
+        )
+        .await;
         assert_eq!(cc["id"], "c-1");
         assert_eq!(cc["cwd_exists"], true);
         assert_eq!(cc["transcript"]["matches"], true);
         assert_eq!(cc["transcript"]["cwd"], cwd.as_str());
 
-        let cx = info(
+        let cx = info_on(
             &h,
             &obj(json!({ "harness": "codex", "cwd": cwd, "acp_session_id": "x-2" })),
-        );
+            Some(&node),
+            None,
+        )
+        .await;
         assert_eq!(cx["transcript"]["id"], "x-2");
         assert_eq!(
             cx["transcript"]["matches"], false,
             "recorded in another directory"
         );
 
-        let missing = info(
+        let missing = info_on(
             &h,
             &obj(json!({ "harness": "claude-code", "cwd": cwd, "acp_session_id": "gone" })),
-        );
+            Some(&node),
+            None,
+        )
+        .await;
         assert_eq!(missing["transcript"], Value::Null);
         assert!(
             missing["command"]
@@ -520,13 +460,15 @@ mod tests {
                 .ends_with("claude --resume gone")
         );
 
-        let none = info(
+        let none = info_on(
             &h,
             &obj(json!({ "harness": "codex", "cwd": "/nope", "acp_session_id": null })),
-        );
+            Some(&node),
+            None,
+        )
+        .await;
         assert_eq!(none["id"], Value::Null);
         assert_eq!(none["command"], Value::Null);
         assert_eq!(none["cwd_exists"], false);
-        let _ = fs::remove_dir_all(&root);
     }
 }

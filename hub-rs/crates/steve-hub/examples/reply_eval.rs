@@ -274,7 +274,7 @@ fn gateway_for(
             roots: vec![],
             capacity: Capacity {
                 sessions: 0,
-                jobs: steve_hub::wire::LOCAL_JOB_CAPACITY,
+                jobs: 16,
                 execs: 0,
             },
             storage: steve_node::Storage::default(),

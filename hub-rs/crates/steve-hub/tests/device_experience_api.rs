@@ -10,8 +10,12 @@ use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 use steve_store::Store;
 
+#[path = "support/local_node.rs"]
+mod local_node;
+
 struct Env {
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     db: PathBuf,
     base: String,
     http: reqwest::Client,
@@ -72,7 +76,7 @@ async fn start(local: bool) -> Env {
         vars.insert(k.into(), v);
     }
     if local {
-        vars.insert("STEVE_NODE_MODE".into(), "local".into());
+        vars.insert("STEVE_LOCAL_NODE_PORT".into(), "0".into());
         vars.remove("STEVE_NO_RESUME");
     }
     let vars = Arc::new(vars);
@@ -88,14 +92,15 @@ async fn start(local: bool) -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
         .with_node(w.node.clone())
+        .with_nodes(w.nodes.clone())
+        .with_workspaces(Some(w.workspaces.clone()))
         .with_modules(w.modules)
         .with_oidc(w.oidc.clone());
     steve_hub::app::boot(&st).await.expect("boot");
-    for job in w.jobs {
-        job.start(&st.jobs);
-    }
+    local_node::start_jobs(w.jobs, &st.jobs);
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
         let _ = axum::serve(
@@ -126,6 +131,7 @@ async fn start(local: bool) -> Env {
     assert!(store.access().owner().unwrap().is_some());
     Env {
         _home: home,
+        _local_node: local_node,
         db: cfg.db_path(),
         base,
         http,

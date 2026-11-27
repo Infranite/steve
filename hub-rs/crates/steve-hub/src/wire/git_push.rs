@@ -1,5 +1,5 @@
 //! GitHub's git on the Node that holds an item or a project (N0e-E8), for a Hub whose local Node
-//! is on (`STEVE_NODE_MODE=local`): [`steve_github::push::GitNodes`].
+//! is on (colocated `steve-node`): [`steve_github::push::GitNodes`].
 //!
 //! Reads (whether the branch has commits to offer, where it is, a project's `origin`) are the
 //! Node's git facts in the item's workspace (its bound session's, else its directory prepared as
@@ -93,7 +93,10 @@ fn node_error(e: impl std::fmt::Display) -> PushError {
 /// What the Node said, as the Hub's own push says it. `now`: where the branch is now, for a
 /// branch that moved.
 fn mapped(e: &Error, p: &NodePush<'_>, now: Option<String>) -> PushError {
-    use steve_node::git::{BRANCH_MOVED, HOST_FORBIDDEN, NO_BRANCH, WRONG_REMOTE};
+    use steve_node_api::{
+        GIT_BRANCH_MOVED as BRANCH_MOVED, GIT_HOST_FORBIDDEN as HOST_FORBIDDEN,
+        GIT_NO_BRANCH as NO_BRANCH, GIT_WRONG_REMOTE as WRONG_REMOTE,
+    };
     match (e.code, e.safe_detail.as_str()) {
         (Code::Unavailable, _) => node_error(PlacementError::Offline {
             device: String::new(),
@@ -121,8 +124,8 @@ fn moved_meanwhile(l: &LedgerEntry) -> bool {
     l.state == "rejected"
         && l.refusal.as_ref().is_some_and(|e| {
             e.code == Code::Stale
-                && e.safe_detail != steve_node::git::BRANCH_MOVED
-                && e.safe_detail != steve_node::git::NO_BRANCH
+                && e.safe_detail != steve_node_api::GIT_BRANCH_MOVED
+                && e.safe_detail != steve_node_api::GIT_NO_BRANCH
         })
 }
 
@@ -402,7 +405,7 @@ impl GitPush {
             // timed out, interrupted: it may have landed
             _ => return Err(PushError::Lost),
         };
-        let now = if error.safe_detail == steve_node::git::BRANCH_MOVED {
+        let now = if error.safe_detail == steve_node_api::GIT_BRANCH_MOVED {
             Self::branch_now(&placed.node, w, p.branch).await
         } else {
             None

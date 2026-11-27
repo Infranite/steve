@@ -1,24 +1,25 @@
 //! `/api/projects*` and `/api/fs/browse`.
+//!
+//! All host directory browsing, existence checks, git detection, and README reads go through the
+//! colocated Node over `steve-node-api`; the Hub never touches project directories on disk.
 
 use std::collections::HashMap;
-use std::path::{Path as FsPath, PathBuf};
+use std::path::Path as FsPath;
 use std::sync::Arc;
 
 use axum::Extension;
 use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use serde_json::{Value, json};
+use steve_node_api as na;
 
 use super::misc::FAST;
-use super::{
-    ApiResult, AppState, Ctx, Noun, Patch, blocking, check_len, json_body, ok, own, own_bot,
-};
+use super::{ApiResult, AppState, Ctx, Noun, Patch, check_len, json_body, ok, own, own_bot};
 use crate::config::home_dir;
 use crate::error::ApiError;
 use crate::js;
 use crate::wire::store::{NewProject, Obj};
-use crate::wire::workspaces::{At, PlacementError};
-use steve_node_api as na;
+use crate::wire::workspaces::PlacementError;
 
 /// `path.normalize`: folds `.`/`..` and repeated slashes, keeps a trailing slash.
 pub fn normalize(p: &str) -> String {
@@ -74,62 +75,6 @@ pub fn expand(p: &str) -> String {
     }
 }
 
-/// Node's fs error text, e.g. `ENOTDIR: not a directory, scandir '/x'`.
-fn fs_error(e: &std::io::Error, syscall: &str, path: &str) -> ApiError {
-    let (code, what) = match e.raw_os_error() {
-        Some(20) => ("ENOTDIR", "not a directory"),
-        Some(13) => ("EACCES", "permission denied"),
-        Some(2) => ("ENOENT", "no such file or directory"),
-        Some(21) => ("EISDIR", "illegal operation on a directory"),
-        Some(1) => ("EPERM", "operation not permitted"),
-        _ => return ApiError::internal(format!("{e}, {syscall} '{path}'")),
-    };
-    ApiError::internal(format!("{code}: {what}, {syscall} '{path}'"))
-}
-
-fn is_dir(p: &str) -> bool {
-    FsPath::new(p).is_dir()
-}
-
-fn exists(p: &str) -> bool {
-    FsPath::new(p).exists()
-}
-
-/* ── reading a directory of the Hub's own device ──
-With the local Node on (`STEVE_NODE_MODE=local`) a directory under one of its roots is read through
-its files face. A directory under none of them is one being made a project, so a new root: no Node
-allows it yet, and the Hub checks it on its own disk (the machine is the same; the root follows once
-the project exists).
-Without the local Node the Hub reads its own disk as always. `browse`, the chooser of a new project's
-directory, reads the disk the same way wherever it is asked, for the instance owner only. */
-
-/// Who reads a directory of the Hub's own device.
-enum Via {
-    /// The Hub itself: the local Node is off.
-    Hub,
-    /// The local Node, at this place under one of its roots.
-    Node(Arc<dyn na::Node>, na::RootPath),
-    /// Under none of the local Node's roots: a new root being chosen.
-    Outside,
-}
-
-async fn via(st: &AppState, path: &str) -> Result<Via, ApiError> {
-    let Some(ws) = st.workspaces.clone() else {
-        return Ok(Via::Hub);
-    };
-    let path = PathBuf::from(normalize(path));
-    blocking(move || match ws.hub_path(&path) {
-        Ok(p) => match p.at {
-            At::Root(at) => Ok(Via::Node(p.node, at)),
-            At::Workspace(_) => Err(ApiError::internal("a directory placed in a workspace")),
-        },
-        Err(PlacementError::LocalOff) => Ok(Via::Hub),
-        Err(PlacementError::Outside) => Ok(Via::Outside),
-        Err(e) => Err(placement_error(e)),
-    })
-    .await
-}
-
 /// `设备离线` is a 503: the device may come back, the request was fine.
 pub(super) fn offline() -> ApiError {
     ApiError::Json(503, steve_i18n::t!("hub.workspaces.offline"))
@@ -137,148 +82,32 @@ pub(super) fn offline() -> ApiError {
 
 pub(super) fn placement_error(e: PlacementError) -> ApiError {
     match e {
-        PlacementError::Offline { .. } => offline(),
+        PlacementError::Offline { .. } | PlacementError::LocalOff => offline(),
         e @ PlacementError::NotOwners { .. } => ApiError::Json(403, e.to_string()),
         e => ApiError::internal(e.to_string()),
     }
 }
 
-/// How a Node read went wrong, for the caller to answer as it always has.
-#[derive(Debug, PartialEq)]
-enum Miss {
-    /// The Node has no files face yet: the Hub reads its own disk (the local Node only).
-    Unsupported,
-    /// Not there, not a directory, or refused (outside its roots, through a link).
-    Gone,
-    Fail(ApiError),
+fn local_node(st: &AppState) -> Result<Arc<dyn na::Node>, ApiError> {
+    st.workspaces
+        .as_ref()
+        .and_then(|ws| ws.local_node())
+        .ok_or_else(offline)
 }
 
-fn miss(e: na::Error) -> Miss {
+fn map_node_err(e: na::Error) -> ApiError {
+    if e.reason
+        .as_ref()
+        .is_some_and(|r| r.is(na::NodeReason::LocalNodeUpdating))
+    {
+        return ApiError::Json(503, steve_i18n::t!("hub.node.local_updating"));
+    }
     match e.code {
-        na::Code::Unsupported => Miss::Unsupported,
-        na::Code::Invalid | na::Code::Forbidden => Miss::Gone,
-        na::Code::Unavailable => Miss::Fail(offline()),
-        _ => Miss::Fail(ApiError::internal(e.safe_detail)),
+        na::Code::Unavailable => offline(),
+        na::Code::Forbidden => ApiError::Json(403, e.safe_detail),
+        na::Code::Invalid => ApiError::bad_request(e.safe_detail),
+        _ => ApiError::internal(e.safe_detail),
     }
-}
-
-/// Entries listed of one directory at most: as many as a person could choose among.
-const LIST_MAX: usize = 10_000;
-
-/// The names right below `at`, sorted, dotfiles included, with whether each is a directory (a
-/// linked directory is not one: the Node does not follow it).
-async fn node_list(node: &dyn na::Node, at: &na::RootPath) -> Result<Vec<(String, bool)>, Miss> {
-    let mut out = vec![];
-    let mut cursor = None;
-    loop {
-        let page = node
-            .list_root(
-                at.clone(),
-                na::PageRequest {
-                    cursor,
-                    limit: 1000,
-                },
-            )
-            .await
-            .map_err(miss)?;
-        for f in page.items {
-            let name = f.path.as_str().rsplit('/').next().unwrap_or_default();
-            out.push((name.to_string(), f.is_dir));
-        }
-        cursor = page.next;
-        if cursor.is_none() || out.len() >= LIST_MAX {
-            break;
-        }
-    }
-    out.sort();
-    Ok(out)
-}
-
-fn has_git(names: &[(String, bool)]) -> bool {
-    names.iter().any(|(n, _)| n == ".git")
-}
-
-fn below(at: &na::RootPath, name: &str) -> Option<na::RootPath> {
-    let rel = match at.rel.as_str() {
-        "" => name.to_string(),
-        base => format!("{base}/{name}"),
-    };
-    Some(na::RootPath {
-        root: at.root.clone(),
-        rel: na::RelPath::new(rel).ok()?,
-    })
-}
-
-/// The first `max` bytes of a file (or all of a shorter one); `None` when it is not there.
-async fn node_head(
-    node: &dyn na::Node,
-    at: na::RootPath,
-    max: usize,
-) -> Result<Option<Vec<u8>>, Miss> {
-    let mut out: Vec<u8> = vec![];
-    loop {
-        let r = node
-            .read_file(na::FileRead {
-                path: na::FileAddress::Root(at.clone()),
-                expected: None,
-                offset: out.len() as u64,
-                max: (max - out.len()) as u32,
-            })
-            .await;
-        let chunk = match r {
-            Ok(c) => c,
-            Err(e) => {
-                return match miss(e) {
-                    Miss::Gone => Ok(None),
-                    m => Err(m),
-                };
-            }
-        };
-        let none = chunk.bytes.is_empty();
-        out.extend(chunk.bytes);
-        if chunk.eof || none || out.len() >= max {
-            return Ok(Some(out));
-        }
-    }
-}
-
-/// The readme files `describe` shows, in order.
-const README: [&str; 4] = ["README.md", "readme.md", "AGENTS.md", "package.json"];
-/// The start of each readme the model sees, in UTF-16 units ([`js::slice`]).
-const README_CHARS: usize = 2500;
-
-/// [`describe_input`] through the Node, and whether the directory is a git checkout. A readme is
-/// read only as far as its first [`README_CHARS`] need (four bytes each at most).
-async fn node_describe(
-    node: &dyn na::Node,
-    at: &na::RootPath,
-) -> Result<(String, String, bool), Miss> {
-    let names = node_list(node, at).await?;
-    let list = names
-        .iter()
-        .map(|(n, _)| n.as_str())
-        .filter(|f| !f.starts_with('.'))
-        .take(60)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut readme = vec![];
-    for f in README {
-        let Some(file) = below(at, f) else { continue };
-        // asked by name, as the Hub opens it: a case-insensitive disk finds `readme.md` too
-        if let Some(text) = node_head(node, file, README_CHARS * 4).await? {
-            readme.push(format!(
-                "{f}:\n{}",
-                js::slice(&String::from_utf8_lossy(&text), README_CHARS)
-            ));
-        }
-    }
-    Ok((list, readme.join("\n\n"), has_git(&names)))
-}
-
-/// Whether `path` is a directory, and a git checkout, as the Hub's disk says.
-async fn hub_dir_and_git(path: &str) -> Result<(bool, bool), ApiError> {
-    let p = path.to_string();
-    blocking(move || Ok((exists(&p) && is_dir(&p), exists(&join(&p, ".git"))))).await
 }
 
 #[derive(serde::Deserialize)]
@@ -402,23 +231,26 @@ pub async fn create(
     } = req;
     on_builtin_node(node.as_deref())?;
     registration.validate(&st, &c).await?;
-    let path = expand(&raw);
-    let (dir_ok, git) = match via(&st, &path).await? {
-        Via::Hub | Via::Outside => hub_dir_and_git(&path).await?,
-        Via::Node(node, at) => match node_list(&*node, &at).await {
-            Ok(names) => (true, has_git(&names)),
-            Err(Miss::Gone) => (false, false),
-            Err(Miss::Unsupported) => hub_dir_and_git(&path).await?,
-            Err(Miss::Fail(e)) => return Err(e),
-        },
-    };
-    if !dir_ok {
+    let local = local_node(&st)?;
+    let info = local
+        .describe_dir(na::DescribeDirRequest {
+            path: raw.clone(),
+            with_readme: false,
+        })
+        .await
+        .map_err(map_node_err)?;
+    if !info.exists || !info.is_dir {
         return Err(ApiError::bad_request(steve_i18n::t!(
             "hub.project.dir_missing",
             path = raw
         )));
     }
-    ok(registration.save(&st, c, path, git).await?)
+    let path = if info.resolved_path.is_empty() {
+        expand(&raw)
+    } else {
+        info.resolved_path
+    };
+    ok(registration.save(&st, c, path, info.git).await?)
 }
 
 pub async fn patch_one(
@@ -489,70 +321,42 @@ pub async fn patch_one(
     .await
 }
 
-/// What `describe` shows the model: the file list and the start of the usual readme files.
-fn describe_input(path: &str) -> Result<(String, String), ApiError> {
-    let mut names: Vec<String> = std::fs::read_dir(path)
-        .map_err(|e| fs_error(&e, "scandir", path))?
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    names.sort();
-    let list = names
-        .into_iter()
-        .filter(|f| !f.starts_with('.'))
-        .take(60)
-        .collect::<Vec<_>>()
-        .join(", ");
-    let mut readme = vec![];
-    for f in ["README.md", "readme.md", "AGENTS.md", "package.json"] {
-        let p = join(path, f);
-        if !exists(&p) {
-            continue;
-        }
-        let text = std::fs::read(&p).map_err(|e| fs_error(&e, "open", &p))?;
-        readme.push(format!(
-            "{f}:\n{}",
-            js::slice(&String::from_utf8_lossy(&text), 2500)
-        ));
-    }
-    Ok((list, readme.join("\n\n")))
-}
-
-/// Let Steve draft a description from what is in the directory.
+/// Let Steve draft a description from what is in the directory (read on the colocated Node).
 pub async fn describe(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     b: Bytes,
 ) -> ApiResult {
+    require_fs_owner(&c)?;
     let req: DescribeBody = json_body(&b)?;
     if req.path.is_empty() {
         return Err(ApiError::Invalid(vec!["path".into()]));
     }
     let raw = req.path;
-    let path = expand(&raw);
     let missing = || ApiError::bad_request(steve_i18n::t!("hub.project.dir_missing", path = raw));
-    // the Node's answer has the git check in it; the Hub's own disk is asked after, as always
-    let from_node = match via(&st, &path).await? {
-        Via::Hub | Via::Outside => None,
-        Via::Node(node, at) => match node_describe(&*node, &at).await {
-            Ok(v) => Some(v),
-            Err(Miss::Gone) => return Err(missing()),
-            Err(Miss::Unsupported) => None,
-            Err(Miss::Fail(e)) => return Err(e),
-        },
+    let local = local_node(&st)?;
+    let info = local
+        .describe_dir(na::DescribeDirRequest {
+            path: raw.clone(),
+            with_readme: true,
+        })
+        .await
+        .map_err(map_node_err)?;
+    if !info.exists || !info.is_dir {
+        return Err(missing());
+    }
+    let path = if info.resolved_path.is_empty() {
+        expand(&raw)
+    } else {
+        info.resolved_path
     };
-    let (list, readme, node_git) = match from_node {
-        Some((list, readme, git)) => (list, readme, Some(git)),
-        None => {
-            let p = path.clone();
-            if !blocking(move || Ok(exists(&p))).await? {
-                return Err(missing());
-            }
-            let p = path.clone();
-            let (list, readme) = blocking(move || describe_input(&p)).await?;
-            (list, readme, None)
-        }
-    };
+    let list = info.files.join(", ");
+    let readme = info
+        .readmes
+        .into_iter()
+        .map(|(name, text)| format!("{name}:\n{text}"))
+        .collect::<Vec<_>>()
+        .join("\n\n");
     let prompt = format!(
         "Describe this project directory for an assistant that routes tasks to projects. Chinese, one or two sentences: what it is and what kind of work happens there. ONLY JSON {{\"name\":\"<= 12 chars\",\"description\":\"\"}}\nPath: {path}\nFiles: {list}\n\n{readme}"
     );
@@ -566,15 +370,8 @@ pub async fn describe(
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let git = match node_git {
-        Some(git) => git,
-        None => {
-            let p = path.clone();
-            blocking(move || Ok(exists(&join(&p, ".git")))).await?
-        }
-    };
     ok(
-        json!({ "name": get("name").unwrap_or(base), "description": get("description").unwrap_or_default(), "git": git }),
+        json!({ "name": get("name").unwrap_or(base), "description": get("description").unwrap_or_default(), "git": info.git }),
     )
 }
 
@@ -588,81 +385,22 @@ pub(super) fn on_builtin_node(node: Option<&str>) -> Result<(), ApiError> {
     }
 }
 
-/// A path as the browser shows it: the home directory as `~`.
-fn shown(path: &str, home: &str) -> String {
-    match path.strip_prefix(home) {
-        Some("") => "~".into(),
-        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
-        _ => path.to_string(),
-    }
-}
-
-/// How many directories `browse` lists of one directory.
-const BROWSE_MAX: usize = 500;
-
-/// One directory of the built-in Node's machine and the directories in it, read off the disk.
-fn browse_dir(raw: &str) -> Value {
-    let home = home_dir().to_string_lossy().into_owned();
-    let asked = match raw.trim() {
-        "" => home.clone(),
-        p => expand(p),
-    };
-    let mut path = normalize(&asked);
-    if path.len() > 1 && path.ends_with('/') {
-        path.pop();
-    }
-    let parent = FsPath::new(&path)
-        .parent()
-        .map(|p| shown(&p.to_string_lossy(), &home));
-    let mut out = json!({
-        "path": shown(&path, &home),
-        "parent": parent,
-        "exists": false,
-        "denied": false,
-        "git": false,
-        "dirs": [],
-        "more": false,
-    });
-    if !path.starts_with('/') || !is_dir(&path) {
-        return out;
-    }
-    out["exists"] = json!(true);
-    out["git"] = json!(exists(&join(&path, ".git")));
-    let Ok(read) = std::fs::read_dir(&path) else {
-        // macOS keeps Desktop, Documents and Downloads from a service until the user allows it
-        out["denied"] = json!(true);
-        return out;
-    };
-    let mut names: Vec<String> = read
-        .filter_map(|e| e.ok())
-        // a link to a directory is a directory here: checkouts are often linked into place
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|n| !n.starts_with('.'))
-        .collect();
-    names.sort_by_key(|n| n.to_lowercase());
-    out["more"] = json!(names.len() > BROWSE_MAX);
-    out["dirs"] = names
-        .into_iter()
-        .take(BROWSE_MAX)
-        .map(|n| {
-            let p = join(&path, &n);
-            json!({ "name": n, "path": shown(&p, &home), "git": exists(&join(&p, ".git")) })
-        })
-        .collect();
-    out
-}
-
-/// The directory chooser of a new project: any directory of the built-in Node's machine, whether
-/// or not a root holds it yet. It shows what is on the disk, so it answers the instance owner only.
+/// The directory chooser of a new project: delegated to the colocated Node (`browse_dir` RPC),
+/// for the instance owner only.
 pub async fn browse(
+    State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
     Query(q): Query<HashMap<String, String>>,
 ) -> ApiResult {
     require_fs_owner(&c)?;
     on_builtin_node(q.get("node").map(String::as_str))?;
     let raw = q.get("path").cloned().unwrap_or_default();
-    ok(blocking(move || Ok(browse_dir(&raw))).await?)
+    let local = local_node(&st)?;
+    let resp = local
+        .browse_dir(na::BrowseDirRequest { path: raw })
+        .await
+        .map_err(map_node_err)?;
+    ok(json!(resp))
 }
 
 pub(super) fn require_fs_owner(c: &Ctx) -> Result<(), ApiError> {
@@ -693,173 +431,19 @@ mod tests {
     }
 
     #[test]
-    fn describe_reads_list_and_readme() {
-        let d = tempfile::tempdir().expect("tmp");
-        std::fs::write(d.path().join("README.md"), "# Hi").expect("w");
-        std::fs::write(d.path().join(".hidden"), "").expect("w");
-        std::fs::create_dir(d.path().join("src")).expect("d");
-        let (list, readme) = describe_input(&d.path().to_string_lossy()).expect("ok");
-        assert_eq!(list, "README.md, src");
-        assert!(readme.starts_with("README.md:\n# Hi"));
-        let f = d.path().join("README.md");
-        let e = describe_input(&f.to_string_lossy()).unwrap_err();
+    fn an_offline_node_is_a_503_device_offline() {
         assert_eq!(
-            e,
-            ApiError::internal(format!(
-                "ENOTDIR: not a directory, scandir '{}'",
-                f.display()
-            ))
+            map_node_err(na::Error::new(na::Code::Unavailable, "link down")),
+            ApiError::Json(503, "设备离线".into())
         );
-    }
-
-    /* ── through a Node (FakeNode: what the local Node answers once it has a files face) ── */
-
-    use steve_node_api::testkit::FakeNode;
-
-    fn fake(files: &[(&str, &[u8])]) -> (Arc<FakeNode>, na::RootPath) {
-        let n = FakeNode::new("n1");
-        n.set_roots(vec![na::RootInfo {
-            id: na::RootId::new("r1").unwrap(),
-            display: "~/code".into(),
-            access: na::RootAccess::ReadWrite,
-        }]);
-        for (rel, bytes) in files {
-            n.put_file("r1", rel, bytes);
-        }
-        let at = na::RootPath {
-            root: na::RootId::new("r1").unwrap(),
-            rel: na::RelPath::new("app").unwrap(),
-        };
-        (n, at)
-    }
-
-    #[tokio::test]
-    async fn describe_through_the_node_reads_what_the_hub_did() {
-        let (n, at) = fake(&[
-            ("app/README.md", b"# Hi"),
-            ("app/.hidden", b""),
-            ("app/src/main.rs", b""),
-        ]);
-        let (list, readme, git) = node_describe(&*n, &at).await.unwrap();
-        // the same as describe_reads_list_and_readme on the Hub's disk
-        assert_eq!(list, "README.md, src");
-        assert_eq!(readme, "README.md:\n# Hi");
-        assert!(!git);
-        n.put_file("r1", "app/.git/HEAD", b"ref: refs/heads/main\n");
-        assert!(node_describe(&*n, &at).await.unwrap().2);
-    }
-
-    #[tokio::test]
-    async fn a_long_readme_is_cut_where_the_hub_cut_it() {
-        // three bytes a character, past what the model sees
-        let long = "说明".repeat(2000);
-        let (n, at) = fake(&[
-            ("app/AGENTS.md", long.as_bytes()),
-            ("app/package.json", b"{}"),
-        ]);
-        let (_, readme, _) = node_describe(&*n, &at).await.unwrap();
-        assert_eq!(
-            readme,
-            format!(
-                "AGENTS.md:\n{}\n\npackage.json:\n{{}}",
-                js::slice(&long, README_CHARS)
-            )
-        );
-    }
-
-    #[tokio::test]
-    async fn a_root_the_node_does_not_allow_is_gone_not_a_failure() {
-        let (n, mut at) = fake(&[("app/README.md", b"x")]);
-        at.root = na::RootId::new("elsewhere").unwrap();
-        assert_eq!(node_list(&*n, &at).await.unwrap_err(), Miss::Gone);
-        assert_eq!(node_describe(&*n, &at).await.unwrap_err(), Miss::Gone);
-    }
-
-    #[tokio::test]
-    async fn an_offline_node_is_a_503_device_offline() {
-        let e = na::Error::new(na::Code::Unavailable, "link down");
-        assert_eq!(miss(e), Miss::Fail(ApiError::Json(503, "设备离线".into())));
-        let en = steve_i18n::scope("en", async {
-            miss(na::Error::new(na::Code::Unavailable, "x"))
-        })
-        .await;
-        assert_eq!(en, Miss::Fail(ApiError::Json(503, "Device offline".into())));
         assert_eq!(
             placement_error(PlacementError::Offline { device: "n".into() }),
             ApiError::Json(503, "设备离线".into())
         );
         assert_eq!(
-            miss(na::Error::new(na::Code::Unsupported, "files")),
-            Miss::Unsupported
+            placement_error(PlacementError::LocalOff),
+            ApiError::Json(503, "设备离线".into())
         );
-        assert_eq!(
-            miss(na::Error::new(na::Code::Forbidden, "outside")),
-            Miss::Gone
-        );
-    }
-
-    #[test]
-    fn a_path_is_shown_from_the_home_directory() {
-        assert_eq!(shown("/home/user", "/home/user"), "~");
-        assert_eq!(shown("/home/user/code/app", "/home/user"), "~/code/app");
-        assert_eq!(shown("/home/username", "/home/user"), "/home/username");
-        assert_eq!(shown("/srv/app", "/home/user"), "/srv/app");
-    }
-
-    #[test]
-    fn browse_lists_the_directories_of_one_directory() {
-        let d = tempfile::tempdir().expect("tmp");
-        let root = d.path().canonicalize().expect("real");
-        for dir in ["beta", "Alpha/.git", ".cache", "gamma/inner"] {
-            std::fs::create_dir_all(root.join(dir)).expect("d");
-        }
-        std::fs::write(root.join("notes.md"), "x").expect("w");
-        std::os::unix::fs::symlink(root.join("gamma"), root.join("linked")).expect("link");
-        let home = home_dir().to_string_lossy().into_owned();
-        let at = |rel: &str| shown(&join(&root.to_string_lossy(), rel), &home);
-        let here = root.to_string_lossy().into_owned();
-
-        // directories only, hidden ones left out, a link to one counts, sorted without regard to case
-        let v = browse_dir(&here);
-        assert_eq!(v["path"], at(""));
-        assert_eq!(
-            v["parent"],
-            shown(&root.parent().expect("parent").to_string_lossy(), &home)
-        );
-        assert_eq!(
-            (&v["exists"], &v["denied"], &v["git"], &v["more"]),
-            (&json!(true), &json!(false), &json!(false), &json!(false))
-        );
-        assert_eq!(
-            v["dirs"],
-            json!([
-                {"name": "Alpha", "path": at("Alpha"), "git": true},
-                {"name": "beta", "path": at("beta"), "git": false},
-                {"name": "gamma", "path": at("gamma"), "git": false},
-                {"name": "linked", "path": at("linked"), "git": false},
-            ])
-        );
-        // a trailing slash and `..` are the same directory; a checkout says so
-        assert_eq!(browse_dir(&format!("{here}/beta/../")), v);
-        let v = browse_dir(&format!("  {here}/Alpha "));
-        assert_eq!((&v["git"], &v["dirs"]), (&json!(true), &json!([])));
-        assert_eq!(v["parent"], at(""));
-
-        // half-typed, a file, or not absolute: nothing there, and the parent to list instead
-        for gone in [format!("{here}/be"), format!("{here}/notes.md")] {
-            let v = browse_dir(&gone);
-            assert_eq!(
-                (&v["exists"], &v["dirs"], &v["parent"]),
-                (&json!(false), &json!([]), &json!(at(""))),
-                "{gone}"
-            );
-        }
-        assert_eq!(browse_dir("relative/path")["exists"], false);
-
-        // nothing asked: the home directory, however it is written
-        for home in ["", "~", "~/"] {
-            assert_eq!(browse_dir(home)["path"], "~", "{home:?}");
-        }
     }
 
     #[test]

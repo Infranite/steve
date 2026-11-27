@@ -3,16 +3,17 @@
 //! server of their own. The Hub lists each server's tools (kept until the server changes, refreshed
 //! every [`FRESH`]) and runs a call on the session's behalf.
 //!
-//! - `stdio`: the Hub starts the server on its own machine, in the same OS sandbox a Node's runs get
-//!   ([`steve_confine::Sandbox`]), one process per server shared by every session that uses it, stopped
-//!   after [`IDLE`] without a call (and when the server is changed or deleted).
+//! - `stdio`: delegated to the colocated Node via [`steve_node_api::WorkspaceExecutor`], where the
+//!   Node starts and isolates the server inside `steve_confine::Sandbox::spawn_capability`, one
+//!   process per server shared by every session that uses it, stopped after [`IDLE`] without a call
+//!   (and when the server is changed or deleted). Secret env vars are delivered via one-shot
+//!   [`super::node_secrets::NodeSecrets`] grants only when the Node spawns a new process.
 //! - `http`: MCP streamable HTTP (JSON or an event stream per answer, `Mcp-Session-Id` kept).
 //! - `sse`: the older HTTP+SSE transport (an event stream names the endpoint messages are posted to).
 //!
-//! Secret values (env, headers) are read from the vault when a connection opens, used for it only and
-//! never sent to a Node or a harness.
+//! Secret values (env, headers) are read from the vault only when a connection opens.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -21,14 +22,17 @@ use futures::StreamExt;
 use serde_json::{Value, json};
 use steve_modules::caps::Capabilities;
 use steve_store::caps::mcp::Server;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
+use zeroize::Zeroizing;
+
+use super::node_secrets::NodeSecrets;
+use super::workspaces::Workspaces;
 
 /// A server's list of tools is asked again after this.
 pub const FRESH: Duration = Duration::from_secs(10 * 60);
 /// After a failed listing, the next try waits this long.
 const RETRY: Duration = Duration::from_secs(60);
-/// A connection without a call for this long is closed (a stdio server stops).
+/// A connection without a call for this long is closed.
 pub const IDLE: Duration = Duration::from_secs(10 * 60);
 /// Opening a connection and listing: a stdio server may first be fetched (`npx -y …`).
 const OPEN_WAIT: Duration = Duration::from_secs(60);
@@ -90,22 +94,79 @@ static FAILURE_SPACE: steve_runtime::cache::CacheSpace<ListingKey, String> =
         weigh: |error| error.len().min(u32::MAX as usize) as u32,
     };
 
+/// Lazy vault secret reader for one Node stdio MCP spawn operation.
+/// Secrets are decrypted and logged at most once, only if the Node actually spawns a new process
+/// and requests them over `HubSecrets::take`.
+struct McpServerSecrets {
+    caps: Capabilities,
+    server_id: String,
+    who: String,
+    loaded: Mutex<Option<Vec<(String, Zeroizing<String>)>>>,
+}
+
+impl McpServerSecrets {
+    fn new(caps: Capabilities, server_id: String, who: String) -> Self {
+        Self {
+            caps,
+            server_id,
+            who,
+            loaded: Mutex::new(None),
+        }
+    }
+}
+
+impl steve_modules::vault::UseValues for McpServerSecrets {
+    fn value(
+        &self,
+        label: &str,
+    ) -> steve_modules::vault::VaultResult<steve_modules::vault::secret::SecretBytes> {
+        let mut guard = self.loaded.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.is_none() {
+            let loaded = self.caps.mcp_server_secrets(&self.server_id, &self.who)?;
+            *guard = Some(loaded);
+        }
+        let list = guard.as_ref().unwrap();
+        let (_, val) = list.iter().find(|(l, _)| l == label).ok_or_else(|| {
+            steve_modules::vault::VaultError::from(steve_modules::ApiError::not_found(format!(
+                "MCP secret {label}"
+            )))
+        })?;
+        Ok(steve_modules::vault::secret::SecretBytes::new(
+            val.as_bytes().to_vec(),
+        ))
+    }
+}
+
+/// Revokes a one-shot `NodeSecrets` grant as soon as the stdio MCP RPC returns.
+struct SecretGrantGuard {
+    secrets: Arc<NodeSecrets>,
+    op: String,
+}
+
+impl Drop for SecretGrantGuard {
+    fn drop(&mut self) {
+        self.secrets.end(&self.op);
+    }
+}
+
 /// The Hub's connections to the library's servers. One per Hub.
 pub struct LibraryMcp {
     caps: Capabilities,
-    sandbox: Option<steve_confine::Sandbox>,
+    workspaces: Option<Arc<Workspaces>>,
+    secrets: Option<Arc<NodeSecrets>>,
     http: reqwest::Client,
     conns: Mutex<HashMap<String, Arc<tokio::sync::Mutex<Option<Arc<Conn>>>>>>,
+    stdio_ids: Mutex<HashSet<String>>,
     lists: steve_runtime::cache::Cached<ListingKey, ToolList>,
     failures: steve_runtime::cache::Cached<ListingKey, String>,
     caches: Arc<steve_runtime::cache::Caches>,
 }
 
 impl LibraryMcp {
-    /// `sandbox`: what stdio servers start in (`None`: as they are, for tests).
     pub fn new(
         caps: Capabilities,
-        sandbox: Option<steve_confine::Sandbox>,
+        workspaces: Option<Arc<Workspaces>>,
+        secrets: Option<Arc<NodeSecrets>>,
         caches: Arc<steve_runtime::cache::Caches>,
     ) -> Arc<LibraryMcp> {
         let http = reqwest::Client::builder()
@@ -117,13 +178,90 @@ impl LibraryMcp {
             .unwrap_or_default();
         Arc::new(LibraryMcp {
             caps,
-            sandbox,
+            workspaces,
+            secrets,
             http,
             conns: Mutex::default(),
+            stdio_ids: Mutex::default(),
             lists: caches.space(&LIST_SPACE),
             failures: caches.space(&FAILURE_SPACE),
             caches,
         })
+    }
+
+    fn stdio_target(
+        &self,
+        server: &Server,
+        who: &str,
+    ) -> Result<
+        (
+            Arc<dyn steve_node_api::Node>,
+            steve_node_api::McpStdioServer,
+            Option<SecretGrantGuard>,
+        ),
+        String,
+    > {
+        let node = self
+            .workspaces
+            .as_ref()
+            .and_then(|w| w.local_node())
+            .ok_or_else(|| {
+                format!(
+                    "MCP server {} requires the local Node (offline)",
+                    server.name
+                )
+            })?;
+        self.stdio_ids.lock().unwrap().insert(server.id.clone());
+
+        let mut env = Vec::new();
+        let mut secret_env = Vec::new();
+        for v in &server.env {
+            if v.secret {
+                secret_env.push((
+                    v.name.clone(),
+                    steve_store::caps::mcp::secret_label("stdio", &v.name),
+                ));
+            } else {
+                env.push((v.name.clone(), v.value.clone().unwrap_or_default()));
+            }
+        }
+        let op = format!("op_mcp_{}", uuid::Uuid::new_v4().simple());
+        let operation = steve_node_api::OperationId::new(op.clone()).map_err(|e| e.to_string())?;
+        let grant = if !secret_env.is_empty() {
+            let secrets = self
+                .secrets
+                .as_ref()
+                .ok_or_else(|| format!("MCP server {} secrets channel unavailable", server.name))?;
+            let ids: Vec<String> = secret_env.iter().map(|(_, id)| id.clone()).collect();
+            secrets.give(
+                &op,
+                node.id().clone(),
+                ids,
+                Arc::new(McpServerSecrets::new(
+                    self.caps.clone(),
+                    server.id.clone(),
+                    who.to_string(),
+                )),
+            );
+            Some(SecretGrantGuard {
+                secrets: secrets.clone(),
+                op,
+            })
+        } else {
+            None
+        };
+
+        let spec = steve_node_api::McpStdioServer {
+            id: server.id.clone(),
+            updated: server.updated,
+            name: server.name.clone(),
+            command: server.command.clone().unwrap_or_default(),
+            args: server.args.clone(),
+            env,
+            secret_env,
+            operation,
+        };
+        Ok((node, spec, grant))
     }
 
     /// The tools `server` has, as last listed; `None`: not listed yet (or the server changed since).
@@ -229,6 +367,19 @@ impl LibraryMcp {
     }
 
     async fn list_now(&self, server: &Server, who: &str) -> Result<Vec<RemoteTool>, String> {
+        if server.transport == "stdio" {
+            let (node, spec, _grant) = self.stdio_target(server, who)?;
+            let tools = node.mcp_stdio_list(spec).await.map_err(|e| e.safe_detail)?;
+            return Ok(tools
+                .into_iter()
+                .map(|t| RemoteTool {
+                    name: t.name,
+                    description: t.description,
+                    input_schema: t.input_schema,
+                    annotations: t.annotations,
+                })
+                .collect());
+        }
         let conn = self.conn(server, who).await?;
         let mut out = vec![];
         let mut cursor: Option<String> = None;
@@ -290,6 +441,27 @@ impl LibraryMcp {
         tool: &str,
         args: Value,
     ) -> Result<String, String> {
+        if server.transport == "stdio" {
+            let (node, spec, _grant) = self.stdio_target(server, who)?;
+            let resp = tokio::time::timeout(
+                CALL_WAIT,
+                node.mcp_stdio_call(steve_node_api::McpStdioCallRequest {
+                    server: spec,
+                    tool: tool.to_string(),
+                    arguments: args,
+                }),
+            )
+            .await
+            .map_err(|_| {
+                format!(
+                    "MCP server {} did not answer {tool} within {} s",
+                    server.name,
+                    CALL_WAIT.as_secs()
+                )
+            })?
+            .map_err(|e| e.safe_detail)?;
+            return result_text(&resp.result);
+        }
         let run = async {
             let conn = self.conn(server, who).await?;
             conn.request("tools/call", json!({ "name": tool, "arguments": args }))
@@ -306,10 +478,19 @@ impl LibraryMcp {
     }
 
     /// Closes the connections no call used for [`IDLE`], and those of servers changed since.
-    pub fn sweep(&self) {
-        let ids: Vec<String> = self.conns.lock().unwrap().keys().cloned().collect();
+    pub async fn sweep(&self) {
+        let http_ids: Vec<String> = self.conns.lock().unwrap().keys().cloned().collect();
+        let stdio_ids: Vec<String> = self.stdio_ids.lock().unwrap().iter().cloned().collect();
+        let all_ids: Vec<String> = http_ids
+            .iter()
+            .chain(stdio_ids.iter())
+            .cloned()
+            .collect::<HashSet<_>>()
+            .into_iter()
+            .collect();
         let current = self.caps.vault().store().read(|c| {
-            ids.iter()
+            all_ids
+                .iter()
                 .map(|id| {
                     Ok((
                         id.clone(),
@@ -323,25 +504,40 @@ impl LibraryMcp {
         let Ok(current) = current else {
             return;
         };
-        let mut conns = self.conns.lock().unwrap();
-        conns.retain(|id, slot| {
-            if let Ok(mut g) = slot.try_lock() {
-                if g.as_ref().is_some_and(|c| {
-                    current.get(id).copied().flatten() != Some(c.updated)
-                        || (c.active.load(Ordering::Relaxed) == 0 && c.idle() > IDLE)
-                        || !c.alive()
-                }) {
-                    *g = None;
+        {
+            let mut conns = self.conns.lock().unwrap();
+            conns.retain(|id, slot| {
+                if let Ok(mut g) = slot.try_lock() {
+                    if g.as_ref().is_some_and(|c| {
+                        current.get(id).copied().flatten() != Some(c.updated)
+                            || (c.active.load(Ordering::Relaxed) == 0 && c.idle() > IDLE)
+                            || !c.alive()
+                    }) {
+                        *g = None;
+                    }
+                    return current.get(id).is_some_and(Option::is_some);
                 }
-                return current.get(id).is_some_and(Option::is_some);
-            }
-            true
-        });
+                true
+            });
+        }
+        let live_stdio: Vec<(String, i64)> = {
+            let mut tracked = self.stdio_ids.lock().unwrap();
+            tracked.retain(|id| current.get(id).is_some_and(Option::is_some));
+            tracked
+                .iter()
+                .filter_map(|id| current.get(id).copied().flatten().map(|u| (id.clone(), u)))
+                .collect()
+        };
         for (id, updated) in &current {
             if updated.is_none() {
                 self.caches
                     .invalidate(&[steve_runtime::cache::Tag::of("mcp-server", id)]);
             }
+        }
+        if let Some(node) = self.workspaces.as_ref().and_then(|w| w.local_node()) {
+            let _ = node
+                .mcp_stdio_sweep(steve_node_api::McpStdioSweepRequest { live: live_stdio })
+                .await;
         }
     }
 
@@ -382,52 +578,40 @@ impl LibraryMcp {
                 .map(|(_, v)| v.to_string())
                 .ok_or_else(|| format!("MCP server {} is missing secret {label}", server.name))
         };
-        let link = match server.transport.as_str() {
-            "stdio" => {
-                let env: Vec<(String, String)> = server
-                    .env
-                    .iter()
-                    .map(|v| {
-                        let value = if v.secret {
-                            secret(steve_store::caps::mcp::secret_label("stdio", &v.name))?
-                        } else {
-                            v.value.clone().unwrap_or_default()
-                        };
-                        Ok::<_, String>((v.name.clone(), value))
-                    })
-                    .collect::<Result<_, _>>()?;
-                Link::Stdio(Stdio::start(self.sandbox.as_ref(), server, env)?)
-            }
-            t => {
-                let mut headers = reqwest::header::HeaderMap::new();
-                for v in &server.headers {
-                    let value = if v.secret {
-                        secret(steve_store::caps::mcp::secret_label(t, &v.name))?
-                    } else {
-                        v.value.clone().unwrap_or_default()
-                    };
-                    let (Ok(k), Ok(val)) = (
-                        reqwest::header::HeaderName::from_bytes(v.name.as_bytes()),
-                        reqwest::header::HeaderValue::from_str(&value),
-                    ) else {
-                        return Err(format!("header {} of MCP server {}", v.name, server.name));
-                    };
-                    headers.insert(k, val);
-                }
-                let url = server.url.clone().unwrap_or_default();
-                if t == "sse" {
-                    Link::Sse(Sse::open(self.http.clone(), &url, headers).await?)
-                } else {
-                    Link::Http(Http {
-                        client: self.http.clone(),
-                        url,
-                        headers,
-                        session: Mutex::new(None),
-                        protocol: Mutex::new(None),
-                        alive: AtomicBool::new(true),
-                    })
-                }
-            }
+        let t = server.transport.as_str();
+        if t == "stdio" {
+            return Err(format!(
+                "MCP server {} uses stdio transport and runs on the local Node",
+                server.name
+            ));
+        }
+        let mut headers = reqwest::header::HeaderMap::new();
+        for v in &server.headers {
+            let value = if v.secret {
+                secret(steve_store::caps::mcp::secret_label(t, &v.name))?
+            } else {
+                v.value.clone().unwrap_or_default()
+            };
+            let (Ok(k), Ok(val)) = (
+                reqwest::header::HeaderName::from_bytes(v.name.as_bytes()),
+                reqwest::header::HeaderValue::from_str(&value),
+            ) else {
+                return Err(format!("header {} of MCP server {}", v.name, server.name));
+            };
+            headers.insert(k, val);
+        }
+        let url = server.url.clone().unwrap_or_default();
+        let link = if t == "sse" {
+            Link::Sse(Sse::open(self.http.clone(), &url, headers).await?)
+        } else {
+            Link::Http(Http {
+                client: self.http.clone(),
+                url,
+                headers,
+                session: Mutex::new(None),
+                protocol: Mutex::new(None),
+                alive: AtomicBool::new(true),
+            })
         };
         Ok(Conn {
             name: server.name.clone(),
@@ -496,7 +680,6 @@ struct Conn {
 }
 
 enum Link {
-    Stdio(Stdio),
     Http(Http),
     Sse(Sse),
 }
@@ -512,7 +695,6 @@ impl Conn {
 
     fn alive(&self) -> bool {
         match &self.link {
-            Link::Stdio(s) => s.alive.load(Ordering::Relaxed),
             Link::Sse(s) => s.alive.load(Ordering::Relaxed),
             Link::Http(h) => h.alive.load(Ordering::Relaxed),
         }
@@ -550,7 +732,6 @@ impl Conn {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let msg = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         let answer = match &self.link {
-            Link::Stdio(s) => s.request(id, &msg).await,
             Link::Http(h) => h.request(id, &msg).await,
             Link::Sse(s) => s.request(id, &msg).await,
         }
@@ -569,7 +750,6 @@ impl Conn {
     async fn notify(&self, method: &str) -> Result<(), String> {
         let msg = json!({"jsonrpc": "2.0", "method": method});
         match &self.link {
-            Link::Stdio(s) => s.send(&msg).await,
             Link::Http(h) => h.post(&msg).await.map(|_| ()),
             Link::Sse(s) => s.post(&msg).await,
         }
@@ -599,115 +779,6 @@ fn answer_to(msg: &Value) -> Option<Value> {
     } else {
         json!({"jsonrpc": "2.0", "id": id, "error": {"code": -32601, "message": "not supported by Steve"}})
     })
-}
-
-struct Stdio {
-    stdin: Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
-    pending: Pending,
-    alive: Arc<AtomicBool>,
-    stderr: Arc<Mutex<VecDeque<String>>>,
-    _child: steve_confine::CapabilityProcess,
-}
-
-impl Stdio {
-    fn start(
-        sandbox: Option<&steve_confine::Sandbox>,
-        server: &Server,
-        env: Vec<(String, String)>,
-    ) -> Result<Stdio, String> {
-        let program = server.command.clone().unwrap_or_default();
-        let args: Vec<std::ffi::OsString> = server.args.iter().map(Into::into).collect();
-        let mut process =
-            steve_confine::Sandbox::spawn_capability(sandbox, program.into(), args, env).map_err(
-                |e| {
-                    format!(
-                        "could not start {}: {e}",
-                        server.command.as_deref().unwrap_or("")
-                    )
-                },
-            )?;
-        let child = &mut process.child;
-        let stdin = Arc::new(tokio::sync::Mutex::new(
-            child.stdin.take().ok_or("no stdin")?,
-        ));
-        let stdout = child.stdout.take().ok_or("no stdout")?;
-        let stderr_pipe = child.stderr.take().ok_or("no stderr")?;
-        let pending: Pending = Arc::default();
-        let alive = Arc::new(AtomicBool::new(true));
-        let stderr: Arc<Mutex<VecDeque<String>>> = Arc::default();
-        {
-            let (pending, alive, stdin) = (pending.clone(), alive.clone(), stdin.clone());
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stdout).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let Ok(msg) = serde_json::from_str::<Value>(&line) else {
-                        continue;
-                    };
-                    if let Some(reply) = answer_to(&msg) {
-                        let mut w = stdin.lock().await;
-                        let _ = w.write_all(format!("{reply}\n").as_bytes()).await;
-                        let _ = w.flush().await;
-                        continue;
-                    }
-                    deliver(&pending, msg);
-                }
-                alive.store(false, Ordering::Relaxed);
-                // every request still waiting fails now
-                pending.lock().unwrap().clear();
-            });
-        }
-        {
-            let stderr = stderr.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr_pipe).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
-                    let mut s = stderr.lock().unwrap();
-                    if s.len() >= 20 {
-                        s.pop_front();
-                    }
-                    s.push_back(line);
-                }
-            });
-        }
-        Ok(Stdio {
-            stdin,
-            pending,
-            alive,
-            stderr,
-            _child: process,
-        })
-    }
-
-    async fn send(&self, msg: &Value) -> Result<(), String> {
-        let mut w = self.stdin.lock().await;
-        w.write_all(format!("{msg}\n").as_bytes())
-            .await
-            .map_err(|e| e.to_string())?;
-        w.flush().await.map_err(|e| e.to_string())
-    }
-
-    async fn request(&self, id: u64, msg: &Value) -> Result<Value, String> {
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().unwrap();
-            pending.retain(|_, tx| !tx.is_closed());
-            pending.insert(id, tx);
-        }
-        if let Err(e) = self.send(msg).await {
-            self.pending.lock().unwrap().remove(&id);
-            return Err(self.exited(&e));
-        }
-        rx.await.map_err(|_| self.exited("it stopped"))
-    }
-
-    fn exited(&self, why: &str) -> String {
-        let tail: Vec<String> = self.stderr.lock().unwrap().iter().cloned().collect();
-        if tail.is_empty() {
-            why.to_string()
-        } else {
-            format!("{why}; its last output: {}", tail.join(" | "))
-        }
-    }
 }
 
 struct Http {

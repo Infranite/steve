@@ -1,4 +1,4 @@
-use sea_query::{Expr, ExprTrait, JoinType, OnConflict, Order, Query, SelectStatement};
+use sea_query::{Expr, ExprTrait, Func, JoinType, OnConflict, Order, Query, SelectStatement};
 
 use super::{Consumer, Event, Since};
 use crate::contract::{Q, Row};
@@ -84,6 +84,51 @@ fn due(consumer: &dyn Consumer, now: i64) -> SelectStatement {
             .not(),
         );
     query
+}
+
+pub(super) fn next_due(r: &mut impl Read, consumer: &dyn Consumer) -> Result<Option<i64>> {
+    let mut query = Query::select();
+    query
+        .expr(Func::min(Func::coalesce([
+            Expr::col(("l", "next_at")),
+            Expr::val(0_i64),
+        ])))
+        .from_as("outbox_events", "e")
+        .join_as(
+            JoinType::Join,
+            "outbox_consumers",
+            "c",
+            Expr::col(("c", "id"))
+                .eq(consumer.id())
+                .and(Expr::col(("c", "enabled")).eq(1_i64)),
+        )
+        .join_as(
+            JoinType::LeftJoin,
+            "outbox_leases",
+            "l",
+            Expr::col(("l", "event_seq"))
+                .eq(Expr::col(("e", "seq")))
+                .and(Expr::col(("l", "consumer_id")).eq(consumer.id())),
+        )
+        .and_where(Expr::col(("e", "topic")).eq(consumer.topic()))
+        .and_where(Expr::col(("e", "seq")).gt(Expr::col(("c", "since_seq"))))
+        .and_where(
+            Expr::exists(
+                Query::select()
+                    .column(("r", "event_seq"))
+                    .from_as("outbox_receipts", "r")
+                    .and_where(Expr::col(("r", "event_seq")).eq(Expr::col(("e", "seq"))))
+                    .and_where(Expr::col(("r", "consumer_id")).eq(consumer.id()))
+                    .take(),
+            )
+            .not(),
+        )
+        .and_where(
+            Expr::col(("l", "event_seq"))
+                .is_null()
+                .or(Expr::col(("l", "dead")).eq(0_i64)),
+        );
+    Ok(r.one(&query, |row| row.get::<Option<i64>>(0))?.flatten())
 }
 
 pub(super) fn has_due(r: &mut impl Read, consumer: &dyn Consumer, now: i64) -> Result<bool> {

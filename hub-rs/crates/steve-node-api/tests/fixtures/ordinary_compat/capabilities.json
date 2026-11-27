@@ -1,0 +1,32 @@
+{
+  "node": "node_compat_1",
+  "os": "Linux 6.8 · x86_64 · 16 GB",
+  "version": "0.13.0",
+  "harnesses": [
+    {
+      "name": "claude-code",
+      "version": "1.0.0",
+      "sessions": true,
+      "jobs": true,
+      "models": [
+        "claude-sonnet-4-6"
+      ],
+      "resume": true,
+      "cancel": true,
+      "permissions": true,
+      "images": true,
+      "enforcement": []
+    }
+  ],
+  "roots": [
+    {
+      "id": "root_code",
+      "display": "~/code"
+    }
+  ],
+  "capacity": {
+    "sessions": 32,
+    "jobs": 8,
+    "execs": 8
+  }
+}
