@@ -5730,6 +5730,7 @@ dependencies = [
  "libc",
  "serde_json",
  "steve-harness-spec",
+ "steve-runtime",
  "tempfile",
  "tokio",
  "tracing",

@@ -1,0 +1,12 @@
+# Production Command::new sites that clear env or may modify PATH without a local
+# absolute literal or resolve_program/require_absolute_program call; only shrinks.
+# file under hub-rs/crates<TAB>count. Every entry needs a matching RATIONALE in spawn_path_guard.rs.
+# STEVE_GUARD_BLESS=1 rewrites after removals and refuses growth.
+steve-hub/src/backup/engine.rs	1
+steve-hub/src/check.rs	1
+steve-hub/src/upgrades/cli.rs	1
+steve-install/src/setup/reconfigure.rs	1
+steve-modules/src/vault/keystore/helper.rs	1
+steve-node-cli/src/upgrade.rs	1
+steve-node/src/exec.rs	1
+steve-runtime/src/process/bounded.rs	1

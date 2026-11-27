@@ -128,10 +128,18 @@ impl Confine {
                 env: None,
             };
         }
+        let env = if level >= 2 {
+            match login_env() {
+                Ok(env) => Some(std::sync::Arc::new(env)),
+                Err(err) => return off(format!("STEVE_CONFINE=2: {err}")),
+            }
+        } else {
+            None
+        };
         Confine {
             sandbox,
             files: level >= 1,
-            env: (level >= 2).then(|| std::sync::Arc::new(login_env())),
+            env,
         }
     }
 
@@ -488,14 +496,26 @@ fn git_common_dir(cwd: &Path) -> Option<PathBuf> {
 }
 
 /// What a new login shell of this user starts with (level 2): `$SHELL -l` from an empty
-/// environment but for who the user is. A shell that cannot say gives a plain one.
-fn login_env() -> Vec<(OsString, OsString)> {
+/// environment but for who the user is. `$SHELL` must be an absolute path so `env_clear()` on
+/// macOS never falls back from `posix_spawn` to multithreaded `fork()`; a valid shell that cannot
+/// report its environment gives a plain one.
+fn login_env() -> std::io::Result<Vec<(OsString, OsString)>> {
     let keep = ["HOME", "USER", "LOGNAME", "SHELL", "TMPDIR"];
     let base: Vec<(String, OsString)> = keep
         .iter()
         .filter_map(|k| std::env::var_os(k).map(|v| (k.to_string(), v)))
         .collect();
-    let shell = std::env::var_os("SHELL").unwrap_or_else(|| "/bin/sh".into());
+    login_env_for(std::env::var_os("SHELL"), base)
+}
+
+fn login_env_for(
+    shell_env: Option<OsString>,
+    base: Vec<(String, OsString)>,
+) -> std::io::Result<Vec<(OsString, OsString)>> {
+    let shell = match shell_env {
+        Some(raw) => steve_runtime::process::require_absolute_program(raw.as_os_str(), "SHELL")?,
+        None => PathBuf::from("/bin/sh"),
+    };
     let out = std::process::Command::new(&shell)
         .args(["-l", "-c", "env -0"])
         .env_clear()
@@ -533,7 +553,7 @@ fn login_env() -> Vec<(OsString, OsString)> {
     if !env.iter().any(|(k, _)| k == "LANG") {
         env.push(("LANG".into(), "en_US.UTF-8".into()));
     }
-    env
+    Ok(env)
 }
 /// Whether runs use the system sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -772,7 +792,12 @@ impl Sandbox {
             },
         };
 
-        let mut command = tokio::process::Command::new(wrapped_program);
+        let launch_program = steve_runtime::process::resolve_program(
+            wrapped_program.as_os_str(),
+            None,
+            Some(cwd.path()),
+        )?;
+        let mut command = tokio::process::Command::new(launch_program);
         command
             .args(wrapped_args)
             .env_clear()
@@ -812,9 +837,36 @@ impl Sandbox {
             ));
         }
         let cwd = tempfile::Builder::new().prefix("steve-mcp-").tempdir()?;
-        let (program, args) = sandbox.0.wrap_in(program, args, &[], &[], Some(cwd.path()));
-        let mut command = tokio::process::Command::new(program);
-        if let Some(fresh) = sandbox.0.fresh_env() {
+        let fresh = sandbox.0.fresh_env();
+        let child_path = steve_runtime::process::effective_path(
+            fresh.is_some(),
+            fresh
+                .into_iter()
+                .flatten()
+                .map(|(k, v)| (k.as_os_str(), Some(v.as_os_str())))
+                .chain(env.iter().map(|(k, v)| {
+                    (
+                        std::ffi::OsStr::new(k.as_str()),
+                        Some(std::ffi::OsStr::new(v.as_str())),
+                    )
+                })),
+        );
+        let resolved_program = steve_runtime::process::resolve_program(
+            program.as_os_str(),
+            child_path.as_deref(),
+            Some(cwd.path()),
+        )?;
+        let (wrapped_program, args) =
+            sandbox
+                .0
+                .wrap_in(resolved_program, args, &[], &[], Some(cwd.path()));
+        let launch_program = steve_runtime::process::resolve_program(
+            wrapped_program.as_os_str(),
+            child_path.as_deref(),
+            Some(cwd.path()),
+        )?;
+        let mut command = tokio::process::Command::new(launch_program);
+        if let Some(fresh) = fresh {
             command.env_clear().envs(fresh.iter().cloned());
         }
         let child = command
@@ -1161,7 +1213,7 @@ mod tests {
     fn level_two_is_a_fresh_login_environment() {
         // SAFETY: a variable only this test sets and reads
         unsafe { std::env::set_var("STEVE_CONFINE_TEST_ONLY_HERE", "1") };
-        let env = login_env();
+        let env = login_env().unwrap();
         let has = |k: &str| env.iter().any(|(e, _)| e == k);
         assert!(has("HOME") && has("PATH") && has("LANG"), "{env:?}");
         assert!(!has("STEVE_CONFINE_TEST_ONLY_HERE"), "inherited: {env:?}");
@@ -1171,6 +1223,83 @@ mod tests {
         let c = Confine::choose(h, h, Some("1".into()));
         assert!(c.fresh_env().is_none());
         assert!(!Confine::choose(h, h, Some("0".into())).on());
+    }
+
+    #[test]
+    fn login_env_rejects_non_absolute_shell() {
+        for bad in ["", "zsh", "./sh", "bin/bash"] {
+            let err = login_env_for(Some(OsString::from(bad)), vec![]).unwrap_err();
+            assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput, "{bad}: {err}");
+            assert!(err.to_string().contains("SHELL"), "{bad}: {err}");
+            if !bad.is_empty() {
+                assert!(err.to_string().contains(bad), "{bad}: {err}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn spawn_capability_resolves_bare_program_against_child_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let custom_path = dir.path().display().to_string();
+        let synthetic_sandbox = Sandbox(Confine {
+            sandbox: Backend::Seatbelt(String::new()),
+            files: false,
+            env: Some(std::sync::Arc::new(vec![(
+                OsString::from("PATH"),
+                OsString::from(&custom_path),
+            )])),
+        });
+        let err = Sandbox::spawn_capability(
+            &synthetic_sandbox,
+            PathBuf::from("missing-mcp-tool"),
+            vec![],
+            vec![],
+        )
+        .err()
+        .expect("missing program must fail before spawn");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound, "{err}");
+        assert!(
+            err.to_string().contains("missing-mcp-tool") && err.to_string().contains(&custom_path),
+            "{err}"
+        );
+
+        let override_dir = tempfile::tempdir().unwrap();
+        let override_path = override_dir.path().display().to_string();
+        let err = Sandbox::spawn_capability(
+            &synthetic_sandbox,
+            PathBuf::from("missing-mcp-tool"),
+            vec![],
+            vec![("PATH".into(), override_path.clone())],
+        )
+        .err()
+        .expect("env PATH override must take precedence");
+        assert!(
+            err.to_string().contains("missing-mcp-tool")
+                && err.to_string().contains(&override_path),
+            "{err}"
+        );
+
+        // When a real OS sandbox is available on this host, verify bare-name launch succeeds via PATH.
+        let real = Sandbox::choose(dir.path(), dir.path(), Some("1".into()));
+        if real.is_confined() {
+            use std::os::unix::fs::PermissionsExt;
+            let script = dir.path().join("fake-mcp");
+            std::fs::write(&script, "#!/bin/sh\nprintf 'ok\\n'\n").unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut proc = Sandbox::spawn_capability(
+                &real,
+                PathBuf::from("fake-mcp"),
+                vec![],
+                vec![("PATH".into(), custom_path)],
+            )
+            .unwrap();
+            let mut out = Vec::new();
+            tokio::io::AsyncReadExt::read_to_end(&mut proc.child.stdout.take().unwrap(), &mut out)
+                .await
+                .unwrap();
+            assert!(proc.child.wait().await.unwrap().success());
+            assert_eq!(out, b"ok\n");
+        }
     }
 
     #[test]

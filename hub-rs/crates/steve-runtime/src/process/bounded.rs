@@ -100,6 +100,35 @@ where
     }
 }
 
+fn record_resolve_failure(reason: &'static str) {
+    metrics::counter!("steve_process_program_resolve_failures_total", "reason" => reason)
+        .increment(1);
+}
+
+/// Verify `program` is already an absolute path (for example `$SHELL` when starting a login shell
+/// under `env_clear()`), failing closed without searching `PATH` or anchoring to `cwd`.
+pub fn require_absolute_program(program: &OsStr, label: &str) -> io::Result<PathBuf> {
+    if program.is_empty() {
+        record_resolve_failure("empty_program");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} must be an absolute path, got empty value"),
+        ));
+    }
+    let path = Path::new(program);
+    if !path.is_absolute() {
+        record_resolve_failure("not_absolute");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{label} must be an absolute path, got `{}`",
+                program.to_string_lossy()
+            ),
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
 /// Resolve `program` into an absolute executable path using ONLY `search_path` and optional `cwd`.
 ///
 /// - Absolute `program`: returned unchanged.
@@ -113,6 +142,7 @@ pub fn resolve_program(
     cwd: Option<&Path>,
 ) -> io::Result<PathBuf> {
     if program.is_empty() {
+        record_resolve_failure("empty_program");
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "empty program name",
@@ -123,16 +153,21 @@ pub fn resolve_program(
         return Ok(path.to_path_buf());
     }
     let anchor = || -> io::Result<PathBuf> {
-        match cwd {
+        let dir = match cwd {
             Some(dir) if dir.is_absolute() => Ok(dir.to_path_buf()),
-            Some(dir) => Ok(std::env::current_dir()?.join(dir)),
+            Some(dir) => std::env::current_dir().map(|base| base.join(dir)),
             None => std::env::current_dir(),
+        };
+        if dir.is_err() {
+            record_resolve_failure("cwd_error");
         }
+        dir
     };
     if program.as_bytes().contains(&b'/') {
         return Ok(anchor()?.join(path));
     }
     let Some(search) = search_path.filter(|p| !p.is_empty()) else {
+        record_resolve_failure("empty_path");
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
@@ -159,18 +194,27 @@ pub fn resolve_program(
             saw_denied = true;
         }
     }
-    let kind = if saw_denied {
-        io::ErrorKind::PermissionDenied
+    if saw_denied {
+        record_resolve_failure("permission_denied");
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "program `{}` is not executable in PATH={}",
+                program.to_string_lossy(),
+                search.to_string_lossy()
+            ),
+        ))
     } else {
-        io::ErrorKind::NotFound
-    };
-    Err(io::Error::new(
-        kind,
-        format!(
-            "program `{}` not found in child PATH",
-            program.to_string_lossy()
-        ),
-    ))
+        record_resolve_failure("not_found");
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "program `{}` not found in PATH={}",
+                program.to_string_lossy(),
+                search.to_string_lossy()
+            ),
+        ))
+    }
 }
 
 /// Detached-session (`setsid`) subprocess specification carrying [`EnvPolicy`] in the type so
@@ -1559,6 +1603,84 @@ mod tests {
 
     #[test]
     fn resolve_program_uses_only_child_path_and_never_leaks_parent_path() {
+        use std::collections::BTreeMap;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct CountingRecorder(Arc<Mutex<BTreeMap<String, u64>>>);
+
+        struct CounterHandle {
+            counts: Arc<Mutex<BTreeMap<String, u64>>>,
+            key: String,
+        }
+
+        impl metrics::CounterFn for CounterHandle {
+            fn increment(&self, value: u64) {
+                *self
+                    .counts
+                    .lock()
+                    .unwrap()
+                    .entry(self.key.clone())
+                    .or_default() += value;
+            }
+            fn absolute(&self, value: u64) {
+                self.counts.lock().unwrap().insert(self.key.clone(), value);
+            }
+        }
+
+        impl metrics::Recorder for CountingRecorder {
+            fn describe_counter(
+                &self,
+                _: metrics::KeyName,
+                _: Option<metrics::Unit>,
+                _: metrics::SharedString,
+            ) {
+            }
+            fn describe_gauge(
+                &self,
+                _: metrics::KeyName,
+                _: Option<metrics::Unit>,
+                _: metrics::SharedString,
+            ) {
+            }
+            fn describe_histogram(
+                &self,
+                _: metrics::KeyName,
+                _: Option<metrics::Unit>,
+                _: metrics::SharedString,
+            ) {
+            }
+            fn register_counter(
+                &self,
+                key: &metrics::Key,
+                _: &metrics::Metadata<'_>,
+            ) -> metrics::Counter {
+                let labels: Vec<String> = key
+                    .labels()
+                    .map(|l| format!("{}={}", l.key(), l.value()))
+                    .collect();
+                let id = format!("{}[{}]", key.name(), labels.join(","));
+                metrics::Counter::from_arc(Arc::new(CounterHandle {
+                    counts: self.0.clone(),
+                    key: id,
+                }))
+            }
+            fn register_gauge(
+                &self,
+                _: &metrics::Key,
+                _: &metrics::Metadata<'_>,
+            ) -> metrics::Gauge {
+                metrics::Gauge::noop()
+            }
+            fn register_histogram(
+                &self,
+                _: &metrics::Key,
+                _: &metrics::Metadata<'_>,
+            ) -> metrics::Histogram {
+                metrics::Histogram::noop()
+            }
+        }
+
         let dir = unique_tmp_dir("steve-rt-resolve");
         let tool = dir.join("custom-tool");
         fs::write(&tool, "#!/bin/sh\necho ok\n").unwrap();
@@ -1567,30 +1689,73 @@ mod tests {
         fs::write(&nonexec, "#!/bin/sh\necho no\n").unwrap();
         fs::set_permissions(&nonexec, fs::Permissions::from_mode(0o644)).unwrap();
 
-        assert_eq!(
-            resolve_program(OsStr::new("custom-tool"), Some(dir.as_os_str()), None).unwrap(),
-            tool
-        );
-        assert_eq!(
-            resolve_program(OsStr::new("sh"), Some(dir.as_os_str()), None)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::NotFound
-        );
-        assert_eq!(
-            resolve_program(OsStr::new("sh"), None, None)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::NotFound
-        );
-        assert_eq!(
-            resolve_program(OsStr::new("nonexec-tool"), Some(dir.as_os_str()), None)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        let anchored = resolve_program(OsStr::new("./custom-tool"), None, Some(&dir)).unwrap();
-        assert!(anchored.is_absolute() && anchored == dir.join("./custom-tool"));
+        let recorder = CountingRecorder::default();
+        metrics::with_local_recorder(&recorder, || {
+            assert_eq!(
+                resolve_program(OsStr::new("custom-tool"), Some(dir.as_os_str()), None).unwrap(),
+                tool
+            );
+            let missing_in_path =
+                resolve_program(OsStr::new("sh"), Some(dir.as_os_str()), None).unwrap_err();
+            assert_eq!(missing_in_path.kind(), io::ErrorKind::NotFound);
+            assert!(
+                missing_in_path.to_string().contains("sh")
+                    && missing_in_path
+                        .to_string()
+                        .contains(&dir.display().to_string()),
+                "{missing_in_path}"
+            );
+
+            let empty_path_err = resolve_program(OsStr::new("sh"), None, None).unwrap_err();
+            assert_eq!(empty_path_err.kind(), io::ErrorKind::NotFound);
+            assert!(
+                empty_path_err.to_string().contains("sh")
+                    && empty_path_err.to_string().contains("empty"),
+                "{empty_path_err}"
+            );
+
+            let denied = resolve_program(OsStr::new("nonexec-tool"), Some(dir.as_os_str()), None)
+                .unwrap_err();
+            assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+            assert!(
+                denied.to_string().contains("nonexec-tool")
+                    && denied.to_string().contains(&dir.display().to_string()),
+                "{denied}"
+            );
+
+            let empty_prog =
+                resolve_program(OsStr::new(""), Some(dir.as_os_str()), None).unwrap_err();
+            assert_eq!(empty_prog.kind(), io::ErrorKind::NotFound);
+
+            assert_eq!(
+                require_absolute_program(OsStr::new("/bin/sh"), "SHELL").unwrap(),
+                PathBuf::from("/bin/sh")
+            );
+            let non_abs = require_absolute_program(OsStr::new("zsh"), "SHELL").unwrap_err();
+            assert_eq!(non_abs.kind(), io::ErrorKind::InvalidInput);
+            assert!(
+                non_abs.to_string().contains("SHELL") && non_abs.to_string().contains("zsh"),
+                "{non_abs}"
+            );
+            let empty_shell = require_absolute_program(OsStr::new(""), "SHELL").unwrap_err();
+            assert_eq!(empty_shell.kind(), io::ErrorKind::InvalidInput);
+
+            let anchored = resolve_program(OsStr::new("./custom-tool"), None, Some(&dir)).unwrap();
+            assert!(anchored.is_absolute() && anchored == dir.join("./custom-tool"));
+        });
+
+        let counts = recorder.0.lock().unwrap();
+        for (reason, expected) in [
+            ("not_found", 1),
+            ("empty_path", 1),
+            ("permission_denied", 1),
+            ("empty_program", 2),
+            ("not_absolute", 1),
+        ] {
+            let key = format!("steve_process_program_resolve_failures_total[reason={reason}]");
+            assert_eq!(counts.get(&key).copied(), Some(expected), "{counts:?}");
+        }
+
         assert_eq!(
             effective_path::<&str, &str, _>(true, std::iter::empty()),
             None

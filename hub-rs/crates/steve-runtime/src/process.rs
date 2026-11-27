@@ -14,8 +14,8 @@ pub use bounded::{
     BoundedOptions, BoundedStdin, CommandError, DEFAULT_MAX_OUTPUT_BYTES, DetachedCommand,
     EnvPolicy, HeldPipePolicy, ObservedCommandError, PIPE_DRAIN_GRACE, PIPE_POST_KILL_TIMEOUT,
     PROCESS_KILL_REAP_TIMEOUT, ProcessIsolation, TermTarget, ZEROIZE_MAX_OUTPUT_BYTES,
-    ZeroizingOutput, effective_path, exited_unreaped, resolve_program, run_bounded,
-    run_bounded_async, run_bounded_observed, run_bounded_zeroizing, run_detached,
+    ZeroizingOutput, effective_path, exited_unreaped, require_absolute_program, resolve_program,
+    run_bounded, run_bounded_async, run_bounded_observed, run_bounded_zeroizing, run_detached,
     run_detached_async, stop_child_group_sync,
 };
 
