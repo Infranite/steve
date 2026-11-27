@@ -68,17 +68,14 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// The variables a plugin starts with: the contract's own and what a program needs to find its
 /// libraries, its language and a temporary directory. Nothing else of the Hub's environment is
 /// passed on, since that may hold the Hub's secrets.
-fn environment(spec: &Spec) -> Vec<(String, String)> {
+fn environment(dir: &Path, port: u16) -> Vec<(String, String)> {
     let mut env: Vec<(String, String)> = ["PATH", "HOME", "LANG", "LC_ALL", "TMPDIR", "TZ"]
         .iter()
         .filter_map(|k| std::env::var(k).ok().map(|v| (k.to_string(), v)))
         .collect();
-    let at = |name: &str| spec.dir.join(name).display().to_string();
+    let at = |name: &str| dir.join(name).display().to_string();
     env.extend([
-        (
-            "STEVE_PLUGIN_LISTEN".into(),
-            format!("127.0.0.1:{}", spec.port),
-        ),
+        ("STEVE_PLUGIN_LISTEN".into(), format!("127.0.0.1:{port}")),
         ("STEVE_PLUGIN_TOKEN_FILE".into(), at("token")),
         ("STEVE_PLUGIN_CONFIG".into(), at("config.json")),
         ("STEVE_PLUGIN_DATA".into(), at("data")),
@@ -106,12 +103,25 @@ fn log_file(dir: &Path) -> std::io::Result<std::fs::File> {
 
 fn spawn(spec: &Spec) -> anyhow::Result<tokio::process::Child> {
     let exe = (spec.exe)()?;
-    std::fs::create_dir_all(spec.dir.join("data"))?;
-    let log = log_file(&spec.dir)?;
+    let dir = if spec.dir.is_absolute() {
+        spec.dir.clone()
+    } else {
+        crate::config::resolve(&spec.dir)
+    };
+    let data_dir = dir.join("data");
+    std::fs::create_dir_all(&data_dir)?;
+    let log = log_file(&dir)?;
+    let env = environment(&dir, spec.port);
+    let child_path = steve_runtime::process::effective_path(
+        true,
+        env.iter().map(|(k, v)| (k.as_str(), Some(v.as_str()))),
+    );
+    let exe =
+        steve_runtime::process::resolve_program(exe.as_os_str(), child_path.as_deref(), None)?;
     let mut cmd = tokio::process::Command::new(&exe);
-    cmd.current_dir(spec.dir.join("data"))
+    cmd.current_dir(&data_dir)
         .env_clear()
-        .envs(environment(spec))
+        .envs(env)
         .stdin(Stdio::piped())
         .stdout(Stdio::from(log.try_clone()?))
         .stderr(Stdio::from(log))
@@ -437,5 +447,18 @@ mod tests {
         .await;
         r.stop_all().await;
         assert!(r.ids().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_bare_plugin_executable_names_program_and_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = spawn(&spec(
+            dir.path(),
+            PathBuf::from("nonexistent-steve-plugin-bin"),
+        ))
+        .expect_err("missing bare executable must fail before spawn");
+        let msg = format!("{err:#}");
+        assert!(msg.contains("nonexistent-steve-plugin-bin"), "{msg}");
+        assert!(msg.contains("PATH"), "{msg}");
     }
 }

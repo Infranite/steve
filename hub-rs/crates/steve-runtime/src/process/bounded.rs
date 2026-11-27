@@ -100,6 +100,35 @@ where
     }
 }
 
+fn record_resolve_failure(reason: &'static str) {
+    metrics::counter!("steve_process_program_resolve_failures_total", "reason" => reason)
+        .increment(1);
+}
+
+/// Verify `program` is already an absolute path (for example `$SHELL` when starting a login shell
+/// under `env_clear()`), failing closed without searching `PATH` or anchoring to `cwd`.
+pub fn require_absolute_program(program: &OsStr, label: &str) -> io::Result<PathBuf> {
+    if program.is_empty() {
+        record_resolve_failure("empty_program");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("{label} must be an absolute path, got empty value"),
+        ));
+    }
+    let path = Path::new(program);
+    if !path.is_absolute() {
+        record_resolve_failure("not_absolute");
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "{label} must be an absolute path, got `{}`",
+                program.to_string_lossy()
+            ),
+        ));
+    }
+    Ok(path.to_path_buf())
+}
+
 /// Resolve `program` into an absolute executable path using ONLY `search_path` and optional `cwd`.
 ///
 /// - Absolute `program`: returned unchanged.
@@ -113,6 +142,7 @@ pub fn resolve_program(
     cwd: Option<&Path>,
 ) -> io::Result<PathBuf> {
     if program.is_empty() {
+        record_resolve_failure("empty_program");
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             "empty program name",
@@ -123,16 +153,21 @@ pub fn resolve_program(
         return Ok(path.to_path_buf());
     }
     let anchor = || -> io::Result<PathBuf> {
-        match cwd {
+        let dir = match cwd {
             Some(dir) if dir.is_absolute() => Ok(dir.to_path_buf()),
-            Some(dir) => Ok(std::env::current_dir()?.join(dir)),
+            Some(dir) => std::env::current_dir().map(|base| base.join(dir)),
             None => std::env::current_dir(),
+        };
+        if dir.is_err() {
+            record_resolve_failure("cwd_error");
         }
+        dir
     };
     if program.as_bytes().contains(&b'/') {
         return Ok(anchor()?.join(path));
     }
     let Some(search) = search_path.filter(|p| !p.is_empty()) else {
+        record_resolve_failure("empty_path");
         return Err(io::Error::new(
             io::ErrorKind::NotFound,
             format!(
@@ -159,18 +194,27 @@ pub fn resolve_program(
             saw_denied = true;
         }
     }
-    let kind = if saw_denied {
-        io::ErrorKind::PermissionDenied
+    if saw_denied {
+        record_resolve_failure("permission_denied");
+        Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "program `{}` is not executable in PATH={}",
+                program.to_string_lossy(),
+                search.to_string_lossy()
+            ),
+        ))
     } else {
-        io::ErrorKind::NotFound
-    };
-    Err(io::Error::new(
-        kind,
-        format!(
-            "program `{}` not found in child PATH",
-            program.to_string_lossy()
-        ),
-    ))
+        record_resolve_failure("not_found");
+        Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!(
+                "program `{}` not found in PATH={}",
+                program.to_string_lossy(),
+                search.to_string_lossy()
+            ),
+        ))
+    }
 }
 
 /// Detached-session (`setsid`) subprocess specification carrying [`EnvPolicy`] in the type so
@@ -1059,7 +1103,117 @@ fn spawn_std_process_group(
     spawn_configured_std(target, program, opts)
 }
 
-fn spawn_detached(
+/// Standard I/O destination for a fire-and-forget detached child ([`spawn_detached`]).
+#[derive(Clone, Copy, Debug)]
+pub enum DetachedStdio<'a> {
+    /// Redirect the stream to `/dev/null`.
+    Null,
+    /// Redirect the stream to an open file (e.g. an append-only log). The descriptor is duplicated
+    /// onto the child's stdio slot; the caller's handle keeps `FD_CLOEXEC`.
+    File(&'a std::fs::File),
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_detached_linux_command(spec: &DetachedCommand) -> io::Result<Command> {
+    let resolved = resolve_program(
+        &spec.program,
+        spec.env.effective_path().as_deref(),
+        spec.cwd.as_deref(),
+    )?;
+    let mut command = match &spec.env {
+        EnvPolicy::Clear(e) => build_resolved_std_command(
+            &resolved,
+            spec.args.iter().map(OsString::as_os_str),
+            spec.cwd.as_deref(),
+            true,
+            e.iter().map(|(k, v)| (k.as_os_str(), Some(v.as_os_str()))),
+        ),
+        EnvPolicy::Inherit(d) => build_resolved_std_command(
+            &resolved,
+            spec.args.iter().map(OsString::as_os_str),
+            spec.cwd.as_deref(),
+            false,
+            d.iter().map(|(k, v)| (k.as_os_str(), v.as_deref())),
+        ),
+    };
+    // SAFETY: `libc::setsid`, `libc::sigemptyset`, and `libc::sigprocmask` are all
+    // async-signal-safe per POSIX. Resetting the signal mask matches macOS `macos_spawn`
+    // (`POSIX_SPAWN_SETSIGMASK` with an empty set), because Rust `std` intentionally inherits
+    // the calling thread's signal mask across `fork`+`exec`.
+    unsafe {
+        command.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(io::Error::last_os_error());
+            }
+            let mut empty: libc::sigset_t = std::mem::zeroed();
+            if libc::sigemptyset(&mut empty) != 0
+                || libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()) != 0
+            {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    Ok(command)
+}
+
+/// Spawn `spec` in a detached session (`POSIX_SPAWN_SETSID` on macOS — zero `fork()`, `setsid()`
+/// + signal-mask reset on Linux) and return the child PID without waiting for exit.
+///
+/// The executable is resolved strictly against `spec.env`'s effective `PATH` via
+/// [`resolve_program`], `SIGPIPE` is reset to `SIG_DFL`, the child signal mask is cleared, and
+/// non-stdio descriptors remain `FD_CLOEXEC` across `exec`.
+pub fn spawn_detached(
+    spec: &DetachedCommand,
+    stdin: DetachedStdio<'_>,
+    stdout: DetachedStdio<'_>,
+    stderr: DetachedStdio<'_>,
+) -> io::Result<u32> {
+    #[cfg(target_os = "macos")]
+    {
+        use super::macos_spawn::{self, EnvSpec, SpawnSpec, StdioSpec};
+        let to_spec = |io: DetachedStdio<'_>| match io {
+            DetachedStdio::Null => StdioSpec::Null,
+            DetachedStdio::File(f) => StdioSpec::Fd(f.as_raw_fd()),
+        };
+        let args: Vec<&OsStr> = spec.args.iter().map(OsString::as_os_str).collect();
+        let env = match &spec.env {
+            EnvPolicy::Clear(e) => EnvSpec::Clear(e),
+            EnvPolicy::Inherit(d) => EnvSpec::InheritWithDeltas(d),
+        };
+        let spawned = macos_spawn::spawn(SpawnSpec {
+            program: &spec.program,
+            args: &args,
+            env,
+            cwd: spec.cwd.as_deref(),
+            isolation: ProcessIsolation::DetachedSession,
+            stdin: to_spec(stdin),
+            stdout: to_spec(stdout),
+            stderr: to_spec(stderr),
+            extra_inherit_fds: &[],
+        })?;
+        u32::try_from(spawned.pid)
+            .map_err(|_| io::Error::other(format!("invalid detached child pid {}", spawned.pid)))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let to_stdio = |io: DetachedStdio<'_>| -> io::Result<Stdio> {
+            match io {
+                DetachedStdio::Null => Ok(Stdio::null()),
+                DetachedStdio::File(f) => Ok(Stdio::from(f.try_clone()?)),
+            }
+        };
+        let mut command = build_detached_linux_command(spec)?;
+        command
+            .stdin(to_stdio(stdin)?)
+            .stdout(to_stdio(stdout)?)
+            .stderr(to_stdio(stderr)?);
+        let child = command.spawn()?;
+        Ok(child.id())
+    }
+}
+
+fn spawn_detached_bounded(
     spec: &DetachedCommand,
     program: &str,
     opts: BoundedOptions<'_>,
@@ -1112,46 +1266,8 @@ fn spawn_detached(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let resolved = resolve_program(
-            &spec.program,
-            spec.env.effective_path().as_deref(),
-            spec.cwd.as_deref(),
-        )
-        .map_err(|e| CommandError::spawn(program, e))?;
-        let mut command = match &spec.env {
-            EnvPolicy::Clear(e) => build_resolved_std_command(
-                &resolved,
-                spec.args.iter().map(OsString::as_os_str),
-                spec.cwd.as_deref(),
-                true,
-                e.iter().map(|(k, v)| (k.as_os_str(), Some(v.as_os_str()))),
-            ),
-            EnvPolicy::Inherit(d) => build_resolved_std_command(
-                &resolved,
-                spec.args.iter().map(OsString::as_os_str),
-                spec.cwd.as_deref(),
-                false,
-                d.iter().map(|(k, v)| (k.as_os_str(), v.as_deref())),
-            ),
-        };
-        // SAFETY: `libc::setsid`, `libc::sigemptyset`, and `libc::sigprocmask` are all
-        // async-signal-safe per POSIX. Resetting the signal mask matches macOS `macos_spawn`
-        // (`POSIX_SPAWN_SETSIGMASK` with an empty set), because Rust `std` intentionally inherits
-        // the calling thread's signal mask across `fork`+`exec`.
-        unsafe {
-            command.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(io::Error::last_os_error());
-                }
-                let mut empty: libc::sigset_t = std::mem::zeroed();
-                if libc::sigemptyset(&mut empty) != 0
-                    || libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()) != 0
-                {
-                    return Err(io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
+        let mut command =
+            build_detached_linux_command(spec).map_err(|e| CommandError::spawn(program, e))?;
         spawn_configured_std(&mut command, program, opts)
     }
 }
@@ -1429,7 +1545,7 @@ pub fn run_detached(
     opts: BoundedOptions<'_>,
 ) -> Result<Output, CommandError> {
     execute_bounded(program, opts, false, None, || {
-        spawn_detached(command, program, opts)
+        spawn_detached_bounded(command, program, opts)
     })
     .map(into_plain_output)
 }
@@ -1500,7 +1616,9 @@ pub async fn run_detached_async(
     opts: BoundedOptions<'_>,
 ) -> Result<Output, CommandError> {
     run_blocking_cancellable(program.into(), opts, move |p, o, c| {
-        execute_bounded(p, o, false, Some(c), || spawn_detached(&command, p, o))
+        execute_bounded(p, o, false, Some(c), || {
+            spawn_detached_bounded(&command, p, o)
+        })
     })
     .await
 }
@@ -1559,6 +1677,84 @@ mod tests {
 
     #[test]
     fn resolve_program_uses_only_child_path_and_never_leaks_parent_path() {
+        use std::collections::BTreeMap;
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct CountingRecorder(Arc<Mutex<BTreeMap<String, u64>>>);
+
+        struct CounterHandle {
+            counts: Arc<Mutex<BTreeMap<String, u64>>>,
+            key: String,
+        }
+
+        impl metrics::CounterFn for CounterHandle {
+            fn increment(&self, value: u64) {
+                *self
+                    .counts
+                    .lock()
+                    .unwrap()
+                    .entry(self.key.clone())
+                    .or_default() += value;
+            }
+            fn absolute(&self, value: u64) {
+                self.counts.lock().unwrap().insert(self.key.clone(), value);
+            }
+        }
+
+        impl metrics::Recorder for CountingRecorder {
+            fn describe_counter(
+                &self,
+                _: metrics::KeyName,
+                _: Option<metrics::Unit>,
+                _: metrics::SharedString,
+            ) {
+            }
+            fn describe_gauge(
+                &self,
+                _: metrics::KeyName,
+                _: Option<metrics::Unit>,
+                _: metrics::SharedString,
+            ) {
+            }
+            fn describe_histogram(
+                &self,
+                _: metrics::KeyName,
+                _: Option<metrics::Unit>,
+                _: metrics::SharedString,
+            ) {
+            }
+            fn register_counter(
+                &self,
+                key: &metrics::Key,
+                _: &metrics::Metadata<'_>,
+            ) -> metrics::Counter {
+                let labels: Vec<String> = key
+                    .labels()
+                    .map(|l| format!("{}={}", l.key(), l.value()))
+                    .collect();
+                let id = format!("{}[{}]", key.name(), labels.join(","));
+                metrics::Counter::from_arc(Arc::new(CounterHandle {
+                    counts: self.0.clone(),
+                    key: id,
+                }))
+            }
+            fn register_gauge(
+                &self,
+                _: &metrics::Key,
+                _: &metrics::Metadata<'_>,
+            ) -> metrics::Gauge {
+                metrics::Gauge::noop()
+            }
+            fn register_histogram(
+                &self,
+                _: &metrics::Key,
+                _: &metrics::Metadata<'_>,
+            ) -> metrics::Histogram {
+                metrics::Histogram::noop()
+            }
+        }
+
         let dir = unique_tmp_dir("steve-rt-resolve");
         let tool = dir.join("custom-tool");
         fs::write(&tool, "#!/bin/sh\necho ok\n").unwrap();
@@ -1567,30 +1763,73 @@ mod tests {
         fs::write(&nonexec, "#!/bin/sh\necho no\n").unwrap();
         fs::set_permissions(&nonexec, fs::Permissions::from_mode(0o644)).unwrap();
 
-        assert_eq!(
-            resolve_program(OsStr::new("custom-tool"), Some(dir.as_os_str()), None).unwrap(),
-            tool
-        );
-        assert_eq!(
-            resolve_program(OsStr::new("sh"), Some(dir.as_os_str()), None)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::NotFound
-        );
-        assert_eq!(
-            resolve_program(OsStr::new("sh"), None, None)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::NotFound
-        );
-        assert_eq!(
-            resolve_program(OsStr::new("nonexec-tool"), Some(dir.as_os_str()), None)
-                .unwrap_err()
-                .kind(),
-            io::ErrorKind::PermissionDenied
-        );
-        let anchored = resolve_program(OsStr::new("./custom-tool"), None, Some(&dir)).unwrap();
-        assert!(anchored.is_absolute() && anchored == dir.join("./custom-tool"));
+        let recorder = CountingRecorder::default();
+        metrics::with_local_recorder(&recorder, || {
+            assert_eq!(
+                resolve_program(OsStr::new("custom-tool"), Some(dir.as_os_str()), None).unwrap(),
+                tool
+            );
+            let missing_in_path =
+                resolve_program(OsStr::new("sh"), Some(dir.as_os_str()), None).unwrap_err();
+            assert_eq!(missing_in_path.kind(), io::ErrorKind::NotFound);
+            assert!(
+                missing_in_path.to_string().contains("sh")
+                    && missing_in_path
+                        .to_string()
+                        .contains(&dir.display().to_string()),
+                "{missing_in_path}"
+            );
+
+            let empty_path_err = resolve_program(OsStr::new("sh"), None, None).unwrap_err();
+            assert_eq!(empty_path_err.kind(), io::ErrorKind::NotFound);
+            assert!(
+                empty_path_err.to_string().contains("sh")
+                    && empty_path_err.to_string().contains("empty"),
+                "{empty_path_err}"
+            );
+
+            let denied = resolve_program(OsStr::new("nonexec-tool"), Some(dir.as_os_str()), None)
+                .unwrap_err();
+            assert_eq!(denied.kind(), io::ErrorKind::PermissionDenied);
+            assert!(
+                denied.to_string().contains("nonexec-tool")
+                    && denied.to_string().contains(&dir.display().to_string()),
+                "{denied}"
+            );
+
+            let empty_prog =
+                resolve_program(OsStr::new(""), Some(dir.as_os_str()), None).unwrap_err();
+            assert_eq!(empty_prog.kind(), io::ErrorKind::NotFound);
+
+            assert_eq!(
+                require_absolute_program(OsStr::new("/bin/sh"), "SHELL").unwrap(),
+                PathBuf::from("/bin/sh")
+            );
+            let non_abs = require_absolute_program(OsStr::new("zsh"), "SHELL").unwrap_err();
+            assert_eq!(non_abs.kind(), io::ErrorKind::InvalidInput);
+            assert!(
+                non_abs.to_string().contains("SHELL") && non_abs.to_string().contains("zsh"),
+                "{non_abs}"
+            );
+            let empty_shell = require_absolute_program(OsStr::new(""), "SHELL").unwrap_err();
+            assert_eq!(empty_shell.kind(), io::ErrorKind::InvalidInput);
+
+            let anchored = resolve_program(OsStr::new("./custom-tool"), None, Some(&dir)).unwrap();
+            assert!(anchored.is_absolute() && anchored == dir.join("./custom-tool"));
+        });
+
+        let counts = recorder.0.lock().unwrap();
+        for (reason, expected) in [
+            ("not_found", 1),
+            ("empty_path", 1),
+            ("permission_denied", 1),
+            ("empty_program", 2),
+            ("not_absolute", 1),
+        ] {
+            let key = format!("steve_process_program_resolve_failures_total[reason={reason}]");
+            assert_eq!(counts.get(&key).copied(), Some(expected), "{counts:?}");
+        }
+
         assert_eq!(
             effective_path::<&str, &str, _>(true, std::iter::empty()),
             None
@@ -2044,5 +2283,109 @@ mod tests {
             io::Error::last_os_error().raw_os_error(),
             Some(libc::ECHILD)
         );
+    }
+
+    #[test]
+    fn spawn_detached_starts_new_session_wires_log_fds_resets_signals_and_env() {
+        let dir = unique_tmp_dir("steve-rt-spawn-detached");
+        let log_path = dir.join("detached.log");
+        let log = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log_path)
+            .unwrap();
+        // Open an extra CLOEXEC file in parent to prove it does not leak to the child.
+        let secret_file = fs::File::create(dir.join("parent-only")).unwrap();
+        let secret_fd = secret_file.as_raw_fd();
+
+        let mut cmd = DetachedCommand::new("/usr/bin/python3");
+        cmd.args([
+            "-c",
+            r#"
+import os, signal, sys
+pid = os.getpid()
+pgrp = os.getpgrp()
+sid = os.getsid(0)
+stdin_eof = sys.stdin.read() == ""
+blocked = sorted(signal.pthread_sigmask(signal.SIG_BLOCK, set()))
+extra_fd = int(sys.argv[1])
+try:
+    os.fstat(extra_fd)
+    leaked = True
+except OSError:
+    leaked = False
+print(f"OUT:{pid}:{pgrp}:{sid}:{stdin_eof}:{blocked}:{leaked}:{os.environ.get('STEVE_DETACHED_ENV', '')}")
+sys.stdout.flush()
+sys.stderr.write("ERR:ok\n")
+sys.stderr.flush()
+"#,
+            &secret_fd.to_string(),
+        ])
+        .env("STEVE_DETACHED_ENV", "yes");
+
+        let parent_sid = unsafe { libc::getsid(0) };
+        // Mask SIGUSR1 on this thread around spawn_detached to verify the child clears its mask.
+        let mut usr1: libc::sigset_t = unsafe { std::mem::zeroed() };
+        let mut prev: libc::sigset_t = unsafe { std::mem::zeroed() };
+        unsafe {
+            libc::sigemptyset(&mut usr1);
+            libc::sigaddset(&mut usr1, libc::SIGUSR1);
+            assert_eq!(libc::pthread_sigmask(libc::SIG_BLOCK, &usr1, &mut prev), 0);
+        }
+        let spawned = spawn_detached(
+            &cmd,
+            DetachedStdio::Null,
+            DetachedStdio::File(&log),
+            DetachedStdio::File(&log),
+        );
+        unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &prev, std::ptr::null_mut());
+        }
+        let pid = spawned.unwrap();
+        assert!(pid > 0);
+        drop(secret_file);
+
+        let wait_child = |pid: u32| -> libc::c_int {
+            let mut status: libc::c_int = 0;
+            let mut reaped = -1;
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while Instant::now() < deadline {
+                reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+                if reaped != 0 {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert_eq!(reaped, pid as libc::pid_t, "detached child did not exit");
+            status
+        };
+
+        let status = wait_child(pid);
+        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
+
+        let text = fs::read_to_string(&log_path).unwrap();
+        assert!(
+            text.contains(&format!("OUT:{pid}:{pid}:{pid}:True:[]:False:yes\n")),
+            "unexpected stdout in log:\n{text}"
+        );
+        assert!(text.contains("ERR:ok\n"), "missing stderr in log:\n{text}");
+        assert_ne!(pid as libc::pid_t, parent_sid);
+
+        // Verify SIGPIPE is reset to SIG_DFL (not inherited as SIG_IGN from Rust's runtime).
+        let mut sigpipe_cmd = DetachedCommand::new("/bin/sh");
+        sigpipe_cmd.args(["-c", "kill -PIPE $$"]);
+        let sigpipe_pid = spawn_detached(
+            &sigpipe_cmd,
+            DetachedStdio::Null,
+            DetachedStdio::Null,
+            DetachedStdio::Null,
+        )
+        .unwrap();
+        let sigpipe_status = wait_child(sigpipe_pid);
+        assert!(
+            libc::WIFSIGNALED(sigpipe_status) && libc::WTERMSIG(sigpipe_status) == libc::SIGPIPE,
+            "expected SIGPIPE termination, got status={sigpipe_status}"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
