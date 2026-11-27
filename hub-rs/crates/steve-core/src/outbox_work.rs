@@ -10,7 +10,6 @@
 //! transaction or inside `finish`/`drop`/`fail`.
 
 use std::collections::HashSet;
-use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use steve_store::outbox::{ConsumeError, Consumer, Event, Since};
@@ -93,9 +92,9 @@ impl Consumer for WorkTidy {
             return Ok(());
         }
 
-        // Step 1: stop any busy session and release every idle session BEFORE inspecting process
-        // cwds — an idle ACP harness holds `cwd` inside the worktree until released.
-        let cwd_to_check = {
+        // Step 1: stop any busy session and release every idle session BEFORE Node housekeeping
+        // inspects process cwds — an idle ACP harness holds `cwd` inside the worktree until released.
+        {
             let mut tx = self.core.tx();
             let item = tx.item(&d.item_id).map_err(retry)?;
             if item.cycle != d.cycle || item.phase != crate::cycle::CLOSED {
@@ -139,50 +138,28 @@ impl Consumer for WorkTidy {
                         .insert(key);
                 }
             }
-            tx.item_worktree_dir(&item)
-                .filter(|cwd| Path::new(cwd).exists())
-        };
-
-        // Step 2: outside the state lock, check if an external process (e.g. dev server) still
-        // has its cwd inside the worktree. Defer & retry instead of silently dropping cleanup.
-        if let Some(cwd) = cwd_to_check
-            && crate::workspace::process_dirs()
-                .is_some_and(|p| crate::workspace::in_use(Path::new(&cwd), &p))
-        {
-            tracing::warn!(
-                item = %d.item_id,
-                cwd = %cwd,
-                "deferring worktree cleanup: external process still running in worktree"
-            );
-            metrics::counter!(
-                "steve_worktree_cleanup_total",
-                "backend" => "core",
-                "outcome" => "deferred",
-                "branch" => "kept"
-            )
-            .increment(1);
-            let note = steve_i18n::stored(|| {
-                steve_i18n::t!("core.worktree.cleanup_in_use", cwd = cwd.as_str())
-            });
-            if let Err(e) = self.core.tx().note_cleanup_once(&d.item_id, &note) {
-                tracing::warn!(item = %d.item_id, error = %e, "record deferred cleanup note");
-            }
-            return Err(ConsumeError::Retry(format!(
-                "worktree {cwd} still has a running process"
-            )));
         }
 
-        // Step 3: perform deterministic worktree and branch cleanup under the state lock.
-        match self.core.tx().tidy_branch_now(&d.item_id) {
-            Ok(true) => {
+        // Step 2: perform deterministic worktree and branch cleanup on the Node.
+        match self.core.tx().tidy_branch_outcome(&d.item_id) {
+            Ok(
+                crate::worktrees::TidyOutcome::Cleaned
+                | crate::worktrees::TidyOutcome::Dispatched
+                | crate::worktrees::TidyOutcome::Noop
+                | crate::worktrees::TidyOutcome::Failed,
+            ) => {
                 self.owner_follow_up_done
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
                     .remove(&(d.item_id.clone(), d.cycle));
                 Ok(())
             }
-            Ok(false) => Err(ConsumeError::Retry(format!(
+            Ok(crate::worktrees::TidyOutcome::Busy) => Err(ConsumeError::Retry(format!(
                 "item {} still has active sessions; retrying worktree cleanup",
+                d.item_id
+            ))),
+            Ok(crate::worktrees::TidyOutcome::DeferredInUse) => Err(ConsumeError::Retry(format!(
+                "worktree for item {} still has a running process",
                 d.item_id
             ))),
             Err(e) => {

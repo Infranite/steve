@@ -380,6 +380,98 @@ async fn upgrade_drain_blocks_new_mutations_and_waits_for_existing_external_work
     assert!(e.store.try_activity("mail_send").is_some());
 }
 
+/// N2: During maintenance drain, `POST /api/decisions/{id}` is narrowed strictly to waiting
+/// permission cards of currently running Node turns and counted via `continuing_activity`.
+/// Non-permission decisions and finished-turn cards get 503 during drain, and once sealed all
+/// decision answers receive 503 so no write can race `ready=true`.
+#[tokio::test(flavor = "multi_thread")]
+async fn maintenance_gate_admits_only_running_node_permission_cards_via_continuing_activity() {
+    let e = start().await;
+    outbox_checks::seed_maintenance_decision_cases(&e.db).unwrap();
+    // Sanity check on the store predicate itself: only the waiting card on a running turn matches.
+    assert!(steve_hub::wire::node_runtime::waiting_card(
+        &e.store,
+        "dc_running_perm"
+    ));
+    assert!(!steve_hub::wire::node_runtime::waiting_card(
+        &e.store,
+        "dc_finished_perm"
+    ));
+    assert!(!steve_hub::wire::node_runtime::waiting_card(
+        &e.store,
+        "dc_plain_ask"
+    ));
+
+    // Start drain while an external activity holds seal open (maintenance=true, sealed=false).
+    let blocker = e.store.try_activity("in_flight_work").unwrap();
+    let status = e.domain.upgrade_drain("start").await.unwrap();
+    assert_eq!(status["maintenance"], true);
+    assert_eq!(status["ready"], false);
+
+    // Non-permission decision and finished-turn permission card are refused with 503.
+    for id in ["dc_plain_ask", "dc_finished_perm", "dc_unknown"] {
+        let (st, v) = e
+            .call(
+                "POST",
+                &format!("/api/decisions/{id}"),
+                Some(json!({"choice": "yes"})),
+            )
+            .await;
+        assert_eq!(
+            (st, &v["maintenance"]),
+            (503, &json!(true)),
+            "{id} must be refused during drain: {v}"
+        );
+    }
+
+    // A waiting permission card on a running Node turn is counted via `continuing_activity`
+    // (blocking `maintenance_seal()` while held) and passes `maintenance_gate` (not 503).
+    let perm_permit = e
+        .store
+        .continuing_activity("node_permission_answer", || {
+            steve_hub::wire::node_runtime::waiting_card(&e.store, "dc_running_perm")
+        })
+        .expect("running Node permission card must be admitted via continuing_activity");
+    assert_eq!(e.store.activities().get("node_permission_answer"), Some(&1));
+    drop(blocker);
+    assert!(
+        !e.store.maintenance_seal(),
+        "drain must not seal while a node_permission_answer permit is active"
+    );
+    let (st, v) = e
+        .call(
+            "POST",
+            "/api/decisions/dc_running_perm",
+            Some(json!({"choice": "allow_once"})),
+        )
+        .await;
+    assert_ne!(
+        st, 503,
+        "running Node turn permission card must pass maintenance_gate before seal: {v}"
+    );
+    drop(perm_permit);
+
+    // Once all activities drop and drain seals (ready=true), ALL decisions—including late
+    // permission cards—are refused with 503 so nothing races the sealed ready boundary.
+    let status = e.domain.upgrade_drain("status").await.unwrap();
+    assert_eq!(status["ready"], true, "{status:?}");
+    for id in ["dc_plain_ask", "dc_finished_perm", "dc_running_perm"] {
+        let (st, v) = e
+            .call(
+                "POST",
+                &format!("/api/decisions/{id}"),
+                Some(json!({"choice": "allow_once"})),
+            )
+            .await;
+        assert_eq!(
+            (st, &v["maintenance"]),
+            (503, &json!(true)),
+            "{id} must be refused after drain seals: {v}"
+        );
+    }
+    e.domain.upgrade_drain("cancel").await.unwrap();
+}
+
 /// Taking a drafted reply out of 待处理 discards the draft (it would otherwise wait in its
 /// conversation for good); undo puts it back; a second dismissal is refused.
 #[tokio::test(flavor = "multi_thread")]

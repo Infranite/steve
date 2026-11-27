@@ -5861,7 +5861,6 @@ dependencies = [
  "tower",
  "tracing",
  "url",
- "wait-timeout",
  "zeroize",
 ]
 

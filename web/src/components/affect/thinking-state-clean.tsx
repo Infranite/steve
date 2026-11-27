@@ -25,8 +25,10 @@ export type ThinkingStateProps = {
   label: string;
   endLabel: string;
   summary?: string;
+  pinned?: ReactNode;
   startedAt?: number;
   lastActivity?: number;
+  silenceThresholdSeconds?: number;
   formatActivity?: (seconds: number) => string;
   disclosure?: [string, string];
   scrollPosition?: { top: number };
@@ -40,8 +42,13 @@ export type ThinkingStateProps = {
   className?: string;
 };
 
-export function ThinkingState({ steps, status, label, endLabel, summary, startedAt, durationMs,
-  open, defaultOpen, onOpenChange, headerAttrs, formatTime, className, lastActivity, formatActivity, disclosure, scrollPosition, scrollLabel }: ThinkingStateProps) {
+/** Silence duration (seconds) before showing the secondary quiet-activity hint alongside total elapsed time. */
+const DEFAULT_SILENCE_THRESHOLD_S = 15;
+/** Shared 1 Hz tick cadence for header elapsed and silence indicators. */
+const CLOCK_TICK_MS = 1000;
+
+export function ThinkingState({ steps, status, label, endLabel, summary, pinned, startedAt, durationMs,
+  open, defaultOpen, onOpenChange, headerAttrs, formatTime, className, lastActivity, silenceThresholdSeconds = DEFAULT_SILENCE_THRESHOLD_S, formatActivity, disclosure, scrollPosition, scrollLabel }: ThinkingStateProps) {
   const uid = useId(), scroll = useRef<HTMLDivElement>(null);
   const [ownOpen, setOwnOpen] = useState(defaultOpen ?? status === "running");
   const touched = useRef(false), previous = useRef(status);
@@ -55,23 +62,27 @@ export function ThinkingState({ steps, status, label, endLabel, summary, started
     previous.current = status;
   }, [status]);
   const elapsed = durationMs != null && Number.isFinite(durationMs) ? formatTime(Math.max(0, durationMs) / 1000) : null;
+  const hasContent = steps.length > 0 || !!pinned;
   return <div className={["ui-thinkc", className].filter(Boolean).join(" ")} data-compact={!!disclosure || undefined} data-status={status} data-done={!running || undefined} aria-busy={running}>
     <style href="ui-thinking-state-clean" precedence="default">{css}</style>
-    <button type="button" className="ui-thinkc__head" aria-expanded={opened} aria-controls={`${uid}-body`} disabled={running && steps.length === 0}
+    <button type="button" className="ui-thinkc__head" aria-expanded={opened} aria-controls={`${uid}-body`} disabled={running && !hasContent}
       onClick={() => { touched.current = true; setOpen(!opened) }} {...headerAttrs}>
       <span className="ui-thinkc__mark" aria-hidden="true">{Array.from({length:9},(_,i)=><i key={i} style={{animationDelay:`${PIXEL_DELAYS[i]}ms`}} />)}</span>
       <span className="ui-thinkc__title" key={status}>
         <span aria-live="polite" className={running ? "ui-thinkc__shimmer" : undefined} data-text={label}>{label}</span>
-        {running && startedAt != null ? <span className="ui-thinkc__time" aria-hidden="true"><Elapsed since={startedAt} formatTime={formatTime} /></span>
-          : running && lastActivity != null && formatActivity ? <span className="ui-thinkc__time" aria-hidden="true"><Elapsed since={lastActivity} formatTime={formatActivity} /></span>
-          : elapsed && <span className="ui-thinkc__time">{elapsed}</span>}
+        {running && (startedAt != null || (lastActivity != null && formatActivity)) && (
+          <RunningTimers startedAt={startedAt} lastActivity={lastActivity} thresholdSeconds={silenceThresholdSeconds} formatTime={formatTime} formatActivity={formatActivity} />
+        )}
+        {!running && elapsed && <span className="ui-thinkc__time">{elapsed}</span>}
       </span>
-      {disclosure && (!running || steps.length > 0) && <span className="ui-thinkc__toggle">{disclosure[opened ? 1 : 0]}</span>}
+      {disclosure && (!running || hasContent) && <span className="ui-thinkc__toggle">{disclosure[opened ? 1 : 0]}</span>}
       <span className="ui-thinkc__chevron" aria-hidden="true"><svg viewBox="0 0 16 16"><path d="M4.5 6.25 8 9.75l3.5-3.5" /></svg></span>
     </button>
     {summary && <p className="ui-thinkc__summary">{summary}</p>}
     <div id={`${uid}-body`} className="ui-thinkc__body" data-open={opened} aria-hidden={!opened} inert={!opened}>
-      <div className="ui-thinkc__clip"><div ref={scroll} data-chat-process-scroll={disclosure ? "" : undefined}
+      <div className="ui-thinkc__clip">
+        {opened && pinned && <div className="ui-thinkc__pinned" data-thinking-pinned>{pinned}</div>}
+        <div ref={scroll} data-chat-process-scroll={disclosure ? "" : undefined}
         tabIndex={disclosure && opened ? 0 : undefined} role={disclosure ? "region" : undefined} aria-label={scrollLabel}
         onScroll={scrollPosition ? e => { scrollPosition.top = e.currentTarget.scrollTop } : undefined}>
         {opened && <ol className="ui-thinkc__list">
@@ -158,11 +169,24 @@ function Source({ source, delay }: { source: ThinkingSource; delay: number }) {
 /** Twinkle order of the 3×3 pixel mark – a diagonal wave */
 const PIXEL_DELAYS = [0, 120, 240, 120, 240, 360, 240, 360, 480];
 
-/** Only the clock ticks; no elapsed time can change a run's outcome or step count. */
-function Elapsed({ since, formatTime }: { since: number; formatTime: (seconds: number) => string }) {
+/** One clock ticks total elapsed time and the silence hint in lockstep; time never changes status or steps. */
+function RunningTimers({ startedAt, lastActivity, thresholdSeconds, formatTime, formatActivity }: {
+  startedAt?: number;
+  lastActivity?: number;
+  thresholdSeconds: number;
+  formatTime: (seconds: number) => string;
+  formatActivity?: (seconds: number) => string;
+}) {
   const [, tick] = useState(0);
-  useEffect(() => { const t=window.setInterval(()=>tick(n=>n+1),1000); return ()=>clearInterval(t) }, []);
-  return <>{formatTime(Math.max(0,Date.now()-since)/1000)}</>;
+  useEffect(() => { const t = window.setInterval(() => tick(n => n + 1), CLOCK_TICK_MS); return () => window.clearInterval(t); }, []);
+  const now = Date.now();
+  const silentSeconds = lastActivity != null ? Math.max(0, (now - lastActivity) / 1000) : 0;
+  return <>
+    {startedAt != null && <span className="ui-thinkc__time" aria-hidden="true">{formatTime(Math.max(0, now - startedAt) / 1000)}</span>}
+    {lastActivity != null && formatActivity && silentSeconds >= thresholdSeconds && (
+      <span className="ui-thinkc__quiet" data-silence-hint aria-hidden="true">· {formatActivity(silentSeconds)}</span>
+    )}
+  </>;
 }
 
 /* ---------- Styles ---------- */
@@ -606,6 +630,8 @@ a.ui-thinkc__source:hover {
 }
 
 .ui-thinkc__summary { margin: 0 8px 4px 34px; color: var(--ui-tkc-muted); font-size: 12px; overflow-wrap: anywhere; }
+.ui-thinkc__quiet { font-weight: 400; font-size: 12px; font-variant-numeric: tabular-nums; white-space: nowrap; color: var(--ui-tkc-muted); }
+.ui-thinkc__pinned { padding: 6px 8px 8px; margin-bottom: 4px; border-bottom: 1px solid var(--ui-tkc-line); }
 .ui-thinkc__detail { min-width: 0; margin-top: 4px; color: var(--ui-tkc-text); overflow-wrap: anywhere; }
 .ui-thinkc__label { overflow-wrap: anywhere; }
 .ui-thinkc__node > svg { width: 15px; height: 15px; }

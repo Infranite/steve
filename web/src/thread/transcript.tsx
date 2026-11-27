@@ -5,7 +5,7 @@ import { t, useT } from "@/i18n"
 import type { SessionWaiting } from "@/gen"
 import {
   ArrowUpRightIcon, ChevronDownIcon, CircleCheckIcon, CircleSlashIcon, CornerDownRightIcon, FileDiffIcon,
-  FilePlusIcon, FileTextIcon, GitForkIcon, GlobeIcon, InboxIcon, InfoIcon, PencilIcon, SearchIcon, SquareTerminalIcon, TerminalIcon, WrenchIcon,
+  FileTextIcon, GitForkIcon, GlobeIcon, InboxIcon, InfoIcon, PencilIcon, SearchIcon, SquareTerminalIcon, TerminalIcon, WrenchIcon,
 } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { Trail, SubSteps, type TrailItem, type Chip } from "@/components/work-trail"
@@ -20,15 +20,16 @@ import { PermissionRecord } from "@/components/permission"
 import { getSession, permissionDecision, botName, type Reply, useDeviceInventory } from "@/store"
 import { useDecisionView, useSettledVersion } from "@/data/sync"
 import { Brief } from "@/thread/brief"
+import { toolShort } from "@/thread/tools"
 import { Files } from "@/attach"
 import { useTurnUsage } from "@/session/turn-usage"
 import { fmtUsageCost, fmtUsage } from "@/stats/format"
 import { steveToolIcon } from "@/tool-icons"
-import { Segmented, Status, StatusDot, go, openSheet } from "@/ui"
+import { Notice, Segmented, Status, StatusDot, go, openSheet } from "@/ui"
 import { ActorAvatar } from "@/components/actor-avatar"
 
 import { getTranscript, loadOlderTranscript, useTranscript, useTranscriptSelector } from "@/data/transcript"
-import { isActiveSubtaskStatus, partitionWork, segmentsOf, subtaskOf, subtaskTimes, toolDurationMs, type Seg } from "@/data/transcript-model"
+import { isActiveSubtaskStatus, partitionWork, segmentsOf, subtaskOf, subtaskTimes, toolDurationMs, type AutoModeClassifierWarning, type Seg } from "@/data/transcript-model"
 import { SubtaskList, type SubtaskEntry } from "@/components/subtask-list"
 import { recordTranscriptOpen } from "@/perf"
 import { VirtualList } from "@/components/virtual-list"
@@ -69,19 +70,20 @@ export function StartingLine({ since, room }: { since?: number; room?: SessionWa
     {slow && <div className="mt-1 type-footnote text-attention" data-starting-slow>{t("core:transcript.startingSlow")}</div>}
   </div>
 }
-const TOOLN = ["ToolSearch", "TodoWrite", "Skill"] as const
-const toolName = (tool: string) => ((TOOLN as readonly string[]).includes(tool) ? t(`core:transcript.tool.${tool as (typeof TOOLN)[number]}`) : undefined)
 type StepView = { I: any; verb: string; subj: string; mono: boolean; full?: string }
-/** icon, verb and subject of one tool call: the command (with the agent's own description), the file, the pattern */
+/** icon, verb and subject of one tool call, chosen by unified tool category rather than harness-specific tool names */
 function stepView(e: any[]): StepView {
   const tool = String(e[9] ?? ""), file = e[3] && e[3] !== "Steve" ? String(e[3]) : ""
   if (e[1] === "steve") return { I: steveToolIcon(tool) ?? WrenchIcon, verb: e[2], subj: e[10] ?? "", mono: false }
   if (e[1] === "read") return { I: FileTextIcon, verb: t("core:transcript.read"), subj: base(file) || e[2], mono: true, full: file }
-  if (e[1] === "edit") return { I: tool === "Write" ? FilePlusIcon : PencilIcon, verb: t(tool === "Write" ? "core:transcript.write" : "core:transcript.edit"), subj: base(file) || e[2], mono: true, full: file }
-  if (e[1] === "search") { const web = /^Web/.test(tool); return { I: web ? GlobeIcon : SearchIcon, verb: t(web ? "core:transcript.webSearch" : "core:transcript.search"), subj: e[11] ?? e[3] ?? "", mono: !web, full: e[11] } }
-  if (tool && tool !== "Bash") return { I: WrenchIcon, verb: toolName(tool) ?? tool.replace(/^mcp__[^_]+__/, ""), subj: e[10] ?? e[11] ?? "", mono: !e[10] && !!e[11] }
-  const cmd = String(e[11] ?? [e[2], e[3]].filter(Boolean).join(" "))
-  return { I: TerminalIcon, verb: e[10] || t("core:transcript.run"), subj: cmd.split("\n")[0], mono: true, full: cmd }
+  if (e[1] === "edit") return { I: PencilIcon, verb: t("core:transcript.edit"), subj: base(file) || e[2], mono: true, full: file }
+  if (e[1] === "fetch") return { I: GlobeIcon, verb: t("core:transcript.webSearch"), subj: e[11] ?? e[3] ?? "", mono: false, full: e[11] }
+  if (e[1] === "search") return { I: SearchIcon, verb: t("core:transcript.search"), subj: e[11] ?? e[3] ?? "", mono: true, full: e[11] }
+  if (e[1] === "run") {
+    const cmd = String(e[11] ?? [e[2], e[3]].filter(Boolean).join(" "))
+    return { I: TerminalIcon, verb: e[10] || t("core:transcript.run"), subj: cmd.split("\n")[0], mono: true, full: cmd }
+  }
+  return { I: WrenchIcon, verb: (tool || String(e[2] ?? "")).replace(/^mcp__[^_]+__/, ""), subj: e[10] ?? e[11] ?? e[3] ?? "", mono: !e[10] && !!e[11] }
 }
 /** "运行 14 条命令 · 读取 3 个文件 · 编辑 2 个文件 · 思考 1 次" */
 function workStats(evs: any[]) {
@@ -99,11 +101,10 @@ function workStats(evs: any[]) {
     if (e[0] !== "tool") continue
     if (e[15] && subtaskIds.has(String(e[15]))) continue
     if (e[8] === 1) n.fail++
-    const v = stepView(e)
-    if (v.I === TerminalIcon) n.run++
+    if (e[1] === "run") n.run++
     else if (e[1] === "read") n.read++
     else if (e[1] === "edit") { n.edit++; if (e[3]) files.add(e[3]) }
-    else if (e[1] === "search") n.search++
+    else if (e[1] === "search" || e[1] === "fetch") n.search++
     else n.other++
   }
   return [n.sub && t("core:transcript.stats.subtask", { count: n.sub }), n.run && t("core:transcript.stats.run", { count: n.run }), n.read && t("core:transcript.stats.read", { count: n.read }), files.size && t("core:transcript.stats.changed", { count: files.size }), n.search && t("core:transcript.stats.search", { count: n.search }), n.other && t("core:transcript.stats.other", { count: n.other }), n.th && t("core:transcript.stats.thought", { count: n.th }), n.fail && t("core:transcript.stats.failed", { count: n.fail })].filter(Boolean) as string[]
@@ -126,13 +127,14 @@ function stepItem(e: any[], j: number, evs: any[], ts: number[], t1: number | un
     const at = ts[j] || 0, next = j + 1 < evs.length ? ts[j + 1] : t1
     return { t: "think", key, text: String(e[1] ?? ""), live: live && j === evs.length - 1, t0: at || undefined, ms: at && next ? next - at : undefined }
   }
-  const v = stepView(e), tool = String(e[9] ?? ""), state = e[5] === 1 ? "run" : e[8] === 1 ? "fail" : "done", web = /^Web/.test(tool)
+  const v = stepView(e), tool = String(e[9] ?? ""), shortTool = toolShort(tool), state = e[5] === 1 ? "run" : e[8] === 1 ? "fail" : "done"
   const [verb, group, chip]: [[string, string], string | undefined, Chip | undefined] =
     e[1] === "read" ? [[t("core:trail.live.read"), v.verb], "read", { label: v.subj, title: v.full, mono: true, icon: FileTextIcon }]
-    : e[1] === "edit" ? [[t(tool === "Write" ? "core:trail.live.write" : "core:trail.live.edit"), v.verb], "edit", { label: v.subj, title: v.full, mono: true, icon: v.I }]
-    : e[1] === "search" ? [[t(web ? "core:trail.live.webSearch" : "core:trail.live.search"), v.verb], "search", { label: v.subj, title: v.full, mono: v.mono, icon: v.I }]
-    : v.I === TerminalIcon ? [e[10] ? [v.verb, v.verb] : [t("core:trail.live.run"), v.verb], "run", { label: e[10] || v.subj, title: v.full, mono: !e[10], icon: TerminalIcon }]
-    : [[v.verb, v.verb], e[12]?.length || SAY.includes(tool.replace(/^mcp__steve__/, "")) ? undefined : "tool:" + tool, v.subj ? { label: v.subj, mono: v.mono } : undefined]
+    : e[1] === "edit" ? [[t("core:trail.live.edit"), v.verb], "edit", { label: v.subj, title: v.full, mono: true, icon: v.I }]
+    : e[1] === "fetch" ? [[t("core:trail.live.webSearch"), v.verb], "fetch", { label: v.subj, title: v.full, mono: false, icon: v.I }]
+    : e[1] === "search" ? [[t("core:trail.live.search"), v.verb], "search", { label: v.subj, title: v.full, mono: true, icon: v.I }]
+    : e[1] === "run" ? [e[10] ? [v.verb, v.verb] : [t("core:trail.live.run"), v.verb], "run", { label: e[10] || v.subj, title: v.full, mono: !e[10], icon: TerminalIcon }]
+    : [[v.verb, v.verb], e[12]?.length || SAY.includes(shortTool) ? undefined : "tool:" + shortTool, v.subj ? { label: v.subj, mono: v.mono } : undefined]
   const g = group?.startsWith("tool:") ? "tool" : group
   const merged = g ? (calls: number, distinct: number, running: boolean) => g === "tool" ? t("core:trail.group.tool", { name: v.verb, count: calls })
     : t(`core:trail.group.${g}${running ? "Live" : ""}` as "core:trail.group.read", { count: g === "read" || g === "edit" ? distinct : calls }) : undefined
@@ -142,8 +144,8 @@ function stepItem(e: any[], j: number, evs: any[], ts: number[], t1: number | un
    * and what came back, its time from adapter duration_ms or the update that settled it ([13]) */
   const out = String(e[4] ?? "").trim().replace(/^```[a-z]*\n?/, "").replace(/\n?```$/, "").trim(), t0 = ts[j] || undefined
   const observedMs = toolDurationMs(e) ?? (e[13] && t0 && e[13] > t0 ? e[13] - t0 : undefined)
-  const card = { name: (tool || String(e[2] ?? "")).replace(/^mcp__steve__/, "").replace(/^mcp__[^_]+__/, ""), icon: <v.I strokeWidth={1.5} aria-hidden />,
-    args: e[1] === "steve" ? e[14] ?? (e[10] || undefined) : v.I === TerminalIcon ? v.full ?? v.subj : e[11] ?? (e[3] && e[3] !== "Steve" ? e[3] : undefined),
+  const card = { name: toolShort(tool || String(e[2] ?? "")), icon: <v.I strokeWidth={1.5} aria-hidden />,
+    args: e[1] === "steve" ? e[14] ?? (e[10] || undefined) : e[1] === "run" ? v.full ?? v.subj : e[11] ?? (e[3] && e[3] !== "Steve" ? e[3] : undefined),
     result: state === "fail" ? undefined : plan ? (j === lastPlan ? undefined : plan.map(([x, d]) => (d ? "✓ " : "○ ") + x).join("\n")) : out || undefined,
     resultView: plan && j !== lastPlan ? <SubSteps steps={plan} live={false} /> : e[1] === "edit" && out ? <Detail text={out} /> : undefined,
     error: state === "fail" ? out || undefined : undefined, t0, ms: observedMs }
@@ -231,6 +233,10 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
   const setView = (v: "steps" | "timeline") => { workView.set(key, v); setViewS(v) }
   const stats = useMemo(() => workStats(g.evs), [g.evs, t])
   const cancelled = g.end === "cancelled"
+  const stalled = g.end === "turn_stall_no_progress" || g.end === "turn_stall_repeated_failure"
+  const endLabel = stalled
+    ? t(g.end === "turn_stall_repeated_failure" ? "core:transcript.stalledRepeatedFailure" : "core:transcript.stalledNoProgress")
+    : t(cancelled ? "core:transcript.interrupted" : "core:transcript.handled")
   const sess = getSession(k)
   const ro = !!sess?.ro
   const hasSteps = g.evs.length > 0
@@ -248,7 +254,7 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
     <Collapsible open={open} onOpenChange={setOpen} data-work={live ? "live" : "done"} data-work-view={open ? view : undefined} className="relative anim-in">
       <CollapsibleTrigger className={cn("group/work flex w-full min-w-0 items-center gap-1.5 rounded-lg py-1 text-left type-callout hover:[&>svg]:text-foreground", open && hasSteps && "sm:pr-36")}>
         <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-muted-foreground transition-transform duration-180 ease-(--ease-out) group-aria-expanded/work:rotate-0" />
-        <span className={cn("shrink-0", live ? "text-foreground" : "text-foreground/85")}>{live ? <span className="shimmer">{t("core:transcript.working")}</span> : t(cancelled ? "core:transcript.interrupted" : "core:transcript.handled")}</span>
+        <span className={cn("shrink-0", live ? "text-foreground" : "text-foreground/85")}>{live ? <span className="shimmer">{t("core:transcript.working")}</span> : endLabel}</span>
         <WorkClock t0={g.t0} t1={g.t1} live={live} />
         {stats.length > 0 && <span className="min-w-0 truncate text-muted-foreground">· {stats.join(" · ")}</span>}
         {usage && <span className="ml-auto hidden shrink-0 pl-2 type-footnote tabular-nums text-tertiary sm:inline" data-work-usage>{usage.coverage.total === null ? fmtUsage(usage) : t("views:sessionPanel.turnUsage", { tokens: fmtUsage(usage), usd: fmtUsageCost(usage) })}</span>}
@@ -261,8 +267,8 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
           options={[["steps", t("core:trace.view.steps")], ["timeline", t("core:trace.view.timeline")]] as const} />}
         {open && <div className="mt-1 flex flex-col">
           {view === "timeline"
-            ? <Suspense fallback={<div className="flex items-center gap-2 py-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("common:state.loading")}</div>}><TurnTrace k={k} prompt={g.prompt} evs={g.evs} at={g.at ?? []} items={traceItems} t0={g.t0} t1={g.t1} live={live} cancelled={cancelled} /></Suspense>
-            : <Trail items={items} live={live} tail={live ? 12 : undefined} end={live || !g.end ? undefined : cancelled ? { s: "cancel", label: t("core:transcript.interrupted") } : { s: "end", label: t("core:trail.finished") }} />}
+            ? <Suspense fallback={<div className="flex items-center gap-2 py-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("common:state.loading")}</div>}><TurnTrace k={k} prompt={g.prompt} evs={g.evs} at={g.at ?? []} items={traceItems} t0={g.t0} t1={g.t1} live={live} cancelled={cancelled || stalled} /></Suspense>
+            : <Trail items={items} live={live} tail={live ? 12 : undefined} end={live || !g.end ? undefined : cancelled || stalled ? { s: "cancel", label: endLabel } : { s: "end", label: t("core:trail.finished") }} />}
         </div>}
       </CollapsibleContent>
     </Collapsible>
@@ -352,9 +358,28 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
   if (g.t === "ask") return <TranscriptPermission e={e} />
   if (g.t === "away") return <div className="flex items-center gap-2 type-footnote text-muted-foreground" data-away><CornerDownRightIcon className="size-3.5 shrink-0" strokeWidth={1.5} />{t("core:transcript.away")}</div>
   if (g.t === "sys" && e[2] === "faulted") return <FaultedLine k={k} text={e[1]} />
+  if (g.t === "sys" && e[2] === "auto_mode_classifier_unavailable") {
+    const warn = e[3] as AutoModeClassifierWarning | undefined
+    if (warn) return <AutoModeClassifierAlert warning={warn} harnessFallback={getSession(k)?.h} />
+  }
   if (g.t === "sys") return <SysRow text={String(e[1] ?? "")} />
   return null
 })
+
+export function AutoModeClassifierAlert({ warning, harnessFallback, className }: {
+  warning: AutoModeClassifierWarning
+  harnessFallback?: string
+  className?: string
+}) {
+  const t = useT()
+  const harness = warning.harness || harnessFallback || t("core:unknownHarness")
+  return (
+    <Notice tone={warning.stopped ? "destructive" : "attention"} className={className} data-auto-mode-warning={warning.stopped ? "stopped" : "unavailable"}>
+      <div className="font-medium text-foreground">{t("core:transcript.autoModeClassifierTitle", { harness })}</div>
+      <div className="mt-0.5 type-footnote text-muted-foreground">{t(warning.stopped ? "core:transcript.autoModeClassifierStopped" : "core:transcript.autoModeClassifierHint", { harness })}</div>
+    </Notice>
+  )
+}
 /** an event in the conversation (started, queued, compacted…): a short one is a centred line between rules, truncated
  *  with the whole text on hover; a longer notice is a left-aligned muted fill with an icon, two lines at most */
 export function SysRow({ text, className }: { text: string; className?: string }) {
@@ -369,6 +394,7 @@ export function SysRow({ text, className }: { text: string; className?: string }
 }
 const EMPTY_SEGS: Seg[] = []
 function transcriptRowHeight(row: Seg) {
+  if (row.t === "sys" && row.evs[0][2] === "auto_mode_classifier_unavailable") return 96
   if (row.t === "sys") return String(row.evs[0][1] ?? "").length <= 40 ? 36 : 60
   return 112
 }
@@ -473,8 +499,15 @@ export function RunBar({ k }: { k: string }) {
   if (!s || !slice.hasData || (!slice.newest && !run)) return null
   const starting = run && !!s.starting && !slice.hasLatest
   const t0 = (starting && s.since) || slice.t0 || 0
-  const tone = run ? "run" : s.st === "wait" ? "wait" : slice.endStop === "cancelled" ? "stop" : s.st === "ended" ? "ended" : "done"
-  const label = run && s.room ? roomLine(s.room) : starting ? t("core:transcript.startingShort") : t(`core:runBar.${tone}`)
+  const stalled = slice.endStop === "turn_stall_no_progress" || slice.endStop === "turn_stall_repeated_failure"
+  const tone = run ? "run" : s.st === "wait" ? "wait" : slice.endStop === "cancelled" || stalled ? "stop" : s.st === "ended" ? "ended" : "done"
+  const label = run && s.room
+    ? roomLine(s.room)
+    : starting
+      ? t("core:transcript.startingShort")
+      : !run && s.st !== "wait" && stalled
+        ? t(slice.endStop === "turn_stall_repeated_failure" ? "core:runBar.stalledRepeatedFailure" : "core:runBar.stalledNoProgress")
+        : t(`core:runBar.${tone}`)
   const what = run ? null : tone === "wait" ? t("core:runBar.waitWhat") : slice.stats.join(" · ")
   return (
     /* running, the Thinking Loader inside is the live region that speaks each step; the bar itself would say it twice */

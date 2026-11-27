@@ -256,6 +256,32 @@ fn send_now_waits_when_the_flush_leaves_the_message_queued() {
     assert!(kinds(&k, &sid).contains(&"queued_sent_now".to_string()));
 }
 
+#[test]
+fn send_now_and_flush_held_wait_when_cwd_is_unusable() {
+    let k = Kit::new();
+    let (_, sid) = started(&k);
+    let q = queue(&k, &sid, &["一", "二"]);
+    k.rt.st().turning.clear();
+    let cwd = k.db().session(&sid).unwrap().unwrap().cwd;
+    k.rt.st().unusable_cwds.insert(cwd.clone());
+
+    assert_eq!(
+        k.core.queued_send_now(&sid, &q[1]).unwrap(),
+        SendNow::Waiting(steve_i18n::t!("core.queue.wait_cwd"))
+    );
+    assert_eq!(texts(&k, &sid), ["二", "一"]);
+    assert!(!kinds(&k, &sid).contains(&"queued_sent_now".to_string()));
+
+    // flush_held must not flush queued turns while cwd is unusable.
+    k.core.tx().flush_held(&sid).unwrap();
+    assert_eq!(texts(&k, &sid), ["二", "一"]);
+
+    // Once the directory is usable again, send_now dispatches cleanly.
+    k.rt.st().unusable_cwds.remove(&cwd);
+    assert_eq!(k.core.queued_send_now(&sid, &q[1]).unwrap(), SendNow::Sent);
+    assert_eq!(k.rt.prompts_of(&sid).last().unwrap(), "二\n\n一");
+}
+
 /// Only the user's Stop is a stop (a backend may retire what holds the session then); the
 /// lifecycle's cancels are cancels only.
 #[test]

@@ -1,31 +1,500 @@
 //! Owner-initiated setup on the Hub's own Node, before the destination can be a Node root.
 //! No wire operation: the Hub and its built-in Node use the same machine and OS identity.
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::io;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use steve_node_api::*;
 use tempfile::TempDir;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
+use tokio::sync::Semaphore;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SetupError {
-    DirectoryName,
-    Parent,
-    Conflict,
-    Filesystem,
-    Remote,
-    Branch,
-    DefaultBranch,
-    Git,
-    Authentication,
-    Network,
-    Timeout,
-    Clone,
+pub use steve_node_api::ProjectSetupError as SetupError;
+
+/// Maximum directories returned by [`browse_dir`].
+const BROWSE_MAX: usize = 500;
+/// README files inspected by [`describe_dir`] in order.
+const README_FILES: [&str; 4] = ["README.md", "readme.md", "AGENTS.md", "package.json"];
+/// Prefix of each README returned to the Hub (in UTF-16 code units, matching JS `slice`).
+const README_CHARS: usize = 2500;
+/// Maximum concurrent project clone operations on one host.
+const MAX_CONCURRENT_CLONES: usize = 4;
+/// Maximum retained finished project-setup operations in memory.
+const MAX_SETUP_STATUSES: usize = 128;
+
+fn user_home_dir() -> String {
+    std::env::var("HOME").unwrap_or_default()
+}
+
+/// Folds `.`/`..` and repeated slashes while preserving a leading/trailing slash.
+pub fn normalize(p: &str) -> String {
+    if p.is_empty() {
+        return ".".into();
+    }
+    let abs = p.starts_with('/');
+    let trailing = p.ends_with('/');
+    let mut parts: Vec<&str> = vec![];
+    for seg in p.split('/') {
+        match seg {
+            "" | "." => {}
+            ".." => {
+                if parts.last().is_some_and(|l| *l != "..") {
+                    parts.pop();
+                } else if !abs {
+                    parts.push("..");
+                }
+            }
+            s => parts.push(s),
+        }
+    }
+    let mut out = parts.join("/");
+    if abs {
+        out.insert(0, '/');
+    }
+    if out.is_empty() {
+        return if abs { "/".into() } else { ".".into() };
+    }
+    if trailing && !out.ends_with('/') {
+        out.push('/');
+    }
+    out
+}
+
+fn join_path(a: &str, b: &str) -> String {
+    let joined = [a, b]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join("/");
+    normalize(&joined)
+}
+
+/// `~` and `~/x` → `$HOME` and `$HOME/x`; anything else unchanged.
+pub fn expand(p: &str) -> String {
+    let home = user_home_dir();
+    match p.strip_prefix("~/") {
+        Some(rest) if !home.is_empty() => join_path(&home, rest),
+        None if p == "~" && !home.is_empty() => home,
+        _ => p.to_string(),
+    }
+}
+
+fn shown(path: &str, home: &str) -> String {
+    if home.is_empty() {
+        return path.to_string();
+    }
+    match path.strip_prefix(home) {
+        Some("") => "~".into(),
+        Some(rest) if rest.starts_with('/') => format!("~{rest}"),
+        _ => path.to_string(),
+    }
+}
+
+fn utf16_slice(s: &str, max_units: usize) -> String {
+    let mut units = 0;
+    let mut end = 0;
+    for (i, ch) in s.char_indices() {
+        let len = ch.len_utf16();
+        if units + len > max_units {
+            break;
+        }
+        units += len;
+        end = i + ch.len_utf8();
+    }
+    s[..end].to_string()
+}
+
+fn fs_error_detail(e: &io::Error, syscall: &str, path: &str) -> String {
+    let (code, what) = match e.raw_os_error() {
+        Some(20) => ("ENOTDIR", "not a directory"),
+        Some(13) => ("EACCES", "permission denied"),
+        Some(2) => ("ENOENT", "no such file or directory"),
+        Some(21) => ("EISDIR", "illegal operation on a directory"),
+        Some(1) => ("EPERM", "operation not permitted"),
+        _ => return format!("{e}, {syscall} '{path}'"),
+    };
+    format!("{code}: {what}, {syscall} '{path}'")
+}
+
+/// Browse any directory on this machine for owner-initiated project creation.
+pub fn browse_dir(raw: &str) -> BrowseDirResponse {
+    let home = user_home_dir();
+    let asked = match raw.trim() {
+        "" => home.clone(),
+        p => expand(p),
+    };
+    let mut path = normalize(&asked);
+    if path.len() > 1 && path.ends_with('/') {
+        path.pop();
+    }
+    let parent = Path::new(&path)
+        .parent()
+        .map(|p| shown(&p.to_string_lossy(), &home));
+    let mut out = BrowseDirResponse {
+        path: shown(&path, &home),
+        parent,
+        exists: false,
+        denied: false,
+        git: false,
+        dirs: vec![],
+        more: false,
+    };
+    if !path.starts_with('/') || !Path::new(&path).is_dir() {
+        return out;
+    }
+    out.exists = true;
+    out.git = Path::new(&join_path(&path, ".git")).exists();
+    let Ok(read) = std::fs::read_dir(&path) else {
+        out.denied = true;
+        return out;
+    };
+    let mut names: Vec<String> = read
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| !n.starts_with('.'))
+        .collect();
+    names.sort_by_key(|n| n.to_lowercase());
+    out.more = names.len() > BROWSE_MAX;
+    out.dirs = names
+        .into_iter()
+        .take(BROWSE_MAX)
+        .map(|n| {
+            let p = join_path(&path, &n);
+            BrowseDirEntry {
+                name: n,
+                path: shown(&p, &home),
+                git: Path::new(&join_path(&p, ".git")).exists(),
+            }
+        })
+        .collect();
+    out
+}
+
+/// Inspect a host directory for project registration or AI description drafting.
+pub fn describe_dir(raw: &str, with_readme: bool) -> ApiResult<DescribeDirResponse> {
+    let resolved = normalize(&expand(raw));
+    let p = Path::new(&resolved);
+    let exists = p.exists();
+    let is_dir = p.is_dir();
+    if !exists {
+        return Ok(DescribeDirResponse {
+            resolved_path: resolved,
+            exists: false,
+            is_dir: false,
+            git: false,
+            files: vec![],
+            readmes: vec![],
+        });
+    }
+    let git = is_dir && Path::new(&join_path(&resolved, ".git")).exists();
+    if !with_readme {
+        return Ok(DescribeDirResponse {
+            resolved_path: resolved,
+            exists: true,
+            is_dir,
+            git,
+            files: vec![],
+            readmes: vec![],
+        });
+    }
+    let mut names: Vec<String> = std::fs::read_dir(p)
+        .map_err(|e| Error::new(Code::Internal, fs_error_detail(&e, "scandir", &resolved)))?
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    let files: Vec<String> = names
+        .into_iter()
+        .filter(|f| !f.starts_with('.'))
+        .take(60)
+        .collect();
+    let mut readmes = vec![];
+    for f in README_FILES {
+        let fp = join_path(&resolved, f);
+        if !Path::new(&fp).exists() {
+            continue;
+        }
+        let text = std::fs::read(&fp)
+            .map_err(|e| Error::new(Code::Internal, fs_error_detail(&e, "open", &fp)))?;
+        readmes.push((
+            f.to_string(),
+            utf16_slice(&String::from_utf8_lossy(&text), README_CHARS),
+        ));
+    }
+    Ok(DescribeDirResponse {
+        resolved_path: resolved,
+        exists: true,
+        is_dir: true,
+        git,
+        files,
+        readmes,
+    })
+}
+
+/// Check whether `raw` exists and is a directory on this machine, returning its canonical path.
+pub fn path_check(raw: &str) -> PathCheckResponse {
+    let p = PathBuf::from(expand(raw));
+    match std::fs::canonicalize(&p) {
+        Ok(canon) => {
+            let is_dir = canon.is_dir();
+            let writable = is_dir && crate::workspace::usable(&canon);
+            PathCheckResponse {
+                exists: true,
+                is_dir,
+                canonical: Some(canon.to_string_lossy().into_owned()),
+                writable,
+            }
+        }
+        Err(_) => PathCheckResponse {
+            exists: p.exists(),
+            is_dir: p.is_dir(),
+            canonical: None,
+            writable: false,
+        },
+    }
+}
+
+/// Tracks owner-initiated project creation and git clone operations on the colocated Node.
+pub struct SetupManager {
+    statuses: Mutex<HashMap<OperationId, ProjectSetupStatus>>,
+    clones: Arc<Semaphore>,
+}
+
+impl Default for SetupManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SetupManager {
+    pub fn new() -> Self {
+        Self {
+            statuses: Mutex::new(HashMap::new()),
+            clones: Arc::new(Semaphore::new(MAX_CONCURRENT_CLONES)),
+        }
+    }
+
+    pub fn preview(&self, req: &ProjectSetupPreviewRequest) -> ProjectSetupPreview {
+        let expanded = expand(&req.parent);
+        match destination(Path::new(&expanded), &req.directory) {
+            Ok(path) => ProjectSetupPreview::Ready {
+                path: path
+                    .into_os_string()
+                    .into_string()
+                    .expect("UTF-8 destination"),
+            },
+            Err(error) => ProjectSetupPreview::Failed { error },
+        }
+    }
+
+    fn record(&self, status: ProjectSetupStatus) {
+        let mut map = self.statuses.lock().unwrap_or_else(|e| e.into_inner());
+        if map.len() >= MAX_SETUP_STATUSES {
+            map.retain(|_, s| !s.is_terminal());
+        }
+        map.insert(status.operation.clone(), status);
+    }
+
+    pub fn status(&self, op: &OperationId) -> ApiResult<ProjectSetupStatus> {
+        self.statuses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(op)
+            .cloned()
+            .ok_or_else(|| Error::new(Code::Invalid, "no such project setup operation"))
+    }
+
+    pub async fn start(
+        self: &Arc<Self>,
+        op: OperationId,
+        req: ProjectSetupRequest,
+    ) -> ApiResult<ProjectSetupStatus> {
+        if let Some(existing) = self
+            .statuses
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&op)
+            .cloned()
+        {
+            return Ok(existing);
+        }
+        let parent_expanded = expand(&req.parent);
+        let directory = req.directory.clone();
+        let target = tokio::task::spawn_blocking(move || {
+            destination(Path::new(&parent_expanded), &directory)
+        })
+        .await
+        .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
+        let target = match target {
+            Ok(p) => p,
+            Err(error) => {
+                let st = ProjectSetupStatus {
+                    operation: op,
+                    phase: "failed".into(),
+                    percent: None,
+                    path: None,
+                    error: Some(error),
+                };
+                self.record(st.clone());
+                return Ok(st);
+            }
+        };
+        let target_str = target
+            .clone()
+            .into_os_string()
+            .into_string()
+            .expect("UTF-8 destination");
+        if target_str != req.preview {
+            return Err(Error::new(
+                Code::Conflict,
+                "project setup preview no longer matches destination",
+            ));
+        }
+
+        match req.mode {
+            ProjectSetupMode::Empty => {
+                let target_for_create = target.clone();
+                let res = tokio::task::spawn_blocking(move || create_empty(&target_for_create))
+                    .await
+                    .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
+                let st = match res {
+                    Ok(()) => ProjectSetupStatus {
+                        operation: op,
+                        phase: "done".into(),
+                        percent: Some(100),
+                        path: Some(target_str),
+                        error: None,
+                    },
+                    Err(error) => ProjectSetupStatus {
+                        operation: op,
+                        phase: "failed".into(),
+                        percent: None,
+                        path: None,
+                        error: Some(error),
+                    },
+                };
+                self.record(st.clone());
+                Ok(st)
+            }
+            ProjectSetupMode::Clone { remote, branch } => {
+                let remote = match Remote::new(remote) {
+                    Ok(r) => r,
+                    Err(error) => {
+                        let st = ProjectSetupStatus {
+                            operation: op,
+                            phase: "failed".into(),
+                            percent: None,
+                            path: None,
+                            error: Some(error),
+                        };
+                        self.record(st.clone());
+                        return Ok(st);
+                    }
+                };
+                let branch = match branch
+                    .filter(|b| !b.is_empty())
+                    .map(Branch::new)
+                    .transpose()
+                {
+                    Ok(b) => b,
+                    Err(error) => {
+                        let st = ProjectSetupStatus {
+                            operation: op,
+                            phase: "failed".into(),
+                            percent: None,
+                            path: None,
+                            error: Some(error),
+                        };
+                        self.record(st.clone());
+                        return Ok(st);
+                    }
+                };
+                let permit = self
+                    .clones
+                    .clone()
+                    .try_acquire_owned()
+                    .map_err(|_| Error::later(Code::Busy, "too many concurrent clones"))?;
+                let target_for_stage = target.clone();
+                let staging = tokio::task::spawn_blocking(move || Staging::new(&target_for_stage))
+                    .await
+                    .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
+                let staging = match staging {
+                    Ok(s) => s,
+                    Err(error) => {
+                        let st = ProjectSetupStatus {
+                            operation: op,
+                            phase: "failed".into(),
+                            percent: None,
+                            path: None,
+                            error: Some(error),
+                        };
+                        self.record(st.clone());
+                        return Ok(st);
+                    }
+                };
+                let initial = ProjectSetupStatus {
+                    operation: op.clone(),
+                    phase: "connecting".into(),
+                    percent: None,
+                    path: None,
+                    error: None,
+                };
+                self.record(initial.clone());
+                let mgr = self.clone();
+                tokio::spawn(async move {
+                    let _permit = permit;
+                    let clone_res = staging
+                        .clone_repo(remote, branch, |phase, percent| {
+                            mgr.record(ProjectSetupStatus {
+                                operation: op.clone(),
+                                phase: phase.into(),
+                                percent: Some(percent),
+                                path: None,
+                                error: None,
+                            });
+                        })
+                        .await;
+                    let final_res = match clone_res {
+                        Ok(()) => {
+                            let target_pub = target.clone();
+                            tokio::task::spawn_blocking(move || staging.publish(&target_pub))
+                                .await
+                                .map_err(|_| SetupError::Filesystem)
+                                .and_then(|r| r)
+                        }
+                        Err(e) => Err(e),
+                    };
+                    let terminal = match final_res {
+                        Ok(()) => ProjectSetupStatus {
+                            operation: op,
+                            phase: "done".into(),
+                            percent: Some(100),
+                            path: Some(target_str),
+                            error: None,
+                        },
+                        Err(error) => ProjectSetupStatus {
+                            operation: op,
+                            phase: "failed".into(),
+                            percent: None,
+                            path: None,
+                            error: Some(error),
+                        },
+                    };
+                    mgr.record(terminal);
+                });
+                Ok(initial)
+            }
+        }
+    }
 }
 
 pub fn destination(parent: &Path, name: &str) -> Result<PathBuf, SetupError> {

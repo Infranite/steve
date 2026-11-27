@@ -355,15 +355,52 @@ pub enum AppendSystemContext {
     CliFlag { flag: String },
 }
 
-/// What `session/new|load` carries in `_meta` for the adapter.
+/// Harness-native file-tool deny rules injected via `session/new|load` `_meta` for Steve's
+/// protected paths (`steve_confine::PROTECTED`).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectedDenySpec {
+    /// JSON object key path wrapping the deny array (e.g.
+    /// `["claudeCode", "options", "settings", "permissions", "deny"]`).
+    pub wrapper: Vec<String>,
+    /// Harness tool names bound by the deny rules (e.g. `["Read", "Edit"]`).
+    pub tools: Vec<String>,
+    /// Prefix prepended before an absolute path in the harness's rule syntax (e.g. `"/"` so
+    /// `/a/b` becomes `//a/b`).
+    #[serde(default)]
+    pub abs_prefix: String,
+    /// Suffix appended to protected directory entries (e.g. `"/**"`).
+    #[serde(default)]
+    pub dir_suffix: String,
+}
+
+/// Visual brand mark identifier rendered by the Web UI for a harness or model maker.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum SessionMeta {
+pub enum BrandMark {
+    Anthropic,
+    Openai,
+    Google,
+    Github,
+    Anysphere,
+    Moonshot,
+    Mistral,
+    Sst,
+    Alibaba,
+    Tencent,
+    #[default]
+    Other,
+}
+
+/// Harness-native settings merged into a session's isolated state directory before launch.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StateSettings {
     #[default]
     None,
-    /// claude-agent-acp's `claudeCode.options.settings`: its file tools denied Steve's secret
-    /// files in every permission mode.
-    ClaudeSettings,
+    /// Antigravity CLI's `<state_target>/settings.json` (`permissions`) and
+    /// `<state_root>/config/config.json` (`userSettings.globalPermissionGrants`, read by
+    /// `agy acp`): allows `mcp(steve/*)` while preserving user settings and rules.
+    AntigravitySettings,
 }
 
 /// Arguments the adapter is started with beyond its declared `args`.
@@ -511,7 +548,8 @@ pub enum NativeApprovalFallback {
 }
 
 impl AdapterProperties {
-    /// Native auto is opt-in. An alias for Ask or Full Access is not a native auto mode.
+    /// Native auto is opt-in and must resolve to a distinct ACP mode, never an alias for Ask or
+    /// Full Access.
     pub fn native_approval(&self) -> Option<NativeApprovalFallback> {
         let mode = self.modes.auto.as_str();
         if self.native_execution
@@ -590,7 +628,17 @@ adapter_properties! {
     /// The variable that receives the configured harness executable (`claude_executable`).
     executable_env: Option<String> = None => Option<String>, "Option::is_none", optional_string;
 
-    session_meta: SessionMeta = SessionMeta::None => Option<SessionMeta>, "Option::is_none", copied;
+    /// Harness-native file-tool deny rules injected into `session/new|load` `_meta` for Steve's
+    /// protected paths (`steve_confine::PROTECTED`).
+    protected_deny: Option<ProtectedDenySpec> = None => Option<ProtectedDenySpec>, "Option::is_none", state;
+    /// Visual brand mark identifier rendered by the Web UI.
+    brand_mark: BrandMark = BrandMark::Other => Option<BrandMark>, "Option::is_none", copied;
+    /// Model-id prefixes stripped when rendering compact model labels for this harness.
+    model_strip_prefixes: Vec<String> = vec![] => Option<Vec<String>>, "Option::is_none", cloned;
+    /// Key prefix (`"<prefix>:<path>"`) used when indexing local transcripts of this harness.
+    history_prefix: Option<String> = None => Option<String>, "Option::is_none", trimmed_string;
+
+    state_settings: StateSettings = StateSettings::None => Option<StateSettings>, "Option::is_none", copied;
 
     launch_extra: LaunchExtra = LaunchExtra::None => Option<LaunchExtra>, "Option::is_none", copied;
     /// Discovery asks it `initialize` and opens a scratch session (`ACP initialize probe`), at most every half

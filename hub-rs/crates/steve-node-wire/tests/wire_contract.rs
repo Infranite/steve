@@ -10,7 +10,7 @@ use serde_json::json;
 use steve_node_api::testkit::{FakeNode, RecordingSink, build::*};
 use steve_node_api::*;
 use steve_node_wire::RemoteSink;
-use steve_node_wire::methods::Lane;
+use steve_node_wire::methods::{self, Lane};
 
 fn op(s: &str) -> OperationId {
     OperationId::new(s).unwrap()
@@ -267,7 +267,7 @@ async fn live_capacity_round_trips_and_reports_the_executor_value() {
 }
 
 #[tokio::test]
-async fn controlled_install_requires_a_colocated_current_node_and_serves_the_new_face() {
+async fn controlled_install_serves_both_remote_and_colocated_nodes_over_the_new_face() {
     let fake = FakeNode::new("n1");
     let w = wire(fake, 1);
     let command = cmd(
@@ -276,17 +276,17 @@ async fn controlled_install_requires_a_colocated_current_node_and_serves_the_new
             harness: "pi".into(),
         },
     );
-    assert_eq!(
-        w.remote
-            .install_harness(command.clone())
-            .await
-            .unwrap_err()
-            .code,
-        Code::Forbidden
+    // A separate Node reaches the Node's own `install_harness` face (where `LocalNode` enforces
+    // its local execution policy ceiling), rather than rejecting before the wire or falling back
+    // to filesystem operations on the Hub.
+    let error = w.remote.install_harness(command.clone()).await.unwrap_err();
+    assert_eq!(error.code, Code::Unsupported);
+    assert!(
+        error
+            .safe_detail
+            .contains("controlled harness installation unsupported")
     );
     w.remote.set_colocated(true);
-    // An up-to-date transport reaches the fake Node's default Unsupported face, rather than
-    // sending arbitrary npm arguments or falling back to filesystem operations on the Hub.
     let error = w.remote.install_harness(command).await.unwrap_err();
     assert_eq!(error.code, Code::Unsupported);
     assert!(
@@ -309,6 +309,7 @@ async fn component_integrity_and_other_installation_evidence_survive_the_wire() 
         state: SetupState::Ready,
         components: vec![component.clone()],
         can_install: false,
+        blocked_reason: None,
         reason: None,
         help: None,
         error: None,
@@ -426,5 +427,64 @@ async fn a_removal_is_begun_confirmed_and_asked_about_over_the_link() {
     assert_eq!(
         fake.removal_calls(),
         vec![("begin", op.clone()), ("commit", op.clone())]
+    );
+}
+
+/// Security: a paired remote Node (`NodeServer::new`) refuses every host, disk-housekeeping,
+/// project-setup, and stdio-MCP RPC even when a compromised Hub sends raw wire frames directly.
+#[tokio::test]
+async fn remote_node_server_refuses_all_host_disk_and_mcp_rpcs() {
+    let fake = FakeNode::new("n_remote");
+    let w = wire(fake, 1);
+    for method in [
+        methods::HOST_BROWSE_DIR,
+        methods::HOST_DESCRIBE_DIR,
+        methods::HOST_PATH_CHECK,
+        methods::HOST_PROJECT_SETUP_PREVIEW,
+        methods::HOST_PROJECT_SETUP_START,
+        methods::HOST_PROJECT_SETUP_STATUS,
+        methods::WORKSPACE_DISK_INSPECT,
+        methods::WORKSPACE_DISK_RECLAIM,
+        methods::MCP_STDIO_LIST,
+        methods::MCP_STDIO_CALL,
+        methods::MCP_STDIO_SWEEP,
+    ] {
+        let err = w
+            .hub_conn
+            .call(method, json!({}), None)
+            .await
+            .expect_err(&format!("{method} must be refused on remote NodeServer"));
+        assert_eq!(
+            err.code,
+            Code::Forbidden,
+            "{method} expected Forbidden, got {err}"
+        );
+    }
+}
+
+/// N4: `Discovery::cached_capabilities()` returns the live link generation's probed capabilities
+/// in O(1) without sending repeat `harness.probe` RPCs on every model/research preflight.
+#[tokio::test]
+async fn discovery_cached_capabilities_avoids_repeat_probe_rpcs() {
+    let fake = FakeNode::new("n_cached");
+    let w = wire(fake, 1);
+    let disc: &dyn Discovery = &*w.remote;
+    assert!(
+        disc.cached_capabilities().is_none(),
+        "uncached before first probe"
+    );
+    let probed = disc.probe(false).await.unwrap();
+    let cached = disc
+        .cached_capabilities()
+        .expect("cached immediately after initial probe");
+    assert_eq!(cached.node, probed.node);
+    assert_eq!(cached.version, probed.version);
+    assert_eq!(cached.capacity.jobs, probed.capacity.jobs);
+    assert_eq!(cached.features, probed.features);
+    // Closing the link invalidates the cached generation so stale capabilities are never served.
+    w.hub_conn.close(None, 1000, "closed");
+    assert!(
+        disc.cached_capabilities().is_none(),
+        "closed link must not return stale cached capabilities"
     );
 }

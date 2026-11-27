@@ -914,45 +914,91 @@ impl Calendar {
         self.task().await;
     }
 
-    /// The background job as a supervised periodic [`steve_runtime::Task`].
+    /// The background job as a supervised [`steve_runtime::Task`] driven by [`steve_runtime::due::due_loop`].
     pub fn task(self) -> steve_runtime::Task {
         let clock = self.0.m.clock.clone();
-        steve_runtime::every(
+        let source = Arc::new(CalendarDueSource(self));
+        let backoff = steve_runtime::policy::Backoff {
+            base: std::time::Duration::from_secs(5),
+            max: std::time::Duration::from_secs(60),
+            factor: 2,
+            jitter: steve_runtime::policy::Jitter::Equal,
+            attempts: None,
+            reset_after: None,
+        };
+        steve_runtime::spawn(
             "calendar.sync",
-            clock,
-            std::time::Duration::from_secs(60),
-            steve_runtime::FirstRun::Immediate,
-            move || {
-                let cal = self.clone();
-                async move {
-                    cal.tick().await;
-                }
-            },
+            steve_runtime::due::due_loop(
+                source,
+                clock,
+                Arc::new(tokio::sync::Notify::new()),
+                backoff,
+            ),
         )
     }
 
     /// One round of [`Calendar::run`]: syncs the connections that are due.
     pub async fn tick(&self) {
-        let rows = match self.0.m.store.read(|r| Connections::new(r).live_sources()) {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!("calendar sync: connections not read: {e}");
-                return;
-            }
-        };
         let now = self.now();
-        for r in rows
+        if let Err(e) = self.run_due_connections(now).await {
+            tracing::warn!("calendar sync: {e}");
+        }
+    }
+
+    fn next_due_connection(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        let rows = self
+            .0
+            .m
+            .store
+            .read(|r| Connections::new(r).live_sources())
+            .map_err(|e| steve_runtime::due::DueError(format!("connections not read: {e}")))?;
+        let live: Vec<_> = rows
             .into_iter()
             .filter(|r| self.0.sources.contains_key(&r.adapter))
-        {
-            let (next, fails) = lock(&self.0.due).get(&r.id).copied().unwrap_or((0, 0));
-            if next > now {
-                continue;
-            }
+            .collect();
+        self.0
+            .deadlines
+            .retain_live(live.iter().map(|r| r.id.as_str()));
+        let live_ids: HashSet<&str> = live.iter().map(|r| r.id.as_str()).collect();
+        lock(&self.0.failures).retain(|id, _| live_ids.contains(id.as_str()));
+        let earliest = live
+            .iter()
+            .map(|r| self.0.deadlines.not_before(&r.id).unwrap_or(0))
+            .min();
+        Ok(earliest)
+    }
+
+    async fn run_due_connections(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        let rows = self
+            .0
+            .m
+            .store
+            .read(|r| Connections::new(r).live_sources())
+            .map_err(|e| steve_runtime::due::DueError(format!("connections not read: {e}")))?;
+        let mut due: Vec<_> = rows
+            .into_iter()
+            .filter(|r| self.0.sources.contains_key(&r.adapter))
+            .filter_map(|r| {
+                let at = self.0.deadlines.not_before(&r.id).unwrap_or(0);
+                (at <= now).then_some((at, r))
+            })
+            .collect();
+        due.sort_by_key(|(at, _)| *at);
+        for (_, r) in due {
             let s = self.settings();
             let res = self.sync_connection(&r.workspace_id, &r.id, false).await;
             let ok = matches!(&res, Ok(rep) if rep.errors.is_empty());
-            let fails = if ok { 0 } else { fails.saturating_add(1) };
+            let fails = {
+                let mut map = lock(&self.0.failures);
+                if ok {
+                    map.remove(&r.id);
+                    0
+                } else {
+                    let next = map.get(&r.id).copied().unwrap_or(0).saturating_add(1);
+                    map.insert(r.id.clone(), next);
+                    next
+                }
+            };
             let wait = if ok {
                 s.poll_ms
             } else {
@@ -961,8 +1007,25 @@ impl Calendar {
             if let Err(e) = &res {
                 tracing::warn!(connection = %r.id, "calendar sync failed: {e}");
             }
-            lock(&self.0.due).insert(r.id.clone(), (self.now() + wait, fails));
+            self.0.deadlines.defer(r.id.clone(), self.now() + wait);
         }
+        Ok(())
+    }
+}
+
+struct CalendarDueSource(Calendar);
+
+impl steve_runtime::due::DueSource for CalendarDueSource {
+    fn name(&self) -> &'static str {
+        "calendar.sync"
+    }
+
+    async fn next_due(&self) -> Result<Option<i64>, steve_runtime::due::DueError> {
+        self.0.next_due_connection()
+    }
+
+    async fn run_due(&self, now: i64) -> Result<(), steve_runtime::due::DueError> {
+        self.0.run_due_connections(now).await
     }
 }
 

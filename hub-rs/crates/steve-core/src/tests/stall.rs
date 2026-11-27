@@ -133,3 +133,59 @@ fn drop_gives_the_item_up() {
     assert_eq!(k.item_label(&i), "drop");
     assert_eq!(k.db().session(&s).unwrap().unwrap().status, "ended");
 }
+
+#[test]
+fn turn_stall_stop_reason_is_not_attributed_to_user_in_stall_watch_or_diagnostics() {
+    use steve_types::orchestration::{
+        STOP_REASON_STALL_NO_PROGRESS, STOP_REASON_STALL_REPEATED_FAILURE,
+    };
+
+    for (stop_reason, expected_zh, expected_en) in [
+        (
+            STOP_REASON_STALL_NO_PROGRESS,
+            "可观察执行时间内无可核实进展，Steve 已请求停止",
+            "No verified progress within the observable window; Steve requested a stop",
+        ),
+        (
+            STOP_REASON_STALL_REPEATED_FAILURE,
+            "同一工具操作连续累计失败五次，Steve 已请求停止",
+            "The same tool action failed five times; Steve requested a stop",
+        ),
+    ] {
+        let k = Kit::new();
+        let i = k.item("run", "执行", None);
+        let s = k.session(&i, "idle");
+        k.rt.prompt(&s, "做事", "me", &[]).unwrap();
+        let prompts_before = k.rt.prompts_of(&s).len();
+        k.rt.end_turn(&k.core, &s, stop_reason, None);
+
+        // Must never be attributed to the user, and must not trigger Steve takeover on turn end.
+        assert_eq!(k.rt.prompts_of(&s).len(), prompts_before);
+        let kept = k.db().store().sessions().stop(&s).unwrap().unwrap();
+        assert!(!kept.yours, "{kept:?}");
+        assert!(!crate::turn_wait::yours(&kept), "{kept:?}");
+        assert!(!crate::turn_wait::held(&kept), "{kept:?}");
+        assert!(crate::turn_wait::stall_reason(&kept).is_some(), "{kept:?}");
+
+        // Diagnostic snapshot reports real stall reason and yours=false in both zh-CN and en.
+        let snap_zh = k.core.diagnostic_snapshot(&i).unwrap();
+        assert_eq!(snap_zh["last_stop"]["yours"], false);
+        assert_eq!(snap_zh["last_stop"]["reason"], stop_reason);
+        assert_eq!(snap_zh["last_stop"]["why"], expected_zh);
+        let snap_en = steve_i18n::with("en", || k.core.diagnostic_snapshot(&i).unwrap());
+        assert_eq!(snap_en["last_stop"]["yours"], false);
+        assert_eq!(snap_en["last_stop"]["reason"], stop_reason);
+        assert_eq!(snap_en["last_stop"]["why"], expected_en);
+
+        // Idle stall watch opens a card with the real stall reason (never "你中断了这一回合")
+        // and does not auto-continue via takeover.
+        assert_eq!(
+            k.core.tx().check_stalls(later()).unwrap(),
+            std::slice::from_ref(&i)
+        );
+        assert_eq!(k.rt.prompts_of(&s).len(), prompts_before);
+        let d = &stall_cards(&k, &i)[0];
+        assert_eq!(d.question, format!("它停下了：{expected_zh}"));
+        assert!(!d.question.contains("你中断了这一回合"));
+    }
+}

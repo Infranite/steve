@@ -349,6 +349,13 @@ pub trait AgentRuntime: Send + Sync {
         let _ = session_id;
         false
     }
+    /// Whether `session_id`'s working directory `cwd` is currently usable on its executing Node.
+    /// Returns `true` by default for test/in-memory runtimes or when the Node is unreachable
+    /// (offline handling is reported separately via queueing/node_offline).
+    fn cwd_usable(&self, session_id: &str, cwd: &str) -> bool {
+        let _ = (session_id, cwd);
+        true
+    }
     /// The session's backend recovers it after a restart by itself (a Node's reconcile settles its
     /// attempts and expires its own cards; a parked one waits for its Node): boot recovery leaves it
     /// alone, with no notice, no failure card and no resume.

@@ -433,6 +433,13 @@ async fn custom_commands_and_remote_owner_ceiling_are_never_overwritten() {
     let mut t = Fixture::new();
     t.config.ceiling = PolicyCeiling::default();
     let n = t.node();
+    let caps = n.probe(false).await.unwrap();
+    let setup = caps.harnesses[0].setup.as_ref().unwrap();
+    assert!(!setup.can_install);
+    assert_eq!(
+        setup.blocked_reason,
+        Some(HarnessUpgradeBlockReason::ExecDenied)
+    );
     assert_eq!(
         n.install_harness(command("install_denied"))
             .await

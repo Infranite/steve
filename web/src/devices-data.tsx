@@ -1,16 +1,18 @@
 /* What the devices pages read, once for all of their tabs: the device rows, the Node registry, the access view, every
- * Node's vitals and the Hub's defaults for Nodes (upgrade policy and its waits, personal agent config). Each keeps its
- * last good answer (also across tab changes, which remount the page) and says when a later read failed, so a failure
- * is never shown as an empty list. The Hub's stream says when a Node or a client changed (`node`, `client` events) and
- * they are read again at once. Nodes and devices refresh every 10 seconds while visible for live counters that
- * lack change events. Per-Node harness reports are read with them and can be explicitly
- * reprobed on a Node's page; vitals are read every minute (the Hub samples once a minute). */
+ * Node's vitals, the Hub's health (owner only), and the Hub's defaults for Nodes (upgrade policy and its waits,
+ * personal agent config). Each keeps its last good answer (also across tab changes, which remount the page) and says
+ * when a later read failed, so a failure is never shown as an empty list. The Hub's stream says when a Node or a
+ * client changed (`node`, `client` events) and they are read again at once. Nodes and devices refresh every 10 seconds
+ * while visible for live counters that lack change events. Per-Node harness reports are read with them and can be
+ * explicitly reprobed on a Node's page; vitals and health are read every minute (the Hub samples once a minute). */
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react"
 import { useQuery } from "@tanstack/react-query"
-import { api, type RDevice, type RNodeHarnessReport, type RUpgradeDefault, type RVitals } from "@/api"
+import { api, HubError, type RDevice, type RNodeHarnessReport, type RUpgradeDefault, type RVitals } from "@/api"
 import { access, type AccessView } from "@/api/access"
+import { systemApi } from "@/api/system"
 import { qc, scopeKey } from "@/data/sync"
 import { nodeViews, type NodeView } from "@/device-model"
+import type { HubHealth } from "@/health"
 import { st, useHubEvents, useStore } from "@/store"
 
 const EVERY = 10_000, VITALS_EVERY = 60_000
@@ -18,6 +20,7 @@ type Defaults = { upgrade: RUpgradeDefault | null; context: "on" | "off" | null 
 let lastDevices: RDevice[] | null = null, lastAccess: AccessView | null = null
 let lastVitals: Record<string, RVitals> | null = null, lastDefaults: Defaults | null = null
 let lastHarnesses: Record<string, RNodeHarnessReport> | null = null
+let lastHealth: HubHealth | null = null
 
 /** reads `load` now, again every `every` ms (10 s) while the page is visible, and at once when it becomes visible again */
 function usePoll<T>(load: () => Promise<T>, initial: T | null, keep: (v: T) => void, deps: unknown[] = [], every = EVERY) {
@@ -59,6 +62,9 @@ export type DevicesData = {
   /** every Node's day of samples, by Node id; null until read once */
   vitals: Record<string, RVitals> | null
   vitalsError: string
+  /** Hub system health (15m summary for owner only); null for non-owners or before first read */
+  health: HubHealth | null
+  healthError: string
   /** the Hub's upgrade policy for Nodes and how long an upgrade waits; null when it could not be read */
   upgradeDefault: RUpgradeDefault | null
   /** the Hub's default for loading a Node owner's personal agent config; null when it could not be read */
@@ -66,6 +72,8 @@ export type DevicesData = {
   reloadNodes: () => void
   reloadAccess: () => void
   reloadDefaults: () => void
+  reloadHealth: () => void
+  replaceHealth: (v: HubHealth) => void
 }
 const Ctx = createContext<DevicesData | null>(null)
 
@@ -87,6 +95,48 @@ export function DevicesProvider({ children }: { children: ReactNode }) {
   /* the owner lists every member's clients; the Hub answers anyone else with their own */
   const acc = usePoll(() => access.get(st.owner), lastAccess, (v) => { lastAccess = v }, [st.owner])
   const vit = usePoll(async () => (await api.vitals()).nodes, lastVitals, (v) => { lastVitals = v }, [], VITALS_EVERY)
+  /* system health is owner-only; non-owners issue zero /api/system/health requests and 403 stays quiet */
+  const [healthState, setHealthState] = useState<{ value: HubHealth | null; error: string }>(() => ({
+    value: st.owner ? lastHealth : null,
+    error: "",
+  }))
+  const [healthRev, setHealthRev] = useState(0)
+  useEffect(() => {
+    if (!st.owner) {
+      lastHealth = null
+      setHealthState({ value: null, error: "" })
+      return
+    }
+    let live = true, busy = false, timer: ReturnType<typeof setTimeout> | undefined
+    const read = async () => {
+      if (!live || busy) return
+      if (document.hidden) { timer = setTimeout(() => void read(), VITALS_EVERY); return }
+      busy = true
+      try {
+        const v = await systemApi.health("15m")
+        if (live) { lastHealth = v; setHealthState({ value: v, error: "" }) }
+      } catch (e) {
+        if (!live) return
+        if (e instanceof HubError && e.status === 403) {
+          lastHealth = null
+          setHealthState({ value: null, error: "" })
+        } else {
+          setHealthState((prev) => ({ value: prev.value, error: (e as Error).message }))
+        }
+      } finally {
+        if (live) { busy = false; timer = setTimeout(() => void read(), VITALS_EVERY) }
+      }
+    }
+    const visible = () => { if (!document.hidden && !busy) { clearTimeout(timer); void read() } }
+    void read()
+    document.addEventListener("visibilitychange", visible)
+    return () => { live = false; clearTimeout(timer); document.removeEventListener("visibilitychange", visible) }
+  }, [st.owner, healthRev])
+  const reloadHealth = useCallback(() => setHealthRev((x) => x + 1), [])
+  const replaceHealth = useCallback((v: HubHealth) => {
+    lastHealth = v
+    setHealthState({ value: v, error: "" })
+  }, [])
   /* the defaults change only when someone sets them: read once, again after a change; each may be refused on its own */
   const defs = usePoll<Defaults>(async () => {
     const [upgrade, context] = await Promise.all([api.nodeUpgradeDefault().catch(() => null), api.nodeContextDefault().then((r) => r.owner_context, () => null)])
@@ -110,8 +160,9 @@ export function DevicesProvider({ children }: { children: ReactNode }) {
     harnesses: harnesses.value, harnessesError: harnesses.error,
     refreshHarnesses,
     access: acc.value, accessError: acc.error, hubVersion, vitals: vit.value, vitalsError: vit.error,
+    health: healthState.value, healthError: healthState.error,
     upgradeDefault: defs.value?.upgrade ?? null, contextDefault: defs.value?.context ?? null,
-    reloadNodes, reloadAccess: acc.reload, reloadDefaults: defs.reload,
+    reloadNodes, reloadAccess: acc.reload, reloadDefaults: defs.reload, reloadHealth, replaceHealth,
   }
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

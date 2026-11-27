@@ -9,9 +9,9 @@ use regex::Regex;
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
-pub use steve_acp::{Image, OneShotError};
 pub use steve_modules::gateway::{GatewayError, TimeoutPhase};
 pub use steve_node_api::UsageReport;
+pub use steve_node_api::{Image, OneShotError};
 pub use steve_store::ModelUsage;
 
 /// "fast" is for routing and other short calls, "smart" for answers and drafts.
@@ -252,6 +252,7 @@ fn call_error(e: OneShotError) -> CoreError {
                 msg(OneShotError::Unsupported(cap).to_string())
             }
         }
+        OneShotError::LocalNodeUpdating => GatewayError::LocalNodeUpdating.into(),
         OneShotError::Io(e) => CoreError::Io(e),
     }
 }
@@ -1644,6 +1645,14 @@ pub async fn answer(
                 }
             }
         }
+        Err(CoreError::Gateway(GatewayError::LocalNodeUpdating)) => Answer {
+            text: steve_i18n::stored(|| steve_i18n::t!("core.node.local_updating")),
+            thought: String::new(),
+            offer: None,
+            model: None,
+            failed: true,
+            needs_tools: false,
+        },
         Err(e) => Answer {
             text: format!("（回答失败：{}）", js_head(&e.to_string(), 80)),
             thought: String::new(),

@@ -1,0 +1,1 @@
+{"type":"steve.progress","ws":"workspace-a","mid":"message-1","run":"run-1","started_at":10,"at":20,"body":{"kind":"subtask","subtask":{"id":"sub-1","origin":"subagent","status":"running","title":"Explore crate","actor":"Explore","progress":"Reading files","summary":"Done reading","error":"none","started_at":12,"duration_ms":45}}}

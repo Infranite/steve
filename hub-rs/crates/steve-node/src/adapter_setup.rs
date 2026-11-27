@@ -257,14 +257,26 @@ pub(crate) fn setup(
     } else {
         None
     };
+    let blocked_reason = if !inner.cfg.ceiling.exec {
+        Some(HarnessUpgradeBlockReason::ExecDenied)
+    } else if inner.node_upgrade_pending() {
+        Some(HarnessUpgradeBlockReason::NodeUpgradeInProgress)
+    } else if inner.retiring.load(std::sync::atomic::Ordering::SeqCst) {
+        Some(HarnessUpgradeBlockReason::NodeRemoving)
+    } else if maintenance.as_deref() == Some(id) {
+        Some(HarnessUpgradeBlockReason::AlreadyRunning)
+    } else if maintenance.is_some() {
+        Some(HarnessUpgradeBlockReason::MaintenanceBusy)
+    } else {
+        None
+    };
     let can_install = managed
-        && maintenance.is_none()
+        && blocked_reason.is_none()
         && busy.is_none()
         && prefix_error.is_none()
         && req.node_error.is_none()
-        && req.npm_error.is_none()
-        && inner.cfg.ceiling.exec;
-    let mut s = HarnessSetup { state: SetupState::Unknown, components: components(cfg,id), can_install, reason: None, error: None, help: Some("Install the built-in components here, then configure a model provider in the harness's state directory and refresh discovery. Custom commands and separate Nodes are managed by their operator.".into()) };
+        && req.npm_error.is_none();
+    let mut s = HarnessSetup { state: SetupState::Unknown, components: components(cfg,id), can_install, blocked_reason: managed.then_some(blocked_reason).flatten(), reason: None, error: None, help: Some("Install the built-in components here, then configure a model provider in the harness's state directory and refresh discovery. Custom commands and separate Nodes are managed by their operator.".into()) };
     if maintenance.as_deref() == Some(id)
         || last.as_ref().is_some_and(|r| {
             matches!(

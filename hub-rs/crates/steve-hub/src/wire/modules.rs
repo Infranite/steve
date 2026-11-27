@@ -292,9 +292,10 @@ pub struct Env<'a> {
     pub openviking: Option<steve_knowledge::openviking::OpenVikingConfig>,
     /// The extensions whose adapters, routes and jobs are registered.
     pub assembly: &'a crate::extension::Assembly,
-    /// The router, when the local Node is on: knowledge folders are then scanned and read by
-    /// their Node (`None`: on the Hub, as before).
+    /// The router, when the local Node is on: knowledge folders and stdio MCP servers run on it.
     pub workspaces: Option<Arc<super::workspaces::Workspaces>>,
+    /// One-shot secret grants for colocated Node stdio MCP server launches.
+    pub secrets: Option<Arc<super::node_secrets::NodeSecrets>>,
     /// Where `cmd` flow steps run when the project is on a Node (`None`: on the Hub, as before).
     pub cmd_node: Option<Arc<dyn steve_flow::nodes::cmd::CmdNode>>,
     /// Where a session's secret uses run when it works on a Node (`None`: on the Hub, as before).

@@ -6,7 +6,7 @@ import { getItems, getSessions, getSession } from "@/store"
  * the conversation the Hub finds, and contacts / teams (where the contacts module is). Keyboard first: ↑ ↓, Tab
  * between groups, ↵ runs, Esc clears and then closes. */
 import { useEffect, useState, type ReactNode } from "react"
-import { BookOpenIcon, BotIcon, Building2Icon, CalendarIcon, ListChecksIcon, TargetIcon, ChartNoAxesColumnIcon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, HistoryIcon, InboxIcon, KeyRoundIcon, ListTodoIcon, LockIcon, MailIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, NewspaperIcon, PlugIcon, PlusIcon, QrCodeIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon, UsersRoundIcon, WorkflowIcon, BlocksIcon, UploadIcon } from "lucide-react"
+import { ActivityIcon, BookOpenIcon, BotIcon, Building2Icon, CalendarIcon, ListChecksIcon, TargetIcon, ChartNoAxesColumnIcon, ContactRoundIcon, FolderIcon, GitPullRequestIcon, HistoryIcon, InboxIcon, KeyRoundIcon, ListTodoIcon, LockIcon, MailIcon, MessageCircleIcon, MessagesSquareIcon, MoonIcon, NewspaperIcon, PlugIcon, PlusIcon, QrCodeIcon, RadioIcon, ServerIcon, SettingsIcon, SquareTerminalIcon, SunIcon, UsersRoundIcon, WorkflowIcon, BlocksIcon, UploadIcon } from "lucide-react"
 import { Dialog, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { CommandMenu as Menu, type CommandGroup } from "@/components/affect/command-menu-clean"
 import { api } from "@/api"
@@ -108,7 +108,10 @@ export function CommandPalette() {
     ["devices/clients", t("devices:cmd.clients"), KeyRoundIcon],
     ["settings/tags", t("shell:cmd.page.settingsTags"), SettingsIcon],
     ["settings/workspace", t("shell:cmd.page.settingsSpace"), SettingsIcon],
-    ...(st.owner ? [["settings/audit", t("shell:cmd.page.settingsAudit"), HistoryIcon] as [string, string, typeof SettingsIcon]] : []),
+    ...(st.owner ? [
+      ["devices/monitor", t("devices:cmd.monitor"), ActivityIcon] as [string, string, typeof SettingsIcon],
+      ["settings/audit", t("shell:cmd.page.settingsAudit"), HistoryIcon] as [string, string, typeof SettingsIcon],
+    ] : []),
   ]
   const pages: CommandGroup = { id: "pages", label: t("shell:cmd.pages"), commands: pageList.map(([h, l, I]) => row("p:" + h, l, <I />, () => go("#/" + h), { data: { "data-cmd-page": h } })) }
   const items: CommandGroup = { id: "items", label: t("shell:cmd.page.items"), commands: ranked(getItems(), q).map((i) => row("i:" + i.id, i.t, <StatusDot s={i.st} />, () => go("#/items/" + i.id), { hint: i.id, mono: true, data: { "data-cmd-item": i.id } })) }

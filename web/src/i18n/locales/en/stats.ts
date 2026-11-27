@@ -292,6 +292,8 @@ export default {
     stop: {
       endTurn: "Finished",
       cancelled: "Stopped by you",
+      stallNoProgress: "Stopped (no progress)",
+      stallRepeatedFailure: "Stopped (repeated failure)",
       maxTokens: "Too long",
       refusal: "Refused",
       error: "Error",

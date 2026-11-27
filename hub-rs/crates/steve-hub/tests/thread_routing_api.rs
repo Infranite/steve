@@ -15,8 +15,12 @@ use steve_hub::config::Config;
 
 const ADAPTER_MODELS: [&str; 2] = ["fixture-smart", "fixture-fast"];
 
+#[path = "support/local_node.rs"]
+mod local_node;
+
 struct Env {
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     db: std::path::PathBuf,
     base: String,
     http: reqwest::Client,
@@ -127,8 +131,6 @@ async fn start() -> Env {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         // Route and execute only on the isolated local Node with the fixture adapter.
-        ("STEVE_NODE_MODE", "local".into()),
-        ("STEVE_NODE_LISTEN", "0".into()),
         ("STEVE_NO_RESUME", "0".into()),
         ("STEVE_LOCAL_NODE_PORT", service_port.to_string()),
         ("STEVE_BACKUP", "off".into()),
@@ -156,15 +158,14 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
     w.domain
         .harnesses(true)
         .await
         .expect("probe model catalogue");
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
-    for job in w.jobs {
-        job.start(&st.jobs);
-    }
+    local_node::start_jobs(w.jobs, &st.jobs);
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
         let _ = axum::serve(
@@ -193,6 +194,7 @@ async fn start() -> Env {
         .expect("session cookie");
     Env {
         _home: home,
+        _local_node: local_node,
         db: cfg.db_path(),
         base,
         http,
@@ -426,7 +428,11 @@ async fn take_offer_with_team_worker(enabled: bool) {
     assert_eq!(s, 200, "{v}");
     let messages = e.settle(2).await;
     let offer = &messages[1];
-    assert_eq!(offer["meta"]["offer"]["bot"], "steve", "{offer}");
+    assert_eq!(
+        offer["meta"]["offer"]["bot"],
+        json!(enabled.then_some(bot)),
+        "{offer}"
+    );
     let path = format!("/api/thread/{}/offer", offer["id"].as_str().unwrap());
     let (s, v) = e.call("POST", &path, Some(json!({"take":true}))).await;
     assert_eq!(s, 200, "{v}");
@@ -582,6 +588,151 @@ async fn taking_an_offer_keeps_the_item_when_the_default_team_has_no_eligible_bo
     take_offer_with_team_worker(false).await;
 }
 
+#[tokio::test]
+async fn taking_an_offer_allows_explicit_bot_override_and_validates_bot_input() {
+    let e = start().await;
+    let (s, bot_a) = e
+        .call(
+            "POST",
+            "/api/bots",
+            Some(json!({
+                "name":"Bot A", "harness":"claude-code", "perm_mode":"plan"
+            })),
+        )
+        .await;
+    assert_eq!(s, 200, "{bot_a}");
+    let (s, bot_b) = e
+        .call(
+            "POST",
+            "/api/bots",
+            Some(json!({
+                "name":"Bot B", "harness":"claude-code", "perm_mode":"plan"
+            })),
+        )
+        .await;
+    assert_eq!(s, 200, "{bot_b}");
+    let bot_b_id = bot_b["id"].as_str().unwrap().to_string();
+
+    let (s, bot_off) = e
+        .call(
+            "POST",
+            "/api/bots",
+            Some(json!({
+                "name":"Bot Off", "harness":"claude-code", "perm_mode":"plan"
+            })),
+        )
+        .await;
+    assert_eq!(s, 200, "{bot_off}");
+    let bot_off_id = bot_off["id"].as_str().unwrap().to_string();
+    let (s, disabled) = e
+        .call(
+            "PATCH",
+            &format!("/api/bots/{bot_off_id}"),
+            Some(json!({"enabled": false})),
+        )
+        .await;
+    assert_eq!(s, 200, "{disabled}");
+
+    let (s, v) = e
+        .call(
+            "POST",
+            "/api/thread",
+            Some(json!({"text":"评论支持 markdown 吗，你看看"})),
+        )
+        .await;
+    assert_eq!(s, 200, "{v}");
+    let messages = e.settle(2).await;
+    let offer = &messages[1];
+    assert_eq!(offer["meta"]["offer"]["state"], "open", "{offer}");
+    let path = format!("/api/thread/{}/offer", offer["id"].as_str().unwrap());
+
+    let too_long = "b".repeat(129);
+    let (s, bad) = e
+        .call("POST", &path, Some(json!({"take": true, "bot": too_long})))
+        .await;
+    assert_eq!(s, 400, "{bad}");
+
+    // Blocked explicit override returns structured placement error and keeps the offer open.
+    let (s, blocked) = e
+        .call(
+            "POST",
+            &path,
+            Some(json!({"take": true, "bot": bot_off_id})),
+        )
+        .await;
+    assert_eq!(s, 409, "{blocked}");
+    assert_eq!(blocked["placement"]["reason"], "bot", "{blocked}");
+
+    let (s, taken) = e
+        .call("POST", &path, Some(json!({"take": true, "bot": bot_b_id})))
+        .await;
+    assert_eq!(s, 200, "{taken}");
+    let item_id = taken["item"]["id"].as_str().unwrap().to_string();
+    assert_eq!(taken["item"]["bot_id"], json!(bot_b_id), "{taken}");
+
+    let (s, item_detail) = e.call("GET", &format!("/api/items/{item_id}"), None).await;
+    assert_eq!(s, 200, "{item_detail}");
+    assert_eq!(item_detail["bot_id"], json!(bot_b_id), "{item_detail}");
+
+    let (s, item_views) = e
+        .call("GET", &format!("/api/views?kind=item&ids={item_id}"), None)
+        .await;
+    assert_eq!(s, 200, "{item_views}");
+    let item_view = item_views["views"]
+        .as_array()
+        .and_then(|xs| xs.iter().find(|x| x["id"] == item_id.as_str()))
+        .expect("item view");
+    assert_eq!(item_view["bot_id"], json!(bot_b_id), "{item_view}");
+    assert_eq!(
+        item_view["placement"]["bot"],
+        json!(bot_b_id),
+        "{item_view}"
+    );
+    assert_eq!(item_view["placement"]["reason"], "explicit", "{item_view}");
+
+    let store = steve_store::Store::open(&e.db, steve_store::NoPublisher).unwrap();
+    let initial = store
+        .read(|r| steve_store::bot_dispatch::initial(r, &item_id))
+        .unwrap()
+        .expect("recorded initial placement");
+    assert_eq!(initial.explanation.bot.as_str(), bot_b_id);
+    assert_eq!(
+        initial.explanation.reason,
+        steve_types::PlacementReason::Explicit
+    );
+
+    let offer_id = offer["id"].as_str().unwrap();
+    let (s, msg_views) = e
+        .call(
+            "GET",
+            &format!("/api/views?kind=message&ids={offer_id}"),
+            None,
+        )
+        .await;
+    assert_eq!(s, 200, "{msg_views}");
+    let offer_view = msg_views["views"]
+        .as_array()
+        .and_then(|xs| xs.iter().find(|x| x["id"] == offer_id))
+        .expect("offer message view");
+    assert_eq!(
+        offer_view["meta"]["offer"]["state"], "taken",
+        "{offer_view}"
+    );
+    assert_eq!(
+        offer_view["meta"]["offer"]["bot"],
+        json!(bot_b_id),
+        "{offer_view}"
+    );
+    assert_eq!(
+        offer_view["meta"]["offer"]["reason"], "explicit",
+        "{offer_view}"
+    );
+
+    let (s, again) = e.call("POST", &path, Some(json!({"take": true}))).await;
+    assert_eq!(s, 409, "{again}");
+    assert_eq!(again["item"]["id"], json!(item_id));
+}
+
 /// While Steve answers, what is said waits (`meta.held`), can be changed or withdrawn, and goes after the
 /// turn; stop ends the answer at once and says so (ST-33).
 #[tokio::test]
@@ -594,13 +745,21 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
     let mut busy = false;
     for _ in 0..100 {
         let (_, st) = e.call("GET", "/api/summary", None).await;
-        if st["thinking"] == true {
+        if st["thinking"] == true && st["live"]["started_at"].is_i64() {
+            assert!(st["live"]["last_activity_at"].is_i64(), "{st}");
+            assert!(
+                st["live"]["run"].as_str().is_some_and(|s| !s.is_empty()),
+                "{st}"
+            );
             busy = true;
             break;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
-    assert!(busy, "the page knows Steve is on a turn");
+    assert!(
+        busy,
+        "the page knows Steve is on a turn and exposes its live snapshot"
+    );
     for t in ["排队一", "排队二"] {
         let (s, _) = e
             .call("POST", "/api/thread", Some(json!({"text": t})))
@@ -663,6 +822,11 @@ async fn messages_wait_for_the_turn_and_stop_ends_it() {
         .call("DELETE", &format!("/api/thread/queued/{one}"), None)
         .await;
     assert_eq!(s, 409, "gone once it went");
+    let (_, idle_st) = e.call("GET", "/api/summary", None).await;
+    assert!(
+        idle_st.get("live").is_none(),
+        "live clears when settled: {idle_st}"
+    );
 }
 
 /// A research run's token sees only the four read-only tools; a session token or none gets nothing.

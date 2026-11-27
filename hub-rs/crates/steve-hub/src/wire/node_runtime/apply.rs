@@ -38,6 +38,8 @@ type Kept = KeptFacts<HashMap<String, ToolFact>>;
 struct ToolFact {
     name: String,
     category: ToolCategory,
+    #[serde(default)]
+    origin: Option<ToolOrigin>,
     phase: ToolPhase,
 }
 
@@ -54,15 +56,17 @@ impl From<Kept> for AttemptFacts {
             if t.phase == ToolPhase::Failed {
                 f.tool_errors += 1;
             }
-            let bucket = match t.name.strip_prefix("mcp__steve__") {
-                Some(n) => format!("mcp:{n}"),
-                None => serde_json::to_value(t.category)
+            let is_steve = t.origin == Some(ToolOrigin::Steve) || t.category == ToolCategory::Steve;
+            let bucket = if is_steve {
+                format!("mcp:{}", t.name)
+            } else {
+                serde_json::to_value(t.category)
                     .ok()
                     .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_else(|| "other".into()),
+                    .unwrap_or_else(|| "other".into())
             };
             *f.tool_kinds.entry(bucket).or_default() += 1;
-            if !t.name.is_empty() && !t.name.starts_with("mcp__steve__") {
+            if !t.name.is_empty() && !is_steve {
                 *f.tool_kinds.entry(format!("tool:{}", t.name)).or_default() += 1;
             }
         }
@@ -108,17 +112,51 @@ impl NodeRuntime {
         Ok(())
     }
 
-    /// The diagnostic record of an adapter that exited under a session.
+    /// The diagnostic record of structured session diagnostics emitted by a Node.
     fn diagnostic_of(&self, ev: &NodeEvent) -> Option<steve_store::diagnostics::Record> {
         let EventBody::Diagnostic {
             code,
             severity,
-            details: Some(details),
+            details,
             ..
         } = &ev.body
         else {
             return None;
         };
+        let mapped_severity = match severity {
+            Severity::Info => steve_store::diagnostics::Severity::Info,
+            Severity::Warning => steve_store::diagnostics::Severity::Warning,
+            Severity::Error => steve_store::diagnostics::Severity::Error,
+        };
+        if code == AUTO_MODE_CLASSIFIER_UNAVAILABLE {
+            let session = ev_session(ev)?;
+            let attempt_id = match &ev.subject {
+                Subject::Execution(x) => Some(x.attempt().to_string()),
+                _ => None,
+            };
+            let reason_code = if matches!(severity, Severity::Error) {
+                "auto_mode_stopped"
+            } else {
+                "classifier_unavailable"
+            };
+            return Some(steve_store::diagnostics::Record {
+                session_id: Some(session),
+                attempt_id,
+                cause_id: Some(ev.id.to_string()),
+                kind: "harness.auto_mode_classifier_unavailable".into(),
+                reason_code: reason_code.into(),
+                severity: mapped_severity,
+                details: steve_store::diagnostics::Details {
+                    code: Some(AUTO_MODE_CLASSIFIER_UNAVAILABLE.into()),
+                    source_at: Some(ev.at.0),
+                    source_node: Some(self.node_id.to_string()),
+                    source_epoch: Some(ev.cursor.epoch.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }
+        let details = details.as_ref()?;
         if code != "adapter_exited" {
             return None;
         }
@@ -151,11 +189,7 @@ impl NodeRuntime {
             cause_id: Some(ev.id.to_string()),
             kind: "adapter.exited".into(),
             reason_code: "process_exit".into(),
-            severity: match severity {
-                Severity::Info => steve_store::diagnostics::Severity::Info,
-                Severity::Warning => steve_store::diagnostics::Severity::Warning,
-                Severity::Error => steve_store::diagnostics::Severity::Error,
-            },
+            severity: mapped_severity,
             details: d,
             ..Default::default()
         })
@@ -185,6 +219,14 @@ impl NodeRuntime {
                                 .max(0) as f64
                                 / 1000.0,
                         );
+                }
+                Tell::StallEval { outcome, reason } => {
+                    metrics::counter!(
+                        "steve_orchestration_stall_evaluations_total",
+                        "outcome" => outcome,
+                        "reason" => reason,
+                    )
+                    .increment(1);
                 }
                 Tell::StalledUsage(reason, tokens) => {
                     for (kind, count) in ["input", "cache_read", "cache_write", "output"]
@@ -283,6 +325,25 @@ impl NodeRuntime {
         }
     }
 
+    /// Rewrites a generic `"cancelled"` stop reason to the strongly-typed stall stop reason when
+    /// this attempt was cancelled by the Hub's stall detector.
+    pub(super) fn effective_completion_in(
+        &self,
+        w: &mut W<'_>,
+        attempt: &str,
+        completion: &Completion,
+    ) -> Result<Completion, StoreError> {
+        if completion.outcome == Outcome::Cancelled
+            && completion.stop_reason == "cancelled"
+            && let Some(stall) = self.stall_evidence_in(w, attempt)?
+        {
+            let mut out = completion.clone();
+            out.stop_reason = stall.reason.stop_reason().to_owned();
+            return Ok(out);
+        }
+        Ok(completion.clone())
+    }
+
     /// What an event means for the session row and for statistics, in `w` (before it is applied,
     /// so an attempt's start or end counts once): the context and cost it reports, the model in
     /// force, the tools and permissions of its attempt, and the attempts that begin and end.
@@ -306,7 +367,9 @@ impl NodeRuntime {
                 let mut k = facts_so_far(w, a)?;
                 let prior = k.tools.get(tool.id.as_str()).map(|fact| fact.phase);
                 if !matches!(prior, Some(ToolPhase::Succeeded | ToolPhase::Failed)) {
-                    if prior != Some(tool.phase) {
+                    if prior != Some(tool.phase)
+                        || matches!(tool.phase, ToolPhase::Pending | ToolPhase::Running)
+                    {
                         self.observe_tool_in(w, a, tool, ev)?;
                     }
                     k.tools.insert(
@@ -314,13 +377,14 @@ impl NodeRuntime {
                         ToolFact {
                             name: tool.name.clone(),
                             category: tool.category,
+                            origin: Some(tool.origin),
                             phase: tool.phase,
                         },
                     );
                 }
                 w.attempts().keep_facts(a, &k)?;
             }
-            (EventBody::SubtaskChanged { subtask }, _) => {
+            (EventBody::SubtaskChanged { subtask }, attempt) => {
                 let origin = match subtask.origin {
                     SubtaskOrigin::Subagent => "subagent",
                     SubtaskOrigin::BackgroundTask => "background_task",
@@ -340,6 +404,12 @@ impl NodeRuntime {
                     "status" => status,
                 )
                 .increment(1);
+                if let Some(a) = attempt {
+                    self.observe_subtask_in(w, a, subtask)?;
+                }
+            }
+            (EventBody::Plan { entries }, Some(a)) => {
+                self.observe_plan_in(w, a, entries)?;
             }
             (
                 EventBody::WorkspaceChanged {
@@ -458,20 +528,21 @@ impl NodeRuntime {
                 if let Some(node_turns::Attempt { state, .. }) = self.attempt_row(a)?
                     && state != "finished"
                 {
+                    let effective = self.effective_completion_in(w, a, completion)?;
                     let mut facts = take_facts(w, a)?;
                     facts.context_peak = self.context_peaks.lock().unwrap().get(a).copied();
                     let measure = super::super::acp_stats::try_node_attempt_finished(
                         &self.store,
                         &session,
                         a,
-                        completion,
+                        &effective,
                         &facts,
                         ev.at.0,
                     )?;
                     out.push(After::Finished {
                         session,
                         attempt: a.to_string(),
-                        completion: completion.clone(),
+                        completion: effective,
                         facts,
                         at: ev.at.0,
                         measure,
@@ -571,6 +642,7 @@ impl NodeRuntime {
         let active = match &ev.body {
             EventBody::ToolChanged { .. }
             | EventBody::SubtaskChanged { .. }
+            | EventBody::WorkspaceChanged { .. }
             | EventBody::PermissionRequested { .. }
             | EventBody::PermissionResolved { .. }
             | EventBody::Plan { .. } => true,
@@ -636,6 +708,7 @@ impl NodeRuntime {
                 if state == "finished" {
                     return Ok(None);
                 }
+                let effective = self.effective_completion_in(w, attempt, completion)?;
                 if let Some(stall) = self.stall_evidence_in(w, attempt)? {
                     let elapsed = self.clock.now().saturating_sub(stall.detected_at).max(0);
                     self.staged
@@ -649,7 +722,7 @@ impl NodeRuntime {
                     rev,
                     "finished",
                     None,
-                    Some(&serde_json::to_value(completion).map_err(conflict)?),
+                    Some(&serde_json::to_value(&effective).map_err(conflict)?),
                     self.clock.now(),
                 )?;
                 self.close_cards_of_attempt_in(w, attempt)?;
@@ -669,20 +742,27 @@ impl NodeRuntime {
                         &Receipt {
                             operation: idv(op)?,
                             state: Observed::Finished {
-                                outcome: completion.outcome,
-                                result: Some(OperationResult::Execution(completion.clone())),
-                                error: completion.error.clone(),
+                                outcome: effective.outcome,
+                                result: Some(OperationResult::Execution(effective.clone())),
+                                error: effective.error.clone(),
                             },
                         },
                     )?;
                 }
                 self.store_event_in(w, &s, ev)?;
-                end = self.after_attempt_in(w, &s, &turn, completion)?;
+                end = self.after_attempt_in(w, &s, &turn, &effective)?;
                 return Ok(end);
             }
             EventBody::Diagnostic { code, .. } if code == STEVE_TOOLS_MISSING => {
                 if let Some(s) = &session {
                     tools_missing_in(w, s)?;
+                }
+            }
+            EventBody::Diagnostic { code, severity, .. }
+                if code == AUTO_MODE_CLASSIFIER_UNAVAILABLE =>
+            {
+                if let Some(s) = &session {
+                    auto_mode_classifier_unavailable_in(w, s, *severity)?;
                 }
             }
             _ => {}
@@ -908,6 +988,56 @@ fn tools_missing_in(w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
             now(),
         )?;
     }
+    Ok(())
+}
+
+/// Surfaces a harness auto-mode classifier failure in the session's timeline (deduplicated per
+/// turn, allowing an initial warning to escalate once if the harness stops auto mode).
+fn auto_mode_classifier_unavailable_in(
+    w: &mut W<'_>,
+    session: &str,
+    severity: Severity,
+) -> Result<(), StoreError> {
+    let stopped = matches!(severity, Severity::Error);
+    let already = observations::has_system_code_since_turn(
+        w,
+        session,
+        AUTO_MODE_CLASSIFIER_UNAVAILABLE,
+        stopped.then_some("error"),
+    )?;
+    if already {
+        return Ok(());
+    }
+    let harness_name = observations::session_harness(w, session)?
+        .filter(|id| !id.is_empty())
+        .map(|id| steve_harness_spec::spec(&id, None).name)
+        .unwrap_or_else(|| "Harness".to_string());
+    let text = steve_i18n::stored(|| {
+        if stopped {
+            steve_i18n::t!(
+                "hub.node.auto_mode_classifier_stopped",
+                harness = harness_name.as_str()
+            )
+        } else {
+            steve_i18n::t!(
+                "hub.node.auto_mode_classifier_unavailable",
+                harness = harness_name.as_str()
+            )
+        }
+    });
+    w.events().add(
+        session,
+        "system",
+        json!({
+            "text": text,
+            "code": AUTO_MODE_CLASSIFIER_UNAVAILABLE,
+            "severity": if stopped { "error" } else { "warning" },
+            "harness": harness_name,
+            "stopped": stopped,
+        }),
+        None,
+        now(),
+    )?;
     Ok(())
 }
 

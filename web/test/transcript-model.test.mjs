@@ -81,3 +81,55 @@ test("streaming assistant tokens preserves earlier Seg identities including the 
   assert.equal(tr.turns[0].rows[2].t, "a")
   assert.ok(tr.turns[0].rows[2].evs[0][1].endsWith("tok104 "))
 })
+
+test("autoModeWarningOf tracks warning and stop escalation in the latest turn and clears on a new clean turn", () => {
+  const t0 = 1_700_000_000_000
+  const turn1 = [
+    { seq: 1, ts: t0, kind: "user", data: { text: "Run checks", via: "me" } },
+    {
+      seq: 2,
+      ts: t0 + 10,
+      kind: "system",
+      data: {
+        code: "auto_mode_classifier_unavailable",
+        severity: "warning",
+        harness: "Sample Harness",
+        stopped: false,
+        text: "Sample Harness auto mode unavailable",
+      },
+    },
+  ]
+  let tr = { turns: tm.mapTurns(turn1), oldest: null, newest: 2 }
+  assert.deepEqual(JSON.parse(JSON.stringify(tm.autoModeWarningOf(tr))), {
+    code: "auto_mode_classifier_unavailable",
+    harness: "Sample Harness",
+    stopped: false,
+    text: "Sample Harness auto mode unavailable",
+  })
+
+  // Escalating to stopped inside the same turn upgrades the warning selector
+  tr = tm.appendEvents(tr, [
+    {
+      seq: 3,
+      ts: t0 + 20,
+      kind: "system",
+      data: {
+        code: "auto_mode_classifier_unavailable",
+        severity: "error",
+        harness: "Sample Harness",
+        stopped: true,
+        text: "Sample Harness auto mode stopped",
+      },
+    },
+    { seq: 4, ts: t0 + 30, kind: "turn_end", data: { stopReason: "end_turn" } },
+  ])
+  assert.equal(tm.autoModeWarningOf(tr)?.stopped, true)
+
+  // Starting a fresh turn without the warning clears the active banner while preserving earlier turn rows
+  tr = tm.appendEvents(tr, [
+    { seq: 5, ts: t0 + 40, kind: "user", data: { text: "Retry", via: "me" } },
+    { seq: 6, ts: t0 + 50, kind: "text", data: { role: "assistant", text: "All good" } },
+  ])
+  assert.equal(tm.autoModeWarningOf(tr), null)
+  assert.equal(tr.turns[0].ev[1][2], "auto_mode_classifier_unavailable")
+})

@@ -26,8 +26,7 @@ pub use crate::state_dir::StateDirRuntime;
 
 use steve_harness_spec::{
     AdapterProperties, AdapterSpec, Component, Declaration, DefaultCommand, LaunchExtra,
-    ModeChoice, ModeMap, PermissionPolicy, SessionMeta, UsageFallback, builtin, builtins,
-    components,
+    ModeChoice, ModeMap, PermissionPolicy, UsageFallback, builtin, builtins, components,
 };
 
 fn npm_entry(pkg: &str, entry: &str, root: &Path) -> PathBuf {
@@ -956,6 +955,13 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
             "the adapter's command is missing",
         );
     }
+    let program_present = if program.components().count() > 1 || program.is_absolute() {
+        program.exists()
+    } else {
+        program.to_str().is_some_and(|name| {
+            crate::config::which_in(name, std::env::var_os("PATH").as_deref()).is_some()
+        })
+    };
     let cwd = if cwd.is_dir() {
         cwd.to_path_buf()
     } else {
@@ -964,6 +970,7 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
     let conn: Arc<Conn> = match Conn::spawn(
         Spawn {
             prefix: cfg.adapter_prefix(id),
+            harness: Some(id.to_string()),
             program,
             args,
             cwd: cwd.clone(),
@@ -980,7 +987,17 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
         || {},
     ) {
         Ok(c) => c,
-        Err(e) => return Probe::failed(ProbeStatus::AdapterMissing, e.message),
+        Err(e) => {
+            // If the adapter executable is already present on disk / service PATH, a spawn
+            // failure (e.g. permission denied, bad shebang, invalid binary) is a startup failure
+            // rather than a missing adapter.
+            let status = if program_present {
+                ProbeStatus::InitializeFailed
+            } else {
+                ProbeStatus::AdapterMissing
+            };
+            return Probe::failed(status, e.message);
+        }
     };
     let mut client_caps = json!({
         "fs": { "readTextFile": false, "writeTextFile": false },
@@ -1161,12 +1178,18 @@ impl crate::AcpConfig {
 
     /// The `_meta` of `session/new|load` for `id`'s adapter.
     pub fn session_meta(&self, id: &str) -> Option<Value> {
-        match self.adapter_properties(id).session_meta {
-            SessionMeta::None => None,
-            SessionMeta::ClaudeSettings => Some(json!({ "claudeCode": { "options": {
-                "settings": steve_vault::harness::claude_settings(&self.steve_home),
-            } } })),
-        }
+        self.adapter_properties(id)
+            .protected_deny
+            .as_ref()
+            .map(|spec| {
+                steve_vault::harness::protected_session_meta(
+                    &self.steve_home,
+                    &spec.wrapper,
+                    &spec.tools,
+                    &spec.abs_prefix,
+                    &spec.dir_suffix,
+                )
+            })
     }
 
     /// [`Self::session_meta`], with the declared `tools_off_meta` merged in when `tools_off`.
@@ -1784,9 +1807,15 @@ mod tests {
             c.session_meta_with_mode("grok-build", false, Some(PermissionMode::FullAccess)),
             Some(json!({"yoloMode": true}))
         );
-        // antigravity: native PATH binary, 4 ACP modes + --dangerously-skip-permissions only for full_access
+        // antigravity: native PATH binary, runs inside Steve's OS sandbox; auto uses native ACP
+        // `auto`, full_access launches with --dangerously-skip-permissions
         let agy = c.adapter_spec("antigravity");
         assert_eq!(agy.name, "Antigravity CLI");
+        assert!(agy.properties.nested_sandbox);
+        assert_eq!(
+            agy.properties.state_settings,
+            steve_harness_spec::StateSettings::AntigravitySettings
+        );
         assert_eq!(
             agy.properties.native_approval(),
             Some(steve_harness_spec::NativeApprovalFallback::AskOwner)
@@ -1992,6 +2021,7 @@ rl.on("line", (line) => {{
         let conn = Conn::spawn(
             Spawn {
                 prefix: None,
+                harness: Some("antigravity".into()),
                 program,
                 args,
                 cwd: dir.path().to_path_buf(),
@@ -2059,7 +2089,7 @@ rl.on("line", (line) => {{
         assert_eq!(seen_perm.lock().unwrap().as_deref(), Some("ls -la"));
         conn.kill();
 
-        // 3. Open session in FullAccess mode passes --dangerously-skip-permissions and skips set_mode
+        // 3. FullAccess mode passes --dangerously-skip-permissions and skips set_mode
         let (program, args) = c
             .adapter_command_for_mode("antigravity", Some(PermissionMode::FullAccess))
             .unwrap();
@@ -2073,6 +2103,7 @@ rl.on("line", (line) => {{
         let conn = Conn::spawn(
             Spawn {
                 prefix: None,
+                harness: Some("antigravity".into()),
                 program,
                 args,
                 cwd: dir.path().to_path_buf(),

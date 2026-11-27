@@ -78,7 +78,7 @@ impl Core {
                 self.fence_origin(ws, &origin, "reroute")?;
                 match reply {
                     Some(r) if r.meta["offer"]["state"] == "open" => {
-                        self.offer(ws, &r.id, true, by)
+                        self.offer(ws, &r.id, true, None, by)
                     }
                     Some(r) if r.item_id.is_some() => {
                         let item = self
@@ -431,7 +431,10 @@ impl Core {
             return Ok(item);
         }
         if m.meta["offer"]["state"] == "open" {
-            return self.offer(ws, msg_id, true, by)?.item.ok_or_else(refuse);
+            return self
+                .offer(ws, msg_id, true, None, by)?
+                .item
+                .ok_or_else(refuse);
         }
         if m.meta.get("chat").is_none_or(|q| !gateway::truthy(q)) {
             return Err(refuse());

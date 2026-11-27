@@ -422,7 +422,14 @@ impl WfBudgetScope {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum DecisionPrompt {
     TurnRepeatedFailure,
-    TurnNoProgress,
+    TurnNoProgress {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional, type = "number"))]
+        minutes: Option<i64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        blocker: Option<crate::orchestration::StallBlocker>,
+    },
     MergePullRequest {
         #[cfg_attr(test, ts(type = "number"))]
         number: i64,

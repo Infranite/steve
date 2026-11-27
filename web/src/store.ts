@@ -1,5 +1,6 @@
-import { researchEvent } from "@/thread/chat-progress"
+import { isResearchSnapshot, liveRunFromSnapshot, researchEvent, researchProgressEvent } from "@/thread/chat-progress"
 export type { LiveRun } from "@/thread/chat-progress"
+import type { ThreadLiveThought, ThreadPlanEntry, ThreadSubtask } from "@/gen"
 import { debounceMax } from "./live-utils"
 import { appendTranscript, getTranscript, recoverTranscripts, resetTranscripts, useTranscripts } from "./data/transcript"
 export { briefHead } from "./data/transcript-model"
@@ -17,12 +18,12 @@ import { newClientId } from "./composer-draft"
 import { elapsed, pastTime, span } from "./i18n/format"
 import i18n, { t } from "./i18n"
 import { decisionText } from "./i18n/decision"
-import type { StateUpdate, RFile, PlanStep, RHold, RQueued, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
+import type { StateUpdate, RFile, PlanStep, RHold, RLocalNodeUpdating, RQueued, A2uiRecord, A2uiSubmit, RAnnotation } from "./api"
 import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, PlacementReason, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onEntityView, onViewKinds, messageView, messageViews, openDecisions, resetViews, settle, settled, subscribeItemScope, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork, useItemView, useSessionView, useViewGroup } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 import { itemDisplayStatusOf, itemState } from "./item-state"
@@ -91,13 +92,20 @@ export type ItemCardState = { item: string; state: string; at?: number; text?: s
   delivery?: { text: string; full?: boolean; decision?: string; at?: number }; reply?: { text: string; ref?: string; at?: number }; released?: { version?: string; at?: number }
   /** a Release build that failed after the item was done */
   build?: { text: string; at?: number } }
-export type Offer = { title: string; goal: string; project?: string | null; bot?: string; state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean }
+export type Offer = {
+  title: string; goal: string; project?: string | null; bot?: string | null
+  reason?: PlacementReason | null; matched?: string[]; tags?: string[]
+  state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean
+}
 /** a key moment of an item made from the conversation, posted back to it (§5.2) */
 export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fail"; item: string; text?: string; decision?: string; full?: boolean; ref?: string }
 /** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
 export type Steps = { route?: { kind: string; modelKind?: string; guard?: string | null; confidence?: number; title: string; bot: string; project: string | null; tags: string[]; newTags: string[]; why: string; model: string | null; fallback: boolean; ms: number; picked?: string }; answer?: { thought: string; model: string | null; ms: number; failed: boolean }
   research?: { run: string; model: string | null; ms: number; turns: number; tools: number; stopped?: "user" | "budget" | "violation" | "restart" | "failed" }
-  tools: { name: string; call?: number; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps */ kind?: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
+  plan?: ThreadPlanEntry[]
+  thoughts?: ThreadLiveThought[]
+  subtasks?: ThreadSubtask[]
+  tools: { name: string; call?: number; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps */ kind?: string; description?: string; args: Record<string, any>; result?: Record<string, any>; excerpt?: string; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
 /** an open decision with no item (a forked or imported session, or its item was deleted): shown with the same card */
 export type Orphan = { i: Item; w: Wait }
 export type Project = RProject
@@ -189,7 +197,7 @@ export const st = {
   bots: {} as Record<string, Bot>, allBots: [] as Shell["allBots"], projects: [] as Project[],
   tags: [] as Tag[],
   cfg: {} as Record<string, any>, settings: {} as Record<string, string>,
-  localSessions: [] as LocalSession[], hold: null as RHold | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
+  localSessions: [] as LocalSession[], hold: null as RHold | null, localNodeUpdating: null as RLocalNodeUpdating | null, onboard: -1, /** the user is the instance's owner */ owner: false, prefix: "ST",
   noticeSeen: 0,
   dismissedAlerts: [] as string[],
   quote: null as string | null, focus: null as { item: string; until: number } | null,
@@ -715,13 +723,43 @@ export async function refresh(): Promise<void> {
   } catch (e) { if (scope === scopeKey() && !isCancelledError(e)) fetchFailed(e) }
 }
 async function loadSummary() {
-  const scope = scopeKey(), live = chatLive(), hold = st.hold
+  const scope = scopeKey(), live = chatLive(), hold = st.hold, updating = st.localNodeUpdating
   try {
     const summary = await api.summary()
     if (scope !== scopeKey()) return
-    if (st.hold === hold) { st.hold = summary.hold; emit() }
-    if (chatLive() === live && live.thinking !== summary.thinking) {
-      updateChat(summary.thinking ? { thinking: true } : { thinking: false, draft: null, live: null, phase: "" })
+    let changed = false
+    if (st.hold === hold) { st.hold = summary.hold; changed = true }
+    if (st.localNodeUpdating === updating) { st.localNodeUpdating = summary.local_node_updating ?? null; changed = true }
+    if (changed) emit()
+    if (chatLive() === live) {
+      if (summary.live) {
+        const snap = summary.live
+        const restoredLive = isResearchSnapshot(snap) ? liveRunFromSnapshot(snap) : null
+        const restoredDraft = (snap.draft_text || snap.draft_thought)
+          ? {
+              mid: snap.mid ?? snap.run,
+              thought: snap.draft_thought ?? "",
+              text: snap.draft_text ?? "",
+              t0: snap.started_at,
+              t1: snap.draft_text ? snap.last_activity_at : undefined,
+            }
+          : null
+        updateChat({
+          thinking: true,
+          phase: snap.phase ?? "",
+          thinkingStartedAt: snap.started_at,
+          thinkingAt: snap.last_activity_at,
+          thinkingStage: snap.stage,
+          live: restoredLive,
+          draft: restoredDraft,
+        })
+      } else if (live.thinking !== summary.thinking) {
+        updateChat(
+          summary.thinking
+            ? { thinking: true, thinkingStartedAt: live.thinkingStartedAt ?? Date.now() }
+            : { thinking: false, thinkingStartedAt: undefined, thinkingAt: undefined, thinkingStage: undefined, draft: null, live: null, phase: "" },
+        )
+      }
     }
   } catch (e) { if (scope === scopeKey()) fetchFailed(e) }
 }
@@ -824,7 +862,12 @@ function onHub(e: HubEvent) {
         updateChat({ drafted: op.id, draftedStart: draft.t0, draft: null })
       }
       if (live && m.origin === live.mid && m.steps?.research?.run === live.run) {
-        updateChat({ live: null, ...(phase === "research" || phase === "answer" ? { thinking: false, phase: "" } : {}) })
+        updateChat({
+          live: null,
+          ...(phase === "research" || phase === "answer"
+            ? { thinking: false, phase: "", thinkingStartedAt: undefined, thinkingAt: undefined, thinkingStage: undefined }
+            : {}),
+        })
       }
     }
     if (e.ops.some((op) => op.type === "item")) void qc.invalidateQueries({ queryKey: tagUsesKey() })
@@ -857,22 +900,58 @@ function onHub(e: HubEvent) {
     return
   }
   if (e.type === "release.hold") { st.hold = e.hold as RHold | null; emit(); return }
+  if (e.type === "local_node.updating") { st.localNodeUpdating = e.updating as RLocalNodeUpdating | null; emit(); return }
   if (e.type === "steve.draft") {
-    const { draft } = chatLive()
+    const cur = chatLive(), { draft } = cur
     if (nextDraft || draft?.mid !== e.mid) priorDraftReplies = new Set(messageViews().map(msgOfView).filter((m) => m.k === "steve" && m.origin === e.mid).map((m) => m.id!))
     nextDraft = false
     const was = draft?.mid === e.mid ? draft : undefined, now = Date.now()
-    updateChat({ draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) } }, was && !!was.text === !!e.text ? "reply" : "frame")
+    updateChat({
+      draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) },
+      thinkingAt: now,
+      thinkingStage: e.text ? "writing" : e.thought ? "thinking" : cur.thinkingStage,
+    }, was && !!was.text === !!e.text ? "reply" : "frame")
     return
   }
   if (e.type === "steve.tool") {
-    if (!hasCompletedResearchRun(e.run))
-      updateChat({ live: researchEvent(chatLive().live, e) }, "frame")
+    if (!hasCompletedResearchRun(e.run)) {
+      const cur = chatLive()
+      const nextLive = researchEvent(cur.live, e)
+      updateChat({
+        live: nextLive,
+        thinkingStartedAt: nextLive.startedAt ?? cur.thinkingStartedAt,
+        thinkingAt: e.at ?? nextLive.at ?? cur.thinkingAt,
+      }, "frame")
+    }
+    return
+  }
+  if (e.type === "steve.progress") {
+    if (!hasCompletedResearchRun(e.run)) {
+      const cur = chatLive()
+      const nextLive = researchProgressEvent(cur.live, e)
+      updateChat({
+        live: nextLive,
+        thinkingStartedAt: nextLive.startedAt ?? cur.thinkingStartedAt,
+        thinkingAt: e.at ?? nextLive.at ?? cur.thinkingAt,
+      }, "frame")
+    }
     return
   }
   if (e.type === "steve.thinking") {
-    if (e.on && !chatLive().thinking) nextDraft = true
-    updateChat({ thinking: e.on, phase: e.on ? e.phase ?? "" : "" })
+    const cur = chatLive(), now = Date.now()
+    if (e.on && !cur.thinking) nextDraft = true
+    const staleLive = e.on && !cur.thinking && cur.live != null && (
+      hasCompletedResearchRun(cur.live.run)
+      || (e.started_at != null && cur.live.startedAt != null && e.started_at > cur.live.startedAt)
+    )
+    updateChat({
+      thinking: e.on,
+      phase: e.on ? e.phase ?? "" : "",
+      thinkingStartedAt: e.on ? (e.started_at ?? cur.thinkingStartedAt ?? now) : undefined,
+      thinkingAt: e.on ? (e.at ?? now) : undefined,
+      thinkingStage: undefined,
+      ...(staleLive ? { live: null } : {}),
+    })
     cue(e.on ? "think" : "reply")
     if (!e.on) {
       const { draft, live } = chatLive(), scope = scopeKey()
@@ -1154,7 +1233,7 @@ export function quoteMsg(id: string | null) { st.quote = id; emit(); requestAnim
 export function clearFocus() { st.focus = null; emit() }
 export const focusItem = () => (st.focus && st.focus.until > Date.now() && !closedSt(it(st.focus.item)?.st) ? st.focus.item : null)
 /* thread routing actions: a 409 (already handled) comes back as its message */
-export async function takeOffer(m: Msg, take: boolean) { if (!m.id) return; const r = await call(api.offer(m.id, take)); if (r?.item) toast(t("core:toast.madeItem", { id: r.item.id })) }
+export async function takeOffer(m: Msg, take: boolean, bot?: string) { if (!m.id) return; const r = await call(api.offer(m.id, take, take ? bot : undefined)); if (r?.item) toast(t("core:toast.madeItem", { id: r.item.id })) }
 /** an A2UI button pressed in a reply: `already` when this surface had been submitted (another tab, a double click that got through) */
 export async function a2uiSubmit(msg: string, a: A2uiSubmit): Promise<{ already: boolean }> {
   const r = await api.a2ui(msg, a)
@@ -1518,7 +1597,7 @@ export function setBotWorkspaces(k: string, ids: string[]) { void shellCall(api.
 
 /* ───────── actions: workspaces and projects ───────── */
 export async function switchWorkspace(id: string) {
-  try { await api.switchWs(id); setPageWorkspace(id); st.ready = false; emit(); resetTranscripts(); st.noticeSeen = 0; st.hold = null; resetViews(); updateChat({}); closeStream(); await loadReadSide(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
+  try { await api.switchWs(id); setPageWorkspace(id); st.ready = false; emit(); resetTranscripts(); st.noticeSeen = 0; st.hold = null; st.localNodeUpdating = null; resetViews(); updateChat({}); closeStream(); await loadReadSide(); connect(); location.hash = "#/"; toast(t("core:toast.switchedWorkspace", { name: st.workspace?.name ?? "" })); return st.ready && st.workspace?.id === id } catch (e) { fail(e); return false }
 }
 export async function newWorkspace(name: string, description: string, item_prefix?: string) { const w = await call(api.newWs({ name, description, item_prefix })); if (w) await switchWorkspace(w.id) }
 export async function newProject(p: { name: string; path: string; description?: string; worktree?: boolean; default_bot?: string | null; node?: string }) { const r = await shellCall(api.newProject(p), t("core:toast.projectAdded", { name: p.name })); return r?.id }

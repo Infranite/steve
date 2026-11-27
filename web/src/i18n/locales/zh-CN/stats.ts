@@ -283,6 +283,8 @@ export default {
     stop: {
       endTurn: "正常结束",
       cancelled: "你中断",
+      stallNoProgress: "无进展停止",
+      stallRepeatedFailure: "重复失败停止",
       maxTokens: "超出长度",
       refusal: "拒绝",
       error: "出错",

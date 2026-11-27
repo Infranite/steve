@@ -599,4 +599,126 @@ mod tests {
                 "apiKeyHelper":"/bin/cat /k"})
         );
     }
+
+    #[test]
+    fn claude_code_classifier_and_proxy_settings_reconcile_across_principals() {
+        let d = tempfile::tempdir().unwrap();
+        let (node, svc, owner) = (
+            d.path().join("node"),
+            d.path().join("svc"),
+            d.path().join("owner"),
+        );
+        for p in [&node, &svc, &owner] {
+            fs::create_dir_all(p).unwrap();
+        }
+        // Node initially has custom gateway, proxy/TLS, non-essential traffic disabled, and local
+        // classifier fallback enabled (`CLAUDE_CODE_AUTO_MODE_SERVER=0`), plus personal settings.
+        fs::write(
+            node.join("settings.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "model": "owner-default",
+                "permissions": {"allow": ["Bash(git *)"]},
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://gw.example.test",
+                    "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
+                    "CLAUDE_CODE_AUTO_MODE_MODEL": "claude-opus-5-5",
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                    "HTTPS_PROXY": "http://proxy.example.test:8080",
+                    "NO_PROXY": "localhost,127.0.0.1",
+                    "NODE_EXTRA_CA_CERTS": "/etc/ssl/custom-ca.pem",
+                    "GITHUB_TOKEN": "owner-secret"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        // Simulate an already-imported owner state directory carrying a stale snapshot from before
+        // the operator set `CLAUDE_CODE_AUTO_MODE_SERVER=0` or removed `DISABLE_NONESSENTIAL_TRAFFIC`.
+        fs::write(
+            owner.join("settings.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "model": "owner-session-pick",
+                "permissions": {"allow": ["Bash(cargo *)"]},
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://old.example.test",
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                    "OWNER_ONLY_FLAG": "keep-me"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let cc = login("claude-code");
+        place(&node, &svc, &cc).unwrap();
+        place(&node, &owner, &cc).unwrap();
+
+        let svc_val: Value =
+            serde_json::from_slice(&fs::read(svc.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(
+            svc_val,
+            serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://gw.example.test",
+                    "CLAUDE_CODE_AUTO_MODE_SERVER": "0",
+                    "CLAUDE_CODE_AUTO_MODE_MODEL": "claude-opus-5-5",
+                    "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+                    "HTTPS_PROXY": "http://proxy.example.test:8080",
+                    "NO_PROXY": "localhost,127.0.0.1",
+                    "NODE_EXTRA_CA_CERTS": "/etc/ssl/custom-ca.pem"
+                }
+            })
+        );
+
+        let owner_val: Value =
+            serde_json::from_slice(&fs::read(owner.join("settings.json")).unwrap()).unwrap();
+        assert_eq!(owner_val["model"], "owner-session-pick");
+        assert_eq!(
+            owner_val["permissions"],
+            serde_json::json!({"allow": ["Bash(cargo *)"]})
+        );
+        assert_eq!(owner_val["env"]["OWNER_ONLY_FLAG"], "keep-me");
+        assert_eq!(
+            owner_val["env"]["ANTHROPIC_BASE_URL"],
+            "https://gw.example.test"
+        );
+        assert_eq!(owner_val["env"]["CLAUDE_CODE_AUTO_MODE_SERVER"], "0");
+        assert_eq!(
+            owner_val["env"]["HTTPS_PROXY"],
+            "http://proxy.example.test:8080"
+        );
+        assert!(owner_val["env"].get("GITHUB_TOKEN").is_none());
+
+        // When the operator removes `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` from the Node's
+        // settings.json, reconciliation removes the stale entry from existing owner directories too.
+        fs::write(
+            node.join("settings.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "env": {
+                    "ANTHROPIC_BASE_URL": "https://gw.example.test"
+                }
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        place(&node, &owner, &cc).unwrap();
+        let owner_after: Value =
+            serde_json::from_slice(&fs::read(owner.join("settings.json")).unwrap()).unwrap();
+        assert!(
+            owner_after["env"]
+                .get("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
+                .is_none()
+        );
+        assert!(
+            owner_after["env"]
+                .get("CLAUDE_CODE_AUTO_MODE_SERVER")
+                .is_none()
+        );
+        assert_eq!(owner_after["env"]["OWNER_ONLY_FLAG"], "keep-me");
+        assert_eq!(
+            owner_after["env"]["ANTHROPIC_BASE_URL"],
+            "https://gw.example.test"
+        );
+    }
 }

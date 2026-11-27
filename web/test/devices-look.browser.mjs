@@ -68,6 +68,7 @@ const screens = [
   { name: "node-outdated", scene: "normal", hash: "#/devices/nodes/n-build/version", ready: '[data-node-upgrade="outdated"]' },
   { name: "node-offline", scene: "normal", hash: "#/devices/nodes/n-imac", ready: "[data-node-offline]" },
   { name: "clients", scene: "normal", hash: "#/devices/clients", ready: '[data-client="c4"]' },
+  { name: "monitor", scene: "normal", hash: "#/devices/monitor", ready: "[data-monitor-overview]" },
   /* hub reads /api/hub-metadata which updates the shared Hub display name in useHubs(); run it after the other
    * DevicesPage tabs and right before node-limit-tip (which is a NodePage and closes the page after its `then`). */
   { name: "hub", scene: "normal", hash: "#/devices/hub", ready: "[data-hub-edit]:not([disabled])", check: async (page) => {
@@ -103,6 +104,52 @@ const screens = [
   } },
 ].filter((s) => !ONLY || s.name.includes(ONLY))
 
+const healthSeries = Array.from({ length: 15 }, (_, i) => ({
+  at: NOW - (14 - i) * MIN,
+  http_p95: 0.08 + 0.02 * Math.sin(i),
+  write_lock_wait_p95: 0.012 + 0.004 * Math.cos(i),
+  hub_cpu: 0.18 + 0.05 * Math.sin(i / 2),
+  hub_memory: (420 + i * 2) * 2 ** 20,
+}))
+const healthReport = (win = "15m") => ({
+  window: win,
+  window_seconds: win === "24h" ? DAY : win === "1h" ? HOUR : 15 * MIN,
+  sampled_at: NOW,
+  checks: [
+    { key: "http_p95", value: 0.095, unit: "seconds", max: 0.5 },
+    { key: "write_lock_wait_p95", value: 0.014, unit: "seconds", max: 0.1 },
+    { key: "cache_hit_ratio", value: null, unit: "ratio", min: 0.5 },
+    { key: "sse_delivery_p95", value: 0.032, unit: "seconds", max: 0.5 },
+    { key: "patch_delay_p95", value: 0.028, unit: "seconds", max: 0.5 },
+    { key: "reconcile_diff", value: 0, unit: "count", max: 0 },
+    { key: "ingest_p95", value: null, unit: "seconds", max: 0.25 },
+    { key: "ingest_rate", value: 1.4, unit: "per_second" },
+    { key: "hub_cpu", value: 0.19, unit: "ratio", max: 0.8 },
+    { key: "hub_memory", value: 448 * 2 ** 20, unit: "bytes", max: 2 * GIB },
+    { key: "hub_disk_writes", value: 320 * 2 ** 20, unit: "bytes_per_day", max: 5 * GIB },
+    { key: "backup_destination_space", value: 48 * GIB, unit: "bytes", min: 512 * 2 ** 20 },
+    { key: "web_interaction_p75", value: 0.065, unit: "seconds", max: 0.2 },
+    { key: "web_long_tasks", value: 1.2, unit: "per_minute", max: 10 },
+    { key: "job_panics", value: 0, unit: "count", max: 0 },
+    { key: "jobs_down", value: 0, unit: "count", max: 0 },
+    { key: "node_link", subject: "local", value: 1, unit: "up" },
+    { key: "node_link_drops", subject: "local", value: 0, unit: "count", max: 3 },
+    { key: "node_command_failures", subject: "local", value: null, unit: "ratio", max: 0.2 },
+    { key: "node_backlog", subject: "local", value: 0, unit: "count", max: 10_000 },
+    { key: "node_disk_writes", subject: "local", value: 128 * 2 ** 20, unit: "bytes_per_day", max: 5 * GIB },
+    { key: "node_link", subject: "n-mbp", value: 1, unit: "up" },
+    { key: "node_link_drops", subject: "n-mbp", value: 0, unit: "count", max: 3 },
+    { key: "node_command_failures", subject: "n-mbp", value: 0.02, unit: "ratio", max: 0.2 },
+    { key: "node_backlog", subject: "n-mbp", value: 0, unit: "count", max: 10_000 },
+    { key: "node_disk_writes", subject: "n-mbp", value: 96 * 2 ** 20, unit: "bytes_per_day", max: 5 * GIB },
+    { key: "plugin_errors", subject: "lark", value: 0.01, unit: "ratio", max: 0.2 },
+    { key: "plugin_restarts", subject: "lark", value: 0, unit: "count", max: 2 },
+    { key: "plugin_backlog", subject: "lark", value: 0, unit: "count", max: 100 },
+  ],
+  warnings: [],
+  series: healthSeries,
+})
+
 const json = (route, body, code = 200) => route.fulfill({ status: code, contentType: "application/json", body: JSON.stringify(body) })
 /** the owner's Hub for one scene: what it answers, every path it was asked that it does not know, and in-flight API count */
 async function hub(page, scene, state) {
@@ -131,6 +178,7 @@ async function hub(page, scene, state) {
     if (path === "/api/node-harnesses") return json(route, { nodes: {} })
     if (path.startsWith("/api/node-harness-updates/")) return json(route, { report: { node: path.split("/")[3], checking: false, harnesses: [] }, runs: {}, at: NOW, error: null })
     if (path === "/api/vitals") return json(route, { nodes: vitals(nodes) })
+    if (path === "/api/system/health") return json(route, healthReport(url.searchParams.get("window") || "15m"))
     if (path === "/api/nodes/upgrade-default") return json(route, { policy: "notify", hub: { version: HUB, commit: "abc", target: "x" }, drain_secs: 1800, health_secs: 180 })
     if (path === "/api/nodes/pairings" && !get) return json(route, { code: "stv1-fixture-code", expires: NOW + 10 * MIN, pin: null, hub_id: "hub_example" })
     if (path === "/api/nodes/tailcat") return json(route, { available: true, enabled: false })

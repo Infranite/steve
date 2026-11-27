@@ -29,8 +29,18 @@ use super::*;
 pub enum News {
     /// The whole text of the model's current message, each time it grew.
     Text(String),
+    /// The whole text of the model's current reasoning/thought message, with completion flag.
+    Thought {
+        id: String,
+        text: String,
+        done: bool,
+    },
     /// A tool call's whole current view (research jobs).
     Tool(ToolView),
+    /// The agent's current plan entries (research jobs).
+    Plan(Vec<PlanEntry>),
+    /// Subagent, background task, or workflow subtask update (research jobs).
+    Subtask(SubtaskView),
     GatewayProgress(GatewayPhase),
     Usage(UsageReport),
     End(Completion),
@@ -43,9 +53,14 @@ pub(crate) use steve_core::gateway::merged_usage as normalized_usage;
 pub(super) struct Waiters(Mutex<HashMap<String, Waiter>>);
 
 struct Waiter {
-    /// The message being written and its text so far.
+    /// The assistant message being written and its text so far.
     message: Option<String>,
     text: String,
+    /// The thought/reasoning message being written and its text so far.
+    thought_message: Option<String>,
+    thought_text: String,
+    /// Every message id declared with `Role::Thought` so late/replayed deltas cannot bleed into assistant text.
+    thought_ids: std::collections::HashSet<String>,
     tx: mpsc::UnboundedSender<News>,
 }
 
@@ -57,6 +72,9 @@ impl Waiters {
             Waiter {
                 message: None,
                 text: String::new(),
+                thought_message: None,
+                thought_text: String::new(),
+                thought_ids: std::collections::HashSet::new(),
                 tx,
             },
         );
@@ -351,9 +369,19 @@ impl NodeRuntime {
                 self.jobs
                     .tell(attempt, |_| Some(News::GatewayProgress(*phase)));
             }
-            EventBody::MessageStarted { message, .. } => self.jobs.tell(attempt, |w| {
-                w.message = Some(message.clone());
-                w.text.clear();
+            EventBody::MessageStarted { message, role, .. } => self.jobs.tell(attempt, |w| {
+                match role {
+                    Role::Thought => {
+                        w.thought_ids.insert(message.clone());
+                        w.thought_message = Some(message.clone());
+                        w.thought_text.clear();
+                    }
+                    Role::Assistant => {
+                        w.message = Some(message.clone());
+                        w.text.clear();
+                    }
+                    Role::User => {}
+                }
                 None
             }),
             EventBody::TextDelta {
@@ -362,6 +390,21 @@ impl NodeRuntime {
                 text,
                 ..
             } => self.jobs.tell(attempt, |w| {
+                if w.thought_message.as_deref() == Some(message.as_str()) {
+                    let at = *utf8_offset as usize;
+                    if at <= w.thought_text.len() && w.thought_text.is_char_boundary(at) {
+                        w.thought_text.truncate(at);
+                    }
+                    w.thought_text.push_str(text);
+                    return (!text.is_empty()).then(|| News::Thought {
+                        id: message.clone(),
+                        text: w.thought_text.clone(),
+                        done: false,
+                    });
+                }
+                if w.thought_ids.contains(message) {
+                    return None;
+                }
                 if w.message.as_deref() != Some(message.as_str()) {
                     w.message = Some(message.clone());
                     w.text.clear();
@@ -374,9 +417,28 @@ impl NodeRuntime {
                 w.text.push_str(text);
                 (!text.is_empty()).then(|| News::Text(w.text.clone()))
             }),
+            EventBody::MessageCompleted { message } => self.jobs.tell(attempt, |w| {
+                if w.thought_message.as_deref() == Some(message.as_str()) {
+                    let id = message.clone();
+                    let text = w.thought_text.clone();
+                    w.thought_message = None;
+                    return (!text.is_empty()).then(|| News::Thought {
+                        id,
+                        text,
+                        done: true,
+                    });
+                }
+                None
+            }),
             EventBody::ToolChanged { tool } => {
                 self.jobs.tell(attempt, |_| Some(News::Tool(tool.clone())))
             }
+            EventBody::Plan { entries } => self
+                .jobs
+                .tell(attempt, |_| Some(News::Plan(entries.clone()))),
+            EventBody::SubtaskChanged { subtask } => self
+                .jobs
+                .tell(attempt, |_| Some(News::Subtask(subtask.clone()))),
             EventBody::Usage { report } => self
                 .jobs
                 .tell(attempt, |_| Some(News::Usage(report.clone()))),
@@ -723,6 +785,13 @@ impl Drop for Waiting {
 
 /// Preserve a Node's typed failure. Older journal entries without phase evidence stay unknown.
 fn call_error(c: &Completion, phase: Option<GatewayPhase>) -> OneShotError {
+    if c.error
+        .as_ref()
+        .and_then(|e| e.reason.as_ref())
+        .is_some_and(|r| r.is(NodeReason::LocalNodeUpdating))
+    {
+        return OneShotError::LocalNodeUpdating;
+    }
     let detail = c.error.as_ref().map(super::said).unwrap_or_default();
     match c.error.as_ref().and_then(|e| e.gateway) {
         Some(GatewayFailure::Timeout { phase }) => return OneShotError::Timeout(phase),
@@ -775,11 +844,11 @@ fn think_reply(
 #[async_trait]
 impl OneModel for NodePrint {
     async fn preflight(&self, call: &OneCall<'_>) -> steve_core::Result<()> {
+        if self.runtime.node.is_upgrade_only() {
+            return Err(GatewayError::LocalNodeUpdating.into());
+        }
         let needs_tools = matches!(call.spec.required_tools, ThinkTools::Read(_));
         let needs_images = !call.images.is_empty();
-        if !needs_tools && !needs_images {
-            return Ok(());
-        }
         if let ThinkTools::Read(required) = call.spec.required_tools {
             let workspace = think_workspace();
             self.runtime
@@ -797,12 +866,31 @@ impl OneModel for NodePrint {
                 }
             }
         }
-        let probe = self
-            .runtime
-            .node
-            .probe(false)
-            .await
-            .map_err(|_| GatewayError::MissingCapability)?;
+        let probe = match self.runtime.node.cached_capabilities() {
+            Some(p) => p,
+            None => match self.runtime.node.probe(false).await {
+                Ok(p) => p,
+                Err(e)
+                    if e.reason
+                        .as_ref()
+                        .is_some_and(|r| r.is(NodeReason::LocalNodeUpdating)) =>
+                {
+                    return Err(GatewayError::LocalNodeUpdating.into());
+                }
+                Err(_) if !needs_tools && !needs_images => {
+                    // Transient offline state (e.g. cold boot or reconnect) still queues in `once`
+                    // until the call's deadline instead of failing preflight immediately.
+                    return Ok(());
+                }
+                Err(_) => return Err(GatewayError::MissingCapability.into()),
+            },
+        };
+        if !probe.supports_jobs() {
+            return Err(GatewayError::LocalNodeUpdating.into());
+        }
+        if !needs_tools && !needs_images {
+            return Ok(());
+        }
         let harness = probe.harnesses.iter().find(|h| {
             h.name == call.harness
                 && h.jobs
@@ -825,7 +913,10 @@ impl OneModel for NodePrint {
 
     async fn multimodal_harness(&self, call: &OneCall<'_>) -> Option<String> {
         let needs_tools = matches!(call.spec.required_tools, ThinkTools::Read(_));
-        let probe = self.runtime.node.probe(false).await.ok()?;
+        let probe = match self.runtime.node.cached_capabilities() {
+            Some(p) => p,
+            None => self.runtime.node.probe(false).await.ok()?,
+        };
         probe
             .harnesses
             .iter()
@@ -924,7 +1015,9 @@ impl OneModel for NodePrint {
                     }
                 }
                 Ok(Some(News::Usage(r))) => usage.push(r),
-                Ok(Some(News::Tool(_))) => {}
+                Ok(Some(
+                    News::Tool(_) | News::Thought { .. } | News::Plan(_) | News::Subtask(_),
+                )) => {}
                 Ok(Some(News::End(c))) => break c,
                 Ok(None) => {
                     return Tried::of(

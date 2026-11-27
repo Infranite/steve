@@ -246,3 +246,47 @@ test("every key is used: a redesign that drops a text drops its key", () => {
   }
   assert.deepEqual(unused, [], "remove these from both languages")
 })
+
+test("turn stall decision prompts format duration and blocker details in zh-CN and en", async () => {
+  const { decisionText } = await import("../src/i18n/decision.ts")
+  assert.equal(
+    decisionText({ kind: "template", template: { code: "turn_no_progress" } }),
+    "可观察的执行时间累计十五分钟仍无可核实的进展，Steve 已请求停止。",
+  )
+  assert.equal(
+    decisionText({ kind: "template", template: { code: "turn_no_progress", minutes: 15 } }),
+    "可观察的执行时间累计 15 分钟仍无可核实的进展，Steve 已请求停止。",
+  )
+  assert.equal(
+    decisionText({
+      kind: "template",
+      template: {
+        code: "turn_no_progress",
+        minutes: 60,
+        blocker: { kind: "subagent", label: "Codebase Researcher" },
+      },
+    }),
+    "等待子代理（Codebase Researcher）已累计 60 分钟仍无可核实的进展，Steve 已请求停止。",
+  )
+  await inLang("en", () => {
+    assert.equal(
+      decisionText({ kind: "template", template: { code: "turn_no_progress", minutes: 15 } }),
+      "There was no verified progress for 15 minutes of observable work. Steve requested a stop.",
+    )
+    assert.equal(
+      decisionText({
+        kind: "template",
+        template: {
+          code: "turn_no_progress",
+          minutes: 60,
+          blocker: { kind: "background_task", label: "cargo build --workspace" },
+        },
+      }),
+      "No verified progress for 60 minutes while waiting on background task (cargo build --workspace). Steve requested a stop.",
+    )
+    assert.equal(
+      decisionText({ kind: "template", template: { code: "turn_repeated_failure" } }),
+      "The same tool action failed five times. Steve requested a stop.",
+    )
+  })
+})

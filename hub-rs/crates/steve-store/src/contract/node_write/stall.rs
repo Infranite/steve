@@ -128,6 +128,31 @@ pub fn held_attempt(r: &mut impl Read, attempt: &str) -> Result<bool> {
     .is_some())
 }
 
+/// Typed stall reason for `attempt`, if `runtime_turn_progress` recorded a stall hold on it.
+pub fn stalled_reason(
+    r: &mut impl Read,
+    attempt: &str,
+) -> Result<Option<steve_types::orchestration::StallReason>> {
+    #[derive(serde::Deserialize)]
+    struct SummaryEvidence {
+        evidence: Option<steve_types::orchestration::StallEvidence>,
+    }
+    let raw = r.one(
+        Query::select()
+            .column("summary")
+            .from("runtime_turn_progress")
+            .and_where(Expr::col("stalled_attempt").eq(attempt)),
+        |row| row.get::<String>(0),
+    )?;
+    raw.map(|raw| {
+        serde_json::from_str::<SummaryEvidence>(&raw)
+            .map_err(StoreError::from)
+            .map(|s| s.evidence.map(|e| e.reason))
+    })
+    .transpose()
+    .map(Option::flatten)
+}
+
 pub fn stop_confirmed(r: &mut impl Read, decision: &str) -> Result<bool> {
     Ok(r.one(
         Query::select()

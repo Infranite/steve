@@ -522,7 +522,7 @@ function AccessNodeTab({
         </div>
       )}
       <NodeFileAccess v={v} actions={actions} />
-      <NodeSandbox v={v} />
+      <NodeSandbox v={v} actions={actions} />
       <NodeContext v={v} editable={v.local || actions.pairable} />
       <Projects v={v} />
       {actions.pairable && <LeaveCard onUnpair={onUnpair} onRemove={onRemove} />}
@@ -652,8 +652,20 @@ function NodeFileAccess({ v, actions }: { v: NodeView; actions: NodeActions }) {
   )
 }
 
-function NodeSandbox({ v }: { v: NodeView }) {
-  const t = useT()
+function NodeSandbox({ v, actions }: { v: NodeView; actions: NodeActions }) {
+  const t = useT(), { harnesses } = useDevices()
+  const report = harnesses?.[v.id]
+  const execAllowed: boolean | null = v.local
+    ? true
+    : report?.exec_allowed != null
+      ? report.exec_allowed
+      : actions.harnessUpdates.data?.report?.harnesses.some((h) => h.blocked_reason === "exec_denied")
+        ? false
+        : null
+  const policyState = execAllowed === true ? "allowed" : execAllowed === false ? "denied" : "unknown"
+  const enableCmd =
+    '# ~/.steve-node/policy.json\n{"max_permissions":"auto","full_network":true,"exec":true,"jobs":false}\n# Then restart the Node service:\nsteve node restart'
+
   return (
     <DCard
       icon={<LockIcon />}
@@ -666,6 +678,33 @@ function NodeSandbox({ v }: { v: NodeView }) {
         <DRow title={t("devices:sandbox.ownerScope")} sub={t(v.local ? "devices:sandbox.ownerScopeLocal" : "devices:sandbox.ownerScopeRemote")} />
         <DRow title={t("devices:sandbox.isolation")} sub={t(v.local ? "devices:sandbox.isolationLocal" : "devices:sandbox.isolationRemote")} />
         <DRow title={t("devices:sandbox.projectBoundary")} sub={t("devices:sandbox.projectBoundaryDesc")} />
+        <div className="flex flex-col gap-2 border-t border-border/70 px-5 py-3.5" data-node-execution-policy={policyState}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="type-callout font-medium text-foreground">{t("devices:sandbox.execPolicyTitle")}</span>
+            <Badge
+              tone={policyState === "allowed" ? "success" : policyState === "denied" ? "warning" : "neutral"}
+              size="sm"
+              dot={policyState !== "unknown"}
+            >
+              {t(`devices:sandbox.execPolicyState.${policyState}`)}
+            </Badge>
+          </div>
+          <p className="type-footnote text-muted-foreground">
+            {t(
+              v.local
+                ? "devices:sandbox.execPolicyLocalDesc"
+                : policyState === "denied"
+                  ? "devices:sandbox.execPolicyDeniedDesc"
+                  : "devices:sandbox.execPolicyRemoteDesc",
+            )}
+          </p>
+          {!v.local && (
+            <div className="flex flex-col gap-1.5 pt-0.5">
+              <p className="type-footnote text-muted-foreground">{t("devices:sandbox.execPolicyHowTo")}</p>
+              <CodeBlock code={enableCmd} language="bash" />
+            </div>
+          )}
+        </div>
       </div>
     </DCard>
   )

@@ -1,8 +1,9 @@
-//! The Hub's health at a glance (`GET /api/system/health`): a few figures over the last window,
-//! each with its limit, computed when the recorder captures a minute and compared with the oldest
-//! snapshot in the window. A figure past its limit is also a warning; the client words it. A figure without enough
-//! samples in the window to mean anything has no value and is never a warning.
-use std::collections::{BTreeSet, HashMap};
+//! The Hub's health at a glance (`GET /api/system/health`): figures over `15m`, `1h`, or `24h`,
+//! each with its limit, computed from retained snapshots of the Prometheus exposition. A figure
+//! past its limit is also a warning; the client words it. A figure without enough samples in the
+//! window to mean anything has no value and is never a warning.
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
+use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -11,10 +12,72 @@ const GIB: f64 = (1u64 << 30) as f64;
 const MIN_LOOKUPS: f64 = 100.0;
 const MIN_CALLS: f64 = 5.0;
 
-/// The recorder's exposition at one moment.
+/// Supported query windows for `/api/system/health`.
+pub(crate) const WINDOW_15M_SECS: f64 = 15.0 * 60.0;
+pub(crate) const WINDOW_1H_SECS: f64 = 60.0 * 60.0;
+pub(crate) const WINDOW_24H_SECS: f64 = 24.0 * 60.0 * 60.0;
+
+/// Minute snapshots retained for `15m` and `1h` windows (60 intervals + baseline).
+const RECENT_CAPACITY: usize = 61;
+/// Coarse 5-minute snapshot stride retained for the `24h` window (288 intervals + baseline).
+const DAY_STRIDE_SECS: f64 = 5.0 * 60.0;
+const DAY_CAPACITY: usize = 289;
+/// Tolerance around snapshot boundaries so slight ticker jitter keeps the full window.
+const RECENT_GRACE_SECS: f64 = 30.0;
+const DAY_GRACE_SECS: f64 = 150.0;
+/// Use 1-minute `recent` points for `24h` until the Hub has more than an hour of `day` span.
+const DAY_SERIES_MIN_SPAN_SECS: f64 = 60.0 * 60.0;
+/// Append the latest `recent` snapshot after the last `day` snapshot once at least this far ahead.
+const DAY_TAIL_GAP_SECS: f64 = 30.0;
+
+/// Window selector for `GET /api/system/health?window=...`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+pub(crate) enum HealthWindow {
+    #[default]
+    #[serde(rename = "15m")]
+    M15,
+    #[serde(rename = "1h")]
+    H1,
+    #[serde(rename = "24h")]
+    H24,
+}
+
+impl HealthWindow {
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "15m" => Some(Self::M15),
+            "1h" => Some(Self::H1),
+            "24h" => Some(Self::H24),
+            _ => None,
+        }
+    }
+
+    pub(crate) const fn target_seconds(self) -> f64 {
+        match self {
+            Self::M15 => WINDOW_15M_SECS,
+            Self::H1 => WINDOW_1H_SECS,
+            Self::H24 => WINDOW_24H_SECS,
+        }
+    }
+}
+
+/// One interval point in the golden-signals time series.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub(crate) struct SeriesPoint {
+    /// Unix epoch milliseconds at the end of this interval.
+    pub at: i64,
+    pub http_p95: Option<f64>,
+    pub write_lock_wait_p95: Option<f64>,
+    pub hub_cpu: Option<f64>,
+    pub hub_memory: Option<f64>,
+}
+
+/// The recorder's compacted exposition at one moment.
 pub(crate) struct Snapshot {
     /// Seconds since the recorder was installed.
     at: f64,
+    /// Unix epoch milliseconds when this snapshot was captured.
+    wall_ms: i64,
     series: Vec<Series>,
     /// By the series' text (name and labels as rendered).
     by_key: HashMap<String, f64>,
@@ -36,13 +99,138 @@ impl Series {
     }
 }
 
+enum Compaction {
+    /// Hub-wide histogram aggregated by `le` across all other labels.
+    HubHistogram,
+    /// Hub store write-lock histogram (`lock="store"`), aggregated by `le`.
+    StoreLockHistogram,
+    /// Cache requests aggregated into `result="hit"` and `result="miss"` (dropping `result="off"`).
+    CacheRequests,
+    /// Hub-wide scalar counter or gauge summed across labels (if any).
+    HubScalar,
+    /// Entity-scoped counter or gauge kept with original labels so per-subject resets remain intact.
+    EntityExact,
+}
+
+fn compaction_rule(name: &str) -> Option<Compaction> {
+    match name {
+        "steve_http_request_duration_seconds_bucket"
+        | "steve_sse_delivery_seconds_bucket"
+        | "steve_projection_delay_seconds_bucket"
+        | "steve_node_ingest_seconds_bucket"
+        | "steve_web_interaction_seconds_bucket" => Some(Compaction::HubHistogram),
+        "steve_lock_wait_seconds_bucket" => Some(Compaction::StoreLockHistogram),
+        "steve_cache_requests_total" => Some(Compaction::CacheRequests),
+        "steve_projection_reconcile_diff_total"
+        | "steve_node_ingest_events_sum"
+        | "steve_process_cpu_seconds"
+        | "steve_process_resident_bytes"
+        | "steve_process_disk_written_bytes"
+        | "steve_backup_destination_available_bytes"
+        | "steve_backup_destination_required_bytes"
+        | "steve_web_long_task_seconds_count" => Some(Compaction::HubScalar),
+        "steve_job_panics_total"
+        | "steve_job_up"
+        | "steve_node_link_up"
+        | "steve_node_journal_bytes"
+        | "steve_node_commands_total"
+        | "steve_node_link_disconnects_total"
+        | "steve_node_event_backlog"
+        | "steve_node_process_disk_written_bytes"
+        | "steve_plugin_calls_total"
+        | "steve_plugin_restarts_total"
+        | "steve_plugin_inbound_backlog" => Some(Compaction::EntityExact),
+        _ => None,
+    }
+}
+
 impl Snapshot {
-    /// The Prometheus text format: `name{k="v",…} value` lines; comments and malformed lines are
-    /// skipped.
-    pub(crate) fn parse(text: &str, at: f64) -> Snapshot {
-        let series: Vec<Series> = text.lines().filter_map(series).collect();
-        let by_key = series.iter().map(|s| (s.key.clone(), s.value)).collect();
-        Snapshot { at, series, by_key }
+    /// Parse Prometheus exposition text and retain only the series needed by health assessment.
+    /// Hub-wide histograms and counters are pre-aggregated so retaining 350 snapshots stays compact.
+    pub(crate) fn parse(text: &str, at: f64, wall_ms: i64) -> Snapshot {
+        let mut out: Vec<Series> = Vec::new();
+        let mut hist_buckets: BTreeMap<(String, String), f64> = BTreeMap::new();
+        let mut store_lock_buckets: BTreeMap<String, f64> = BTreeMap::new();
+        let mut cache_hit: Option<f64> = None;
+        let mut cache_miss: Option<f64> = None;
+        let mut scalars: BTreeMap<String, f64> = BTreeMap::new();
+
+        for s in text.lines().filter_map(series) {
+            match compaction_rule(&s.name) {
+                Some(Compaction::HubHistogram) => {
+                    if let Some(le) = s.label("le").map(str::to_string) {
+                        *hist_buckets.entry((s.name, le)).or_insert(0.0) += s.value;
+                    }
+                }
+                Some(Compaction::StoreLockHistogram) => {
+                    if s.label("lock") == Some("store")
+                        && let Some(le) = s.label("le").map(str::to_string)
+                    {
+                        *store_lock_buckets.entry(le).or_insert(0.0) += s.value;
+                    }
+                }
+                Some(Compaction::CacheRequests) => match s.label("result") {
+                    Some("hit") => *cache_hit.get_or_insert(0.0) += s.value,
+                    Some("off") => {}
+                    _ => *cache_miss.get_or_insert(0.0) += s.value,
+                },
+                Some(Compaction::HubScalar) => {
+                    scalars
+                        .entry(s.name)
+                        .and_modify(|v| *v += s.value)
+                        .or_insert(s.value);
+                }
+                Some(Compaction::EntityExact) => out.push(s),
+                None => {}
+            }
+        }
+
+        for ((name, le), value) in hist_buckets {
+            let key = format!("{name}{{le=\"{le}\"}}");
+            out.push(Series {
+                key,
+                name,
+                labels: vec![("le".to_string(), le)],
+                value,
+            });
+        }
+        for (le, value) in store_lock_buckets {
+            out.push(Series {
+                key: format!("steve_lock_wait_seconds_bucket{{lock=\"store\",le=\"{le}\"}}"),
+                name: "steve_lock_wait_seconds_bucket".to_string(),
+                labels: vec![
+                    ("lock".to_string(), "store".to_string()),
+                    ("le".to_string(), le),
+                ],
+                value,
+            });
+        }
+        for (result, value) in [("hit", cache_hit), ("miss", cache_miss)] {
+            if let Some(value) = value {
+                out.push(Series {
+                    key: format!("steve_cache_requests_total{{result=\"{result}\"}}"),
+                    name: "steve_cache_requests_total".to_string(),
+                    labels: vec![("result".to_string(), result.to_string())],
+                    value,
+                });
+            }
+        }
+        for (name, value) in scalars {
+            out.push(Series {
+                key: name.clone(),
+                name,
+                labels: Vec::new(),
+                value,
+            });
+        }
+
+        let by_key = out.iter().map(|s| (s.key.clone(), s.value)).collect();
+        Snapshot {
+            at,
+            wall_ms,
+            series: out,
+            by_key,
+        }
     }
 }
 
@@ -240,10 +428,85 @@ impl Check {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct Health {
+    pub window: HealthWindow,
     pub window_seconds: f64,
+    pub sampled_at: i64,
     pub checks: Vec<Check>,
     /// The checks past their limit.
     pub warnings: Vec<Check>,
+    /// Time series for the four golden signals over the selected window.
+    pub series: Vec<SeriesPoint>,
+}
+
+/// Retained snapshot rings covering 15m/1h (1-minute resolution) and 24h (5-minute resolution).
+#[derive(Default)]
+pub(crate) struct HealthHistory {
+    recent: VecDeque<Arc<Snapshot>>,
+    day: VecDeque<Arc<Snapshot>>,
+}
+
+impl HealthHistory {
+    pub(crate) fn push(&mut self, snap: Snapshot) {
+        let snap = Arc::new(snap);
+        let push_day = self
+            .day
+            .back()
+            .is_none_or(|last| snap.at - last.at >= DAY_STRIDE_SECS - 1.0);
+        if push_day {
+            if self.day.len() == DAY_CAPACITY {
+                self.day.pop_front();
+            }
+            self.day.push_back(Arc::clone(&snap));
+        }
+        if self.recent.len() == RECENT_CAPACITY {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(snap);
+    }
+
+    pub(crate) fn report(&self, window: HealthWindow) -> Option<Health> {
+        let now = self.recent.back()?;
+        let slice = self.slice_for(window, now);
+        if slice.len() < 2 {
+            return Some(assess(now, None, window, vec![point_of(now, None)]));
+        }
+        let base = Some(slice[0].as_ref());
+        let series = (1..slice.len())
+            .map(|idx| point_of(&slice[idx], Some(&slice[idx - 1])))
+            .collect();
+        Some(assess(now, base, window, series))
+    }
+
+    fn slice_for(&self, window: HealthWindow, now: &Arc<Snapshot>) -> Vec<Arc<Snapshot>> {
+        let use_day = matches!(window, HealthWindow::H24)
+            && self.day.len() >= 2
+            && self
+                .day
+                .front()
+                .is_some_and(|first| now.at - first.at >= DAY_SERIES_MIN_SPAN_SECS);
+        if use_day {
+            let cutoff = WINDOW_24H_SECS + DAY_GRACE_SECS;
+            let mut out: Vec<Arc<Snapshot>> = self
+                .day
+                .iter()
+                .filter(|s| now.at - s.at <= cutoff)
+                .cloned()
+                .collect();
+            if out
+                .last()
+                .is_some_and(|last| now.at - last.at >= DAY_TAIL_GAP_SECS)
+            {
+                out.push(Arc::clone(now));
+            }
+            return out;
+        }
+        let cutoff = window.target_seconds() + RECENT_GRACE_SECS;
+        self.recent
+            .iter()
+            .filter(|s| now.at - s.at <= cutoff)
+            .cloned()
+            .collect()
+    }
 }
 
 /// `num / den` once `den` reaches `min`.
@@ -251,8 +514,34 @@ fn ratio(num: f64, den: f64, min: f64) -> Option<f64> {
     (den >= min && den > 0.0).then(|| num / den)
 }
 
+/// Compute one interval's golden-signal point between `base` and `now`.
+pub(crate) fn point_of(now: &Snapshot, base: Option<&Snapshot>) -> SeriesPoint {
+    let w = Window { now, base };
+    let all = |_: &Series| true;
+    let secs = w.seconds();
+    SeriesPoint {
+        at: now.wall_ms,
+        http_p95: w.quantile("steve_http_request_duration_seconds", 0.95, &all),
+        write_lock_wait_p95: w.quantile("steve_lock_wait_seconds", 0.95, &|s| {
+            s.label("lock") == Some("store")
+        }),
+        hub_cpu: (secs > 0.0).then(|| w.delta("steve_process_cpu_seconds", &all) / secs),
+        hub_memory: w.now("steve_process_resident_bytes", &all),
+    }
+}
+
+/// Single-snapshot health fallback before two periodic snapshots have been captured.
+pub(crate) fn assess_single(now: &Snapshot, window: HealthWindow) -> Health {
+    assess(now, None, window, vec![point_of(now, None)])
+}
+
 /// The health between `base` (`None`: the recorder's start) and `now`.
-pub(crate) fn assess(now: &Snapshot, base: Option<&Snapshot>) -> Health {
+pub(crate) fn assess(
+    now: &Snapshot,
+    base: Option<&Snapshot>,
+    window: HealthWindow,
+    series: Vec<SeriesPoint>,
+) -> Health {
     let w = Window { now, base };
     let all = |_: &Series| true;
     let secs = w.seconds();
@@ -468,9 +757,12 @@ pub(crate) fn assess(now: &Snapshot, base: Option<&Snapshot>) -> Health {
     }
     let warnings = checks.iter().filter(|c| c.failing()).cloned().collect();
     Health {
+        window,
         window_seconds: secs,
+        sampled_at: now.wall_ms,
         checks,
         warnings,
+        series,
     }
 }
 
@@ -486,31 +778,56 @@ mod tests {
     }
 
     #[test]
+    fn health_window_parses_supported_values_and_rejects_unknown() {
+        assert_eq!(HealthWindow::parse("15m"), Some(HealthWindow::M15));
+        assert_eq!(HealthWindow::parse("1h"), Some(HealthWindow::H1));
+        assert_eq!(HealthWindow::parse("24h"), Some(HealthWindow::H24));
+        for bad in ["", "5m", "2d", "15M", "all"] {
+            assert_eq!(HealthWindow::parse(bad), None, "{bad}");
+        }
+    }
+
+    #[test]
     fn figures_are_of_the_window_and_past_their_limit_are_warnings() {
         let base = Snapshot::parse(
             r#"
 steve_http_request_duration_seconds_bucket{route="/a",le="0.1"} 100
 steve_http_request_duration_seconds_bucket{route="/a",le="1"} 100
 steve_http_request_duration_seconds_bucket{route="/a",le="+Inf"} 100
+steve_lock_wait_seconds_bucket{lock="store",caller="a",le="0.05"} 10
+steve_lock_wait_seconds_bucket{lock="store",caller="a",le="+Inf"} 10
+steve_lock_wait_seconds_bucket{lock="core",caller="b",le="0.05"} 999
+steve_lock_wait_seconds_bucket{lock="core",caller="b",le="+Inf"} 999
 steve_process_disk_written_bytes 1000
 steve_cache_requests_total{space="s",result="hit"} 10
 steve_cache_requests_total{space="s",result="miss"} 0
+steve_cache_requests_total{space="s",result="off"} 500
 steve_node_commands_total{node="n1",method="start_turn",result="ok"} 50
 steve_node_process_disk_written_bytes{node="n1"} 900000000000
+steve_unrelated_metric{foo="bar"} 42
 "#,
             0.0,
+            1_000_000,
         );
-        // the last 600 s: 100 requests of which 10 under 0.1 s and 90 under 1 s, a Node that
-        // restarted (its total went down), a plugin label value with an escaped quote
+        // the last 600 s: 100 requests across routes /a and /b (10 under 0.1 s, 90 under 1 s),
+        // core lock ignored, cache off ignored, Node restarted (total went down), escaped plugin quote
         let now = Snapshot::parse(
             r#"
 # HELP steve_http_request_duration_seconds Time to response headers.
-steve_http_request_duration_seconds_bucket{route="/a",le="0.1"} 110
-steve_http_request_duration_seconds_bucket{route="/a",le="1"} 200
-steve_http_request_duration_seconds_bucket{route="/a",le="+Inf"} 200
+steve_http_request_duration_seconds_bucket{route="/a",le="0.1"} 105
+steve_http_request_duration_seconds_bucket{route="/a",le="1"} 150
+steve_http_request_duration_seconds_bucket{route="/a",le="+Inf"} 150
+steve_http_request_duration_seconds_bucket{route="/b",le="0.1"} 5
+steve_http_request_duration_seconds_bucket{route="/b",le="1"} 50
+steve_http_request_duration_seconds_bucket{route="/b",le="+Inf"} 50
+steve_lock_wait_seconds_bucket{lock="store",caller="a",le="0.05"} 10
+steve_lock_wait_seconds_bucket{lock="store",caller="a",le="+Inf"} 10
+steve_lock_wait_seconds_bucket{lock="core",caller="b",le="0.05"} 1000
+steve_lock_wait_seconds_bucket{lock="core",caller="b",le="+Inf"} 2000
 steve_process_disk_written_bytes 7000000001000
 steve_cache_requests_total{space="s",result="hit"} 40
 steve_cache_requests_total{space="s",result="miss"} 170
+steve_cache_requests_total{space="s",result="off"} 900
 steve_node_link_up{node="n1"} 1
 steve_node_commands_total{node="n1",method="start_turn",result="ok"} 54
 steve_node_commands_total{node="n1",method="start_turn",result="offline"} 6
@@ -518,9 +835,12 @@ steve_node_process_disk_written_bytes{node="n1"} 1000
 steve_plugin_restarts_total{plugin="p\"1"} 1
 "#,
             600.0,
+            1_600_000,
         );
-        let h = assess(&now, Some(&base));
+        let h = assess(&now, Some(&base), HealthWindow::M15, vec![]);
+        assert_eq!(h.window, HealthWindow::M15);
         assert_eq!(h.window_seconds, 600.0);
+        assert_eq!(h.sampled_at, 1_600_000);
         // rank 95 of 100 falls 85/90 of the way through (0.1, 1]
         let p95 = check(&h, "http_p95", None).value.unwrap();
         assert!((p95 - (0.1 + 0.9 * 85.0 / 90.0)).abs() < 1e-9, "{p95}");
@@ -538,7 +858,7 @@ steve_plugin_restarts_total{plugin="p\"1"} 1
             Some(1000.0 / 600.0 * 86_400.0)
         );
         assert_eq!(check(&h, "plugin_restarts", Some("p\"1")).value, Some(1.0));
-        // no samples: no value, no warning
+        // store lock had 0 samples in the window (core lock was ignored): no value, no warning
         assert_eq!(check(&h, "write_lock_wait_p95", None).value, None);
         let mut warned: Vec<_> = h
             .warnings
@@ -565,10 +885,11 @@ steve_plugin_restarts_total{plugin="p\"1"} 1
                     "steve_backup_destination_available_bytes 200\nsteve_backup_destination_required_bytes {required}\n"
                 ),
                 60.0,
+                60_000,
             )
         };
         for (required, expected) in [("200", Some(200.0)), ("201", Some(201.0)), ("NaN", None)] {
-            let health = assess(&sample(required), None);
+            let health = assess_single(&sample(required), HealthWindow::M15);
             assert_eq!(
                 check(&health, "backup_destination_space", None).min,
                 expected
@@ -585,8 +906,8 @@ steve_plugin_restarts_total{plugin="p\"1"} 1
 
     #[test]
     fn without_a_window_yet_the_figures_count_from_the_start() {
-        let now = Snapshot::parse("steve_process_disk_written_bytes 86400\n", 60.0);
-        let h = assess(&now, None);
+        let now = Snapshot::parse("steve_process_disk_written_bytes 86400\n", 60.0, 60_000);
+        let h = assess_single(&now, HealthWindow::M15);
         assert_eq!(
             check(&h, "hub_disk_writes", None).value,
             Some(86400.0 * 1440.0)
@@ -603,6 +924,7 @@ steve_job_up{job="mail.sync"} 1
 steve_job_panics_total{job="mail.sync"} 1
 "#,
             0.0,
+            0,
         );
         let now = Snapshot::parse(
             r#"
@@ -611,8 +933,9 @@ steve_job_up{job="mail.sync"} 0
 steve_job_panics_total{job="mail.sync"} 3
 "#,
             60.0,
+            60_000,
         );
-        let h = assess(&now, Some(&base));
+        let h = assess(&now, Some(&base), HealthWindow::M15, vec![]);
         assert_eq!(check(&h, "job_panics", None).value, Some(2.0));
         assert_eq!(check(&h, "jobs_down", None).value, Some(1.0));
         assert_eq!(check(&h, "job_up", Some("mail.sync")).value, Some(0.0));
@@ -638,5 +961,99 @@ steve_job_panics_total{job="mail.sync"} 3
                 ("jobs_down", None),
             ]
         );
+    }
+
+    #[test]
+    fn history_serves_windows_and_golden_series_across_startup_hour_and_day() {
+        let mut history = HealthHistory::default();
+        assert!(history.report(HealthWindow::M15).is_none());
+
+        let snap_at = |min: usize| {
+            let secs = (min * 60) as f64;
+            let wall_ms = (min as i64) * 60_000;
+            // Every minute adds 10 HTTP requests (except minute 5..=6 which are idle for gap test)
+            // and 15 CPU seconds (25% core utilization), and sets memory to (100 + min) MiB.
+            let http_count = if min < 5 {
+                min * 10
+            } else if min <= 6 {
+                40
+            } else {
+                (min - 2) * 10
+            };
+            let lock_count = min;
+            let cpu = secs * 0.25;
+            let mem = (100 + min) * (1024 * 1024);
+            Snapshot::parse(
+                &format!(
+                    "steve_http_request_duration_seconds_bucket{{route=\"/a\",le=\"0.1\"}} {http_count}\n\
+                     steve_http_request_duration_seconds_bucket{{route=\"/a\",le=\"+Inf\"}} {http_count}\n\
+                     steve_lock_wait_seconds_bucket{{lock=\"store\",le=\"0.05\"}} {lock_count}\n\
+                     steve_lock_wait_seconds_bucket{{lock=\"store\",le=\"+Inf\"}} {lock_count}\n\
+                     steve_process_cpu_seconds {cpu}\n\
+                     steve_process_resident_bytes {mem}\n"
+                ),
+                secs,
+                wall_ms,
+            )
+        };
+
+        // First snapshot alone falls back to single-point assessment.
+        history.push(snap_at(1));
+        let single = history.report(HealthWindow::M15).unwrap();
+        assert_eq!(single.series.len(), 1);
+        assert_eq!(single.series[0].at, 60_000);
+        assert_eq!(single.window_seconds, 60.0);
+
+        // Push up to 30 minutes (less than DAY_SERIES_MIN_SPAN_SECS): 24h falls back to 1m points.
+        for min in 2..=30 {
+            history.push(snap_at(min));
+        }
+        let early_24h = history.report(HealthWindow::H24).unwrap();
+        assert_eq!(early_24h.window, HealthWindow::H24);
+        assert_eq!(early_24h.window_seconds, 29.0 * 60.0);
+        assert_eq!(early_24h.series.len(), 29);
+
+        let r15 = history.report(HealthWindow::M15).unwrap();
+        assert_eq!(r15.window_seconds, 15.0 * 60.0);
+        assert_eq!(r15.series.len(), 15);
+
+        // Push up to 120 minutes: 1h has 60 points (recent capacity = 61), 24h switches to 5m day ring.
+        for min in 31..=120 {
+            history.push(snap_at(min));
+        }
+        assert_eq!(history.recent.len(), RECENT_CAPACITY);
+
+        let r1h = history.report(HealthWindow::H1).unwrap();
+        assert_eq!(r1h.window, HealthWindow::H1);
+        assert_eq!(r1h.window_seconds, 60.0 * 60.0);
+        assert_eq!(r1h.series.len(), 60);
+        assert!((r1h.series.last().unwrap().hub_cpu.unwrap() - 0.25).abs() < 1e-9);
+
+        let r24 = history.report(HealthWindow::H24).unwrap();
+        assert_eq!(r24.window, HealthWindow::H24);
+        // day starts at min 1, steps every 5m up to min 116, plus tail snap at min 120 (gap = 240s >= 30s)
+        assert_eq!(r24.window_seconds, (120.0 - 1.0) * 60.0);
+        assert_eq!(r24.sampled_at, 120 * 60_000);
+        assert_eq!(r24.series.len(), 24);
+        // Interval 1..=6 in 5m ring had minute 5..=6 idle, but minute 2..=4 had requests; verify gap in 1m series instead:
+        let mut gap_hist = HealthHistory::default();
+        for min in 4..=6 {
+            gap_hist.push(snap_at(min));
+        }
+        let gap_r15 = gap_hist.report(HealthWindow::M15).unwrap();
+        assert_eq!(gap_r15.series.len(), 2);
+        // 4->5 and 5->6 both had 0 new HTTP requests while lock/CPU still reported.
+        assert_eq!(gap_r15.series[0].http_p95, None);
+        assert_eq!(gap_r15.series[1].http_p95, None);
+        assert!(gap_r15.series[0].write_lock_wait_p95.is_some());
+
+        // Verify 24h ring caps at DAY_CAPACITY over >24h of snapshots.
+        for min in 121..=1500 {
+            history.push(snap_at(min));
+        }
+        assert_eq!(history.day.len(), DAY_CAPACITY);
+        let full_24 = history.report(HealthWindow::H24).unwrap();
+        assert!(full_24.window_seconds >= WINDOW_24H_SECS - DAY_STRIDE_SECS);
+        assert!(full_24.window_seconds <= WINDOW_24H_SECS + DAY_GRACE_SECS);
     }
 }

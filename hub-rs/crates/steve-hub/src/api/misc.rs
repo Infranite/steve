@@ -54,6 +54,8 @@ struct RerouteBody {
 #[derive(serde::Deserialize)]
 struct OfferBody {
     take: bool,
+    #[serde(default)]
+    bot: Option<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -243,11 +245,11 @@ pub async fn shell(
     let modules = st.optional_modules;
     let harness_names = st
         .cfg
-        .adapters
-        .keys()
+        .harness_ids()
+        .into_iter()
         .map(|id| {
-            let spec = crate::harnesses::adapter_spec(id, st.cfg.declared_adapters.get(id));
-            (id.clone(), spec.name)
+            let spec = crate::harnesses::adapter_spec(&id, st.cfg.declared_adapters.get(&id));
+            (id, spec.name)
         })
         .collect();
     st.read(move |r| {
@@ -312,7 +314,10 @@ struct Summary {
     #[serde(skip_serializing_if = "Option::is_none")]
     update: Option<UpdateNotice>,
     thinking: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live: Option<steve_types::ThreadLiveSnapshot>,
     hold: Value,
+    local_node_updating: Option<steve_types::devices::LocalNodeUpdating>,
     sessions_running: usize,
     decisions_open: usize,
     devices_online: usize,
@@ -338,7 +343,11 @@ pub async fn summary(
     let facts = st.read(move |r| Ok(r.summary_facts(&ws_for_read)?));
     let (snap, hold, facts) = tokio::join!(snap, st.domain.hold_status(), facts);
     let facts = facts?;
-    let thinking = facts.pending || st.domain.thread_active(&ws);
+    let live = st.domain.thread_live(&ws);
+    if live.is_some() {
+        metrics::counter!("steve_thread_live_hydrations_total").increment(1);
+    }
+    let thinking = facts.pending || live.is_some() || st.domain.thread_active(&ws);
     let workspace_name = steve_store::seeded::shown(
         &facts.workspace_name,
         &[steve_store::seeded::WORKSPACE_NAME],
@@ -366,7 +375,9 @@ pub async fn summary(
             web_version: crate::web::web_version(&st.cfg),
             update: update(&st, owner),
             thinking,
+            live,
             hold: hold?,
+            local_node_updating: st.nodes.as_ref().and_then(|s| s.local_status.get()),
             sessions_running,
             decisions_open,
             devices_online: facts.devices_online,
@@ -725,7 +736,10 @@ pub async fn thread_reroute(
     thread_result(st.domain.reroute(&c.ws, &id, &to, &c.me).await?)
 }
 
-/// `POST /api/thread/:id/offer {take: bool}`.
+/// Maximum length of an explicit Bot identifier accepted by `POST /api/thread/:id/offer`.
+const MAX_OFFER_BOT_ID_LEN: usize = 128;
+
+/// `POST /api/thread/:id/offer {take: bool, bot?: string}`.
 pub async fn thread_offer(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,
@@ -733,7 +747,21 @@ pub async fn thread_offer(
     b: Bytes,
 ) -> ApiResult {
     let req: OfferBody = json_body(&b)?;
-    thread_result(st.domain.offer(&c.ws, &id, req.take, &c.me).await?)
+    let bot = req.bot.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if bot.is_some_and(|b| !check_len(b, 1, MAX_OFFER_BOT_ID_LEN)) {
+        return Err(ApiError::Invalid(vec!["bot".into()]));
+    }
+    thread_result(
+        st.domain
+            .offer(
+                &c.ws,
+                &id,
+                req.take,
+                req.take.then_some(bot).flatten(),
+                &c.me,
+            )
+            .await?,
+    )
 }
 
 /// `POST /api/thread/:id/a2ui` (ST-46): a button of an A2UI interface in Steve's reply. Answers the record
@@ -1334,7 +1362,7 @@ pub async fn system_harness_install(
             "installation takes no package, command or destination parameters",
         ));
     }
-    if steve_harness_spec::components(&id).is_empty() || !st.cfg.adapters.contains_key(&id) {
+    if steve_harness_spec::components(&id).is_empty() || !st.cfg.knows_harness(&id) {
         return Err(ApiError::bad_request(
             "only registered built-in harness components can be installed",
         ));
@@ -1508,13 +1536,25 @@ pub async fn system_outbox(State(st): State<AppState>, Extension(c): Extension<C
     )
 }
 
-/// `GET /api/system/health`: the Hub's health over the last window, each figure with its limit and
-/// the ones past it (`crate::metrics::health`). The instance owner's.
+#[derive(Debug, serde::Deserialize)]
+pub(crate) struct HealthQuery {
+    window: Option<String>,
+}
+
+/// `GET /api/system/health`: the Hub's health over the selected window (`15m`, `1h`, `24h`), each
+/// figure with its limit, warnings, and golden-signal time series (`crate::metrics::health`).
+/// The instance owner's.
 pub(crate) async fn system_health(
     Extension(c): Extension<Ctx>,
+    Query(query): Query<HealthQuery>,
 ) -> Result<axum::Json<crate::metrics::health::Health>, ApiError> {
     owner_or(&c, || steve_i18n::t!("hub.health.owner_only"))?;
-    crate::metrics::health()
+    let window = match query.window.as_deref().map(str::trim) {
+        None | Some("") => crate::metrics::health::HealthWindow::M15,
+        Some(raw) => crate::metrics::health::HealthWindow::parse(raw)
+            .ok_or_else(|| ApiError::Invalid(vec!["window".to_string()]))?,
+    };
+    crate::metrics::health(window)
         .map(axum::Json)
         .ok_or_else(|| ApiError::internal("metrics are not collected"))
 }

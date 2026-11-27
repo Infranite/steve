@@ -839,13 +839,11 @@ const PUSH_OUTPUT: usize = 16 * 1024;
 /// What of git's complaint goes into an error.
 const ERROR_CHARS: usize = 300;
 
-/// The detail of a push refused by the test guard (the Hub shows its own text for it).
-pub const HOST_FORBIDDEN: &str = "push target forbidden by STEVE_FORBID_REAL_HOSTS";
-/// The details of a push whose branch is not where the Hub saw it, or is gone.
-pub const BRANCH_MOVED: &str = "the branch moved";
-pub const NO_BRANCH: &str = "no such branch";
-/// The detail of a push whose workspace's remote points elsewhere.
-pub const WRONG_REMOTE: &str = "the workspace's remote points elsewhere";
+/// Stable git push refusal detail strings (defined in `steve-node-api`).
+pub use steve_node_api::{
+    GIT_BRANCH_MOVED as BRANCH_MOVED, GIT_HOST_FORBIDDEN as HOST_FORBIDDEN,
+    GIT_NO_BRANCH as NO_BRANCH, GIT_WRONG_REMOTE as WRONG_REMOTE,
+};
 
 /// The process environment git must not take from the Node (or the Hub it runs in).
 const UNSET: [&str; 14] = [

@@ -1,1 +1,1 @@
-{"type":"steve.tool","ws":"workspace-a","mid":"message-1","run":"run-1","name":"search","brief":"lookup","ok":true,"kind":"search","running":true,"call":2,"started_at":10,"at":20}
+{"type":"steve.tool","ws":"workspace-a","mid":"message-1","run":"run-1","name":"search","brief":"lookup","ok":true,"kind":"search","running":true,"call":2,"started_at":10,"at":20,"description":"Inspect files","step_started_at":12,"ms":45,"excerpt":"matched 3 lines","error":"partial timeout"}

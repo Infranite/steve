@@ -16,7 +16,7 @@ import { Input } from "@/components/ui/input"
 import { Sheet, SheetContent, SheetTitle } from "@/components/ui/sheet"
 import { draftKey } from "@/composer-draft"
 import { readFullTranscript, useTranscriptSelector } from "@/data/transcript"
-import { activeSubtasksOf, type ActiveSubtask } from "@/data/transcript-model"
+import { activeSubtasksOf, autoModeWarningOf, type ActiveSubtask, type AutoModeClassifierWarning } from "@/data/transcript-model"
 import { useIsMobile } from "@/hooks/use-mobile"
 import { useT } from "@/i18n"
 import { lazyView } from "@/lazy"
@@ -27,7 +27,7 @@ import { botName, closedSt, hm, interrupt, sessPatch, sessRemove, sessSend, st, 
 import { Empty, go, openSheet, Page, PANEL_W, Status } from "@/ui"
 import { Composer, type ComposerHandle } from "@/composer"
 import { formatEffortMapping } from "@/effort-picker"
-import { RunBar, Transcript } from "@/thread/transcript"
+import { AutoModeClassifierAlert, RunBar, Transcript } from "@/thread/transcript"
 import { ProjectChip } from "@/view-shared"
 
 const SessionPanel = lazyView(() => import("@/session/panel").then((m) => ({ default: m.SessionPanel })))
@@ -67,6 +67,18 @@ function SessionSubtasksPill({ k, run, ro }: { k: string; run: boolean; ro?: boo
     catch (err) { toast((err as Error).message || t("core:error.generic")) }
   }
   return <RunningNow tasks={runningTasks} align="end" onOpen={focusSubtask} onPause={allCancellable ? cancelSubtask : undefined} labels={{ title: t("core:subtask.runningTitle"), pause: t("core:subtask.cancel") }} />
+}
+
+function autoModeWarningEqual(a: AutoModeClassifierWarning | null, b: AutoModeClassifierWarning | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  return a.stopped === b.stopped && a.harness === b.harness && a.text === b.text
+}
+
+function SessionAutoModeWarning({ k, harness }: { k: string; harness?: string }) {
+  const warning = useTranscriptSelector(k, autoModeWarningOf, autoModeWarningEqual)
+  if (!warning) return null
+  return <AutoModeClassifierAlert warning={warning} harnessFallback={harness} className="mb-2" />
 }
 
 export default function SessionView({ k, s }: { k: string; s?: Sess }) {
@@ -142,6 +154,7 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
                 {!s.ro && !s.contextKnown && <span data-session-ctx-unreported>{t("views:session.ctxLabel")} <span className="text-muted-foreground">{t("views:session.unreported")}</span></span>}
               </div>
               {s.placement && <PlacementWhy value={s.placement} />}
+              {!s.ro && <SessionAutoModeWarning k={k} harness={s.h} />}
               <RunBar k={k} />
               {s.ro ? (
                 <div className="flex flex-wrap items-center gap-3 rounded-xl bg-muted/60 px-4 py-3" data-readonly>

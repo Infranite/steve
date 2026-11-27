@@ -71,7 +71,7 @@ const OrgView = lazyView(() => import("@/people/routes").then((m) => ({ default:
 const TeamView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.TeamView })))
 import { Robot } from "@/robot"
 import { syncPluginThemes } from "@/plugin-themes"
-import { HoldBanner } from "@/hold-banner"
+import { HoldBanner, LocalNodeBanner } from "@/hold-banner"
 const StatsRoute = lazyView(() => import("@/stats/page").then((m) => ({ default: m.StatsRoute })))
 const TodosView = lazyView(() => import("@/todos/page").then((m) => ({ default: m.TodosView })))
 const TodoRoute = lazyView(() => import("@/todos/page").then((m) => ({ default: m.TodoRoute })))
@@ -301,7 +301,7 @@ function WorkspacePage({ a, b, c, d, workspace, session }: { a: string; b?: stri
     <TooltipProvider delay={400}>
       <SidebarProvider className="h-[100dvh] min-h-0! bg-background text-foreground [--sidebar-width:15rem]">
         <Sidebar route={a} />
-        <SidebarInset className="relative min-w-0 overflow-hidden [view-transition-name:page]" key={currentHub() + "/" + workspace + "/" + a + "/" + (b ?? "") + "/" + (c ?? "")}><HubLostBanner /><HoldBanner /><div className="min-h-0 flex-1">{view}</div></SidebarInset>
+        <SidebarInset className="relative min-w-0 overflow-hidden [view-transition-name:page]" key={currentHub() + "/" + workspace + "/" + a + "/" + (b ?? "") + "/" + (c ?? "")}><HubLostBanner /><HoldBanner /><LocalNodeBanner /><div className="min-h-0 flex-1">{view}</div></SidebarInset>
         <MobileTabs route={a} />
         {sh?.kind === "fork" && <ForkDialog k={sh.payload.k} at={sh.payload.at} />}
         {sh?.kind === "handoff" && <HandoffDialog item={sh.payload.item} session={sh.payload.session} />}

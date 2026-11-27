@@ -14,10 +14,14 @@ use steve_hub::api::AppState;
 use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
+#[path = "support/local_node.rs"]
+mod local_node;
+
 struct Env {
     /// one Hub at a time in this process: the fake agent's log path is a process env var (see [`start`])
     _one: tokio::sync::MutexGuard<'static, ()>,
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     base: String,
     http: reqwest::Client,
     cookie: String,
@@ -129,7 +133,7 @@ async fn start() -> Env {
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
         // the local Node runs the sessions (the Hub runs none itself)
-        ("STEVE_NODE_MODE", "local".into()),
+        ("STEVE_LOCAL_NODE_PORT", "0".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
         ("STEVE_ADAPTER_CLAUDE", fake.display().to_string()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
@@ -150,11 +154,13 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
-    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
+    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_nodes(w.nodes.clone())
+        .with_workspaces(Some(w.workspaces.clone()))
+        .with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
-    for job in w.jobs {
-        job.start(&st.jobs);
-    }
+    local_node::start_jobs(w.jobs, &st.jobs);
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
         let _ = axum::serve(
@@ -184,6 +190,7 @@ async fn start() -> Env {
     Env {
         _one: one,
         _home: home,
+        _local_node: local_node,
         base,
         http,
         cookie,
@@ -1043,6 +1050,7 @@ async fn bulk_actions_use_typed_item_state() {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
     let h = home.path().to_path_buf();
+    let fake = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../steve-acp/tests/fake-acp.js");
     let mut vars: HashMap<String, String> = HashMap::new();
     for (k, v) in [
         ("HOME", h.display().to_string()),
@@ -1054,9 +1062,9 @@ async fn bulk_actions_use_typed_item_state() {
         ("STEVE_REPO", "/nonexistent".into()),
         ("STEVE_VAULT_KEYSTORE", "file".into()),
         ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-        ("STEVE_NODE_MODE", "local".into()),
+        ("STEVE_LOCAL_NODE_PORT", "0".into()),
         ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
-        ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
+        ("STEVE_ADAPTER_CLAUDE", fake.display().to_string()),
         ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
         ("STEVE_WEB_DIR", h.join("no-web").display().to_string()),
     ] {
@@ -1075,8 +1083,13 @@ async fn bulk_actions_use_typed_item_state() {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
-    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
+    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_nodes(w.nodes.clone())
+        .with_workspaces(Some(w.workspaces.clone()))
+        .with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
+    local_node::start_jobs(w.jobs, &st.jobs);
     let app = steve_hub::app::app(st.clone(), w.auth, w.mcp, w.module_routes, w.root_routes);
 
     let peer = SocketAddr::from(([127, 0, 0, 1], 18701));
@@ -1268,4 +1281,7 @@ async fn bulk_actions_use_typed_item_state() {
     assert_eq!((s, v["n"].as_i64()), (200, Some(0)), "{v}");
 
     st.shutdown().await;
+    if let Some(node) = local_node {
+        node.shutdown().await;
+    }
 }

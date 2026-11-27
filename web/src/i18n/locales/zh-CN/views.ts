@@ -3,6 +3,14 @@ export default {
   decision: {
     turnRepeatedFailure: "同一工具操作连续累计失败五次，Steve 已请求停止。",
     turnNoProgress: "可观察的执行时间累计十五分钟仍无可核实的进展，Steve 已请求停止。",
+    turnNoProgressMinutes_other: "可观察的执行时间累计 {{count}} 分钟仍无可核实的进展，Steve 已请求停止。",
+    turnNoProgressBlocker_other: "等待{{kind}}（{{label}}）已累计 {{count}} 分钟仍无可核实的进展，Steve 已请求停止。",
+    stallBlockerKind: {
+      tool: "运行中的工具",
+      subagent: "子代理",
+      background_task: "后台任务",
+      native_workflow: "工作流",
+    },
     mergePullRequest: "合并 PR #{{number}}（{{repo}}）？",
     noExecutor_other: "有 {{count}} 件事项暂无合格的执行 Bot，怎么处理？",
     waitTimeout: "{{kind}}已超过等待上限（{{subject}}），请选择后续处理方式。",

@@ -1,6 +1,9 @@
 //! Facts that keep the stall watcher from treating an idle turn as a failure.
 
 use steve_store::SessionStop;
+use steve_types::orchestration::{
+    STOP_REASON_STALL_NO_PROGRESS, STOP_REASON_STALL_REPEATED_FAILURE, StallReason,
+};
 
 use crate::cycle::CLOSING;
 use crate::lifecycle::stop_card;
@@ -8,33 +11,93 @@ use crate::repo::Item;
 use crate::util::js_head;
 use crate::{Result, Tx};
 
-/// Why an idle session is idle, from how its last turn ended (kept in `session_stops`, so the same
-/// after a restart); `true` when you stopped it yourself: it is yours to go on with, Steve does not
-/// continue it. Never from the session's last system line.
-pub(crate) fn stopped(stop: Option<&SessionStop>) -> (String, bool) {
-    match stop {
-        Some(s) if yours(s) => ("你中断了这一回合".into(), true),
-        Some(s) if s.stop_asked.is_some() => {
-            ("你要求停止这一回合，还没有确认它已停下".into(), true)
+/// Strongly-typed cause of why an idle session stopped, derived from `session_stops`
+/// (durably persisted across restarts, never inferred from the session's last system line).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum StopCause {
+    UserCancelled,
+    UserStopPending,
+    TurnStall(StallReason),
+    Error(String),
+    EndedWithoutDelivery,
+    Idle,
+}
+
+impl StopCause {
+    pub(crate) fn classify(stop: Option<&SessionStop>) -> Self {
+        let Some(s) = stop else {
+            return Self::Idle;
+        };
+        if yours(s) {
+            return Self::UserCancelled;
         }
-        Some(SessionStop {
-            error: Some(e),
-            stop_reason: Some(_),
-            ..
-        }) if !e.trim().is_empty() => (format!("上一回合出错：{}", js_head(e, 160)), false),
-        Some(SessionStop {
-            stop_reason: Some(_),
-            ..
-        }) => ("上一回合结束后没有交付、提问，也没有后续工作".into(), false),
-        _ => (
-            "会话空闲：没有回合在运行、没有排队输入，也没有交付或提问".into(),
-            false,
-        ),
+        if s.stop_asked.is_some() {
+            return Self::UserStopPending;
+        }
+        if let Some(reason) = stall_reason(s) {
+            return Self::TurnStall(reason);
+        }
+        match (&s.stop_reason, &s.error) {
+            (Some(_), Some(e)) if !e.trim().is_empty() => Self::Error(js_head(e, 160).into()),
+            (Some(_), _) => Self::EndedWithoutDelivery,
+            (None, _) => Self::Idle,
+        }
+    }
+
+    /// `true` only when the user stopped (or asked to stop) the turn.
+    pub(crate) fn is_yours(&self) -> bool {
+        matches!(self, Self::UserCancelled | Self::UserStopPending)
+    }
+
+    /// `true` when Steve must not auto-continue the idle session (either the user stopped it or
+    /// the Hub's stall detector already stopped and held it for the user).
+    pub(crate) fn skips_takeover(&self) -> bool {
+        matches!(
+            self,
+            Self::UserCancelled | Self::UserStopPending | Self::TurnStall(_)
+        )
+    }
+
+    /// Stable machine-readable reason code for diagnostics and UI.
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::UserCancelled => "user_cancelled",
+            Self::UserStopPending => "user_stop_pending",
+            Self::TurnStall(StallReason::RepeatedFailure) => STOP_REASON_STALL_REPEATED_FAILURE,
+            Self::TurnStall(StallReason::NoProgress) => STOP_REASON_STALL_NO_PROGRESS,
+            Self::Error(_) => "error",
+            Self::EndedWithoutDelivery => "ended_without_delivery",
+            Self::Idle => "idle",
+        }
+    }
+
+    /// Localized human-readable description in the current locale.
+    pub(crate) fn text(&self) -> String {
+        match self {
+            Self::UserCancelled => steve_i18n::t!("core.stop.user_cancelled"),
+            Self::UserStopPending => steve_i18n::t!("core.stop.user_stop_pending"),
+            Self::TurnStall(StallReason::RepeatedFailure) => {
+                steve_i18n::t!("core.stop.turn_stall_repeated_failure")
+            }
+            Self::TurnStall(StallReason::NoProgress) => {
+                steve_i18n::t!("core.stop.turn_stall_no_progress")
+            }
+            Self::Error(error) => steve_i18n::t!("core.stop.error", error = error),
+            Self::EndedWithoutDelivery => steve_i18n::t!("core.stop.ended_without_delivery"),
+            Self::Idle => steve_i18n::t!("core.stop.idle"),
+        }
     }
 }
 
-/// The last turn was stopped by you: your Stop reached it, or it ended cancelled (the Hub's own
-/// cancels, a pause or a steer, leave nothing idle to judge).
+/// The stall reason when the Hub's stall detector cancelled the session's last turn.
+pub(crate) fn stall_reason(s: &SessionStop) -> Option<StallReason> {
+    s.stop_reason
+        .as_deref()
+        .and_then(StallReason::from_stop_reason)
+}
+
+/// The last turn was stopped by you: your Stop reached it, or it ended with a user cancel
+/// (`"cancelled"`). Stall-detector cancels carry their own typed stop reasons and never match here.
 pub(crate) fn yours(s: &SessionStop) -> bool {
     s.yours || s.stop_reason.as_deref() == Some("cancelled")
 }

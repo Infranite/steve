@@ -10,7 +10,7 @@ import { useStore } from "../../src/store"
 import { AddDeviceDialog } from "../../src/devices-add"
 
 setPageWorkspace("fixture-workspace")
-st.owner = true
+st.owner = !location.search.includes("member")
 st.version = "0.2.112"
 if (!location.hash) location.hash = "#/devices/nodes"
 /* the devices pages under their routes, as the app mounts them (a route change remounts the page) */

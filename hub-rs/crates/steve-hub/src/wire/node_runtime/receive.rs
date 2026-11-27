@@ -58,8 +58,12 @@ impl NodeRuntime {
             evs.sort_by_key(|e| e.cursor.seq);
         }
         let mut tools_missing = 0u64;
+        let mut classifier_warn = 0u64;
+        let mut classifier_error = 0u64;
         let (ack, applied) = self.write(|w| {
             tools_missing = 0;
+            classifier_warn = 0;
+            classifier_error = 0;
             let mut durable = vec![];
             let mut applied = false;
             for (stream, epoch, evs) in &streams {
@@ -85,10 +89,22 @@ impl NodeRuntime {
                         Ok(()) => {
                             applied = true;
                             at = seq;
-                            if matches!(&e.body,
-                                EventBody::Diagnostic { code, .. } if code == STEVE_TOOLS_MISSING)
-                            {
-                                tools_missing += 1;
+                            match &e.body {
+                                EventBody::Diagnostic { code, .. }
+                                    if code == STEVE_TOOLS_MISSING =>
+                                {
+                                    tools_missing += 1;
+                                }
+                                EventBody::Diagnostic { code, severity, .. }
+                                    if code == AUTO_MODE_CLASSIFIER_UNAVAILABLE =>
+                                {
+                                    if matches!(severity, Severity::Error) {
+                                        classifier_error += 1;
+                                    } else {
+                                        classifier_warn += 1;
+                                    }
+                                }
+                                _ => {}
                             }
                         }
                         // the database failing is not this event's fault: the whole batch
@@ -117,6 +133,20 @@ impl NodeRuntime {
         })?;
         if tools_missing > 0 {
             metrics::counter!("steve_session_steve_tools_missing_total").increment(tools_missing);
+        }
+        if classifier_warn > 0 {
+            metrics::counter!(
+                "steve_session_auto_mode_unavailable_total",
+                "severity" => "warning",
+            )
+            .increment(classifier_warn);
+        }
+        if classifier_error > 0 {
+            metrics::counter!(
+                "steve_session_auto_mode_unavailable_total",
+                "severity" => "error",
+            )
+            .increment(classifier_error);
         }
         self.meters.commits.increment(1);
         self.meters.events.record(batch.events.len() as f64);

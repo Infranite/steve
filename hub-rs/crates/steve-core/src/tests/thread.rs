@@ -56,20 +56,18 @@ async fn digest() {
     let ms = settle(&k, 2).await;
     assert_eq!(ms[1].text, "现在：1 件等你，1 件在进行，今天完成 1 件。");
     let ev = k.events.lock().unwrap().clone();
-    assert!(
-        ev.contains(&steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
             steve_types::WorkLiveEvent::SteveThinking {
                 on: false,
-                ws: {
-                    let value: Option<String> = Some(WS.into());
-                    value
-                        .map(Into::into)
-                        .unwrap_or_else(|| steve_types::WorkspaceId::from(steve_store::WS))
-                },
-                phase: None
+                ws,
+                phase: None,
+                at: Some(_),
+                ..
             }
-        )))
-    );
+        )) if ws.as_str() == WS
+    )));
 }
 
 #[tokio::test]
@@ -106,22 +104,19 @@ async fn an_explicit_target_supplements_the_item() {
     assert_eq!(ms[1].item_id.as_deref(), Some(i.as_str()));
     assert_eq!(k.rt.prompts_of(&s), vec!["补充信息：记得加测试"]);
     assert!(
-        k.events
-            .lock()
-            .unwrap()
-            .contains(&steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+        k.events.lock().unwrap().iter().any(|e| matches!(
+            e,
+            steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
                 steve_types::WorkLiveEvent::SteveThinking {
                     on: true,
-                    ws: {
-                        let value: Option<String> = Some(WS.into());
-                        value
-                            .map(Into::into)
-                            .unwrap_or_else(|| steve_types::WorkspaceId::from(steve_store::WS))
-                    },
-                    phase: Some("supplement".into())
+                    ws,
+                    phase: Some(phase),
+                    started_at: Some(_),
+                    at: Some(_),
                 }
-            ))),
-        "steve.thinking carries the phase"
+            )) if ws.as_str() == WS && phase == "supplement"
+        )),
+        "steve.thinking carries the phase and turn started_at"
     );
     /* unknown references go through the router; with the router down that is an answer, never an item */
     k.core.say(WS, "XX-99 是什么", &[]).unwrap();
