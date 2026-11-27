@@ -9,8 +9,12 @@ use steve_hub::api::AppState;
 use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
+#[path = "support/local_node.rs"]
+mod local_node;
+
 struct Env {
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     db: std::path::PathBuf,
     base: String,
     http: reqwest::Client,
@@ -82,8 +86,7 @@ async fn start_with_dispatch(dispatch: bool) -> Env {
     }
     if dispatch {
         vars.insert("STEVE_NO_RESUME".into(), "0".into());
-        vars.insert("STEVE_NODE_MODE".into(), "local".into());
-        vars.insert("STEVE_NODE_LISTEN".into(), "0".into());
+        vars.insert("STEVE_LOCAL_NODE_PORT".into(), "0".into());
         let adapter = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-claude-chan.mjs");
         vars.insert("STEVE_ADAPTER_CLAUDE".into(), adapter.into());
         vars.insert("STEVE_ADAPTER_CODEX".into(), adapter.into());
@@ -102,13 +105,12 @@ async fn start_with_dispatch(dispatch: bool) -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
     let st = AppState::new(cfg.clone(), w.backend, w.domain, bus.clone())
         .with_modules(w.modules)
         .with_oidc(w.oidc.clone());
     steve_hub::app::boot(&st).await.expect("boot");
-    for job in w.jobs {
-        job.start(&st.jobs);
-    }
+    local_node::start_jobs(w.jobs, &st.jobs);
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
         let _ = axum::serve(
@@ -129,6 +131,7 @@ async fn start_with_dispatch(dispatch: bool) -> Env {
         .expect("dev login");
     Env {
         _home: home,
+        _local_node: local_node,
         db: cfg.db_path(),
         base,
         http,

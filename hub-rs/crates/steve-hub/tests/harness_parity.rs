@@ -60,9 +60,10 @@ const LITERALS: &[&str] = &[
     "\"qodercli\"",
     "\"antigravity\"",
     "\"agy\"",
+    "\"mcp__steve__\"",
 ];
 
-/// Code that branches on a harness by name.
+/// Code that branches on a harness by name or leaks harness-specific MCP/vault details.
 const CODE: &[&str] = &[
     "models::CODEX",
     "CLAUDE_CODE",
@@ -71,13 +72,17 @@ const CODE: &[&str] = &[
     "harness ==",
     "harness !=",
     "codex: bool",
+    "claude_deny_rules",
+    "claude_settings",
 ];
 
 /// Where the built-in adapters and per-harness runtime adapters live.
 const ADAPTER_LAYER: &[&str] = &[
     "steve-acp/src/config.rs",
     "steve-acp/src/adapters.rs",
+    "steve-acp/src/normalize.rs",
     "steve-acp/src/adapter/mod.rs",
+    "steve-acp/src/adapter/history.rs",
     "steve-acp/src/adapter/claude_code.rs",
     "steve-acp/src/adapter/codex.rs",
     "steve-acp/src/adapter/antigravity.rs",

@@ -76,7 +76,8 @@ impl Test {
         let mut research = steve_research::ResearchConfig::new(root.join("scratch"));
         research.home = root.clone();
         research.files_root = root.join("files");
-        node.enable_research(research.clone());
+        node.enable_research(research);
+        let hub_research = crate::wire::research::policy::ResearchConfig::new();
         let runtime = NodeRuntime::new(store.clone(), node.clone(), Arc::new(Domain));
         node.connect(Arc::new(Sink(Arc::downgrade(&runtime))), None);
         runtime.start();
@@ -91,14 +92,14 @@ impl Test {
             _dir: dir,
             root: root.clone(),
             research: ResearchAdapter::new(
-                research,
+                hub_research,
                 steve_core::repo::Db::new(store.clone()),
                 root.join("data"),
             )
             .on_node(NodeResearch {
                 runtime: runtime.clone(),
                 roots: Arc::new(move || {
-                    Ok(vec![steve_node::Root {
+                    Ok(vec![steve_node_api::HostRoot {
                         id: RootId::new("project").unwrap(),
                         display: "project".into(),
                         path: project.clone(),

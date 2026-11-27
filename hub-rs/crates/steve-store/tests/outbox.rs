@@ -500,3 +500,48 @@ fn prune_removes_more_than_one_batch() {
         0
     );
 }
+
+#[test]
+fn next_due_pauses_during_maintenance_and_wakes_when_cleared() {
+    let t = common::fresh();
+    let c = Counter::new("c");
+    let d = disp(std::slice::from_ref(&c));
+    d.register(&t.store).unwrap();
+    emit(&t.store, "default", 1);
+
+    assert_eq!(
+        d.next_due(&t.store).unwrap(),
+        Some(0),
+        "unattempted event is due immediately before maintenance"
+    );
+
+    t.store.maintenance_set(true).unwrap();
+    assert_eq!(
+        d.next_due(&t.store).unwrap(),
+        None,
+        "maintenance suppresses next_due so due_loop does not spin while pump is gated"
+    );
+    assert_eq!(d.pump(&t.store, 1).unwrap().done, 0);
+
+    // Reopening the database with persisted maintenance still keeps next_due paused.
+    let reopened =
+        Store::open(t.dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
+    assert!(reopened.maintenance());
+    assert_eq!(d.next_due(&reopened).unwrap(), None);
+
+    // Clearing maintenance notifies outbox_wake and immediately restores next_due.
+    let wake = reopened.outbox_wake();
+    let notified = wake.notified();
+    reopened.maintenance_set(false).unwrap();
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_time()
+        .build()
+        .unwrap();
+    rt.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_millis(200), notified)
+            .await
+            .expect("clearing maintenance must wake outbox_wake");
+    });
+    assert_eq!(d.next_due(&reopened).unwrap(), Some(0));
+    assert_eq!(d.pump(&reopened, 1).unwrap().done, 1);
+}

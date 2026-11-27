@@ -39,6 +39,16 @@ pub use serve_hub::ServeHub;
 
 pub use steve_node_api::upgrade_v1::close;
 
+/// The file in a Node's home that says why its last link to the Hub failed,
+/// `{"at": <ms>, "error": "…"}`; gone once it links.
+pub const LINK_STATUS: &str = "link-status.json";
+
+/// Parses the contents of [`LINK_STATUS`] into `(at_ms, error)`.
+pub fn parse_link_status(bytes: &[u8]) -> Option<(i64, String)> {
+    let v: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    Some((v["at"].as_i64()?, v["error"].as_str()?.to_string()))
+}
+
 /// A wait drawn at random between half of `d` and all of it ("equal jitter"): Nodes that lost
 /// their link at the same moment (the Hub restarted) dial again spread out, not all at once.
 pub fn jitter(d: std::time::Duration) -> std::time::Duration {

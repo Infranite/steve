@@ -24,7 +24,7 @@ import { Robot } from "@/robot"
 import { ModelPicker, harnessName } from "@/model-picker"
 import { CANONICAL_EFFORTS, EffortPicker, normalizeEffort } from "@/effort-picker"
 import type { ReasoningEffort } from "@/gen"
-import { HarnessMark } from "@/components/harness-mark"
+import { HarnessMark, modelStripPrefixes } from "@/components/harness-mark"
 import { SteveModelControl } from "@/steve-model"
 import { RuntimeAvailability, RuntimeSelect, RuntimeSetupLink } from "@/runtime-access"
 import { reducedMotion } from "@/lib/motion"
@@ -35,8 +35,14 @@ export const MODELS_CAT = Object.defineProperties(["models", "", CpuIcon, ""], {
   3: { get: () => tr("pages:models.cat.desc"), enumerable: true },
 }) as [string, string, any, string]
 
-/** the name of a model without its provider path or family prefix: `claude/claude-haiku-5-5` → `haiku-5-5` */
-const short = (m: string) => m.replace(/^.*\//, "").replace(/^claude-/, "")
+/** Compact model label without provider path or the harness's declared model prefix. */
+function short(m: string, harness?: string): string {
+  const base = m.replace(/^.*\//, "")
+  for (const prefix of modelStripPrefixes(harness)) {
+    if (base.startsWith(prefix)) return base.slice(prefix.length)
+  }
+  return base
+}
 const effortName = (e?: ReasoningEffort | null) => !e || e === "default" ? tr("pages:models.followModel") : (CANONICAL_EFFORTS as readonly string[]).includes(e) ? tr(`pages:models.effort.${e}`) : e
 const hasExplicitEffort = (e?: ReasoningEffort | null): e is Exclude<ReasoningEffort, "default"> => !!e && e !== "default"
 const defaultModel = () => tr("pages:models.defaultModel")
@@ -56,7 +62,7 @@ export function ChoiceLine({ c, className, wrap }: { c: Choice; className?: stri
 function Brief({ c }: { c: Choice }) {
   return (
     <span className="block min-w-0 truncate" data-brief title={`${harnessName(c.harness)} · ${c.models.join(" → ") || defaultModel()}`}>
-      {harnessName(c.harness)} · <span className="type-code">{c.models[0] ? short(c.models[0]) : defaultModel()}</span>
+      {harnessName(c.harness)} · <span className="type-code">{c.models[0] ? short(c.models[0], c.harness) : defaultModel()}</span>
       {c.models.length > 1 && ` · ${tr("pages:models.backups", { count: c.models.length - 1 })}`}{hasExplicitEffort(c.effort) && ` · ${tr("pages:models.thinking", { effort: effortName(c.effort) })}`}
     </span>
   )

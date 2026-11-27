@@ -1,28 +1,20 @@
-//! An item's worktree made and given back by its session's backend (N0e-E11a): with the local Node
-//! on, the core no longer runs `git worktree add` or `git worktree remove` under its lock for a
-//! session bound there.
+//! An item's worktree planned and tidied via its Node backend and Node housekeeping.
 //!
-//! - Plan, under the lock: a new session of an item on a git worktree is created with the
-//!   directory its worktree goes to (`<worktrees>/<item id>`, on `steve/<id>`), made or not. The
-//!   backend binds it with that plan ([`AgentRuntime::created`](crate::AgentRuntime::created)); one
-//!   that does not make it after all leaves it to the core, which makes it as before.
-//! - Off the lock, the backend makes it (refusing below the disk floor) and opens the session.
-//! - Apply, under the lock again: [`Core::workspace_ready`] records where it is, only while the
-//!   session is still the item's current one (a late answer for an older session changes nothing);
-//!   [`Core::workspace_failed`] raises the card a start that could not prepare its worktree raises.
-//! - A finished item's worktree it made is given back by it ([`Tx::tidy_by_backend`]): the core
-//!   decides from the branch's facts (unmerged work stays; a merged branch goes too), the backend
-//!   removes it once its harness is gone, and [`Core::workspace_tidied`] writes what was done.
+//! Core never invokes `git worktree` or local filesystem probes in production code: it names the
+//! worktree path and branch under the lock, delegates preparation, inspection, and reclamation to
+//! the Node (`AgentRuntime` / `NodeHousekeeping`), and records the outcome deterministically.
 
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 
 use serde::Serialize;
+use steve_node_api::DiskInspectTarget;
 use steve_work_api::{ITEM_LIFECYCLE, ITEM_LIFECYCLE_V, ItemLifecycle};
 
 use crate::error::Result;
 use crate::outbox_work::BACKFILL_REASON;
 use crate::repo::Item;
-use crate::{Core, Released, Tx, git, patch};
+use crate::{Core, Released, Tx, patch};
 
 /// Durable idempotent marker key in `settings` (`workspace_id = '*'`) for the one-time backfill
 /// that cleans worktrees left behind by items closed before deterministic post-close cleanup.
@@ -44,9 +36,11 @@ pub struct WorktreeBackfillReport {
 pub(crate) enum TidyOutcome {
     /// A session of the item is still busy or releasing; caller must retry later.
     Busy,
+    /// An external process still has its cwd inside the worktree; caller must retry later.
+    DeferredInUse,
     /// Nothing to clean (open item, non-worktree cwd, or already gone).
     Noop,
-    /// Worktree was removed (or already absent with branch handled) locally by core.
+    /// Worktree was removed (or already absent with branch handled) on the Node.
     Cleaned,
     /// Cleanup command was durably dispatched to the item's Node backend.
     Dispatched,
@@ -62,6 +56,18 @@ struct BackfillCandidate {
     outcome: Option<String>,
     acceptance: Option<String>,
     cwd: String,
+    in_use: Option<bool>,
+}
+
+/// Strongly typed reason why a Node could not prepare a session's workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceFailure<'a> {
+    /// Free disk space on the Node's worktrees volume is below the configured floor.
+    DiskLow,
+    /// The project's root directory does not exist on the executing Node.
+    DirMissing(&'a str),
+    /// Any other Node preparation failure detail.
+    Other(&'a str),
 }
 
 impl Core {
@@ -70,10 +76,9 @@ impl Core {
         self.tx().workspace_ready(session, path, branch)
     }
 
-    /// The worktree `session` waited for could not be made: `disk_low` (below the floor), or
-    /// why (`detail`).
-    pub fn workspace_failed(&self, session: &str, disk_low: bool, detail: &str) -> Result<()> {
-        steve_i18n::stored(|| self.tx().workspace_failed(session, disk_low, detail))
+    /// The worktree `session` waited for could not be made: disk low, missing directory, or detail.
+    pub fn workspace_failed(&self, session: &str, failure: WorkspaceFailure<'_>) -> Result<()> {
+        steve_i18n::stored(|| self.tx().workspace_failed(session, failure))
     }
 
     /// Retire an invalid immutable binding before raising the recovery card. Continue will
@@ -97,8 +102,9 @@ impl Core {
         steve_i18n::stored(|| self.tx().workspace_tidied(item, removed, detail))
     }
 
-    /// One-time idempotent backfill for already-closed items whose worktree still exists on disk.
-    /// Once completed, a durable marker in `settings` prevents rescanning on subsequent startups.
+    /// One-time idempotent backfill for already-closed items whose worktree still exists on the
+    /// colocated Node. Once completed, a durable marker in `settings` prevents rescanning on
+    /// subsequent startups.
     pub fn backfill_closed_worktrees(&self) -> Result<WorktreeBackfillReport> {
         let store = self.store().store();
         if store
@@ -110,7 +116,7 @@ impl Core {
                 ..Default::default()
             });
         }
-        let candidates = {
+        let potential = {
             let tx = self.tx();
             let mut found = Vec::new();
             for ws in tx.db().workspace_ids()? {
@@ -118,12 +124,9 @@ impl Core {
                     if !item.is_closed() {
                         continue;
                     }
-                    let Some(cwd) = tx.item_worktree_dir(&item) else {
+                    let Some(cwd) = tx.item_worktree_dir(&item)? else {
                         continue;
                     };
-                    if !Path::new(&cwd).exists() {
-                        continue;
-                    }
                     found.push(BackfillCandidate {
                         id: item.id,
                         workspace_id: item.workspace_id,
@@ -132,10 +135,42 @@ impl Core {
                         outcome: item.outcome,
                         acceptance: item.acceptance,
                         cwd,
+                        in_use: None,
                     });
                 }
             }
             found
+        };
+
+        let candidates: Vec<BackfillCandidate> = if potential.is_empty() {
+            Vec::new()
+        } else {
+            let targets: Vec<DiskInspectTarget> = potential
+                .iter()
+                .map(|c| DiskInspectTarget {
+                    item: c.id.clone(),
+                    path: c.cwd.clone(),
+                    repo: String::new(),
+                    branch: String::new(),
+                })
+                .collect();
+            let inspected = self.inspect_worktrees(targets)?;
+            let by_item: HashMap<String, (bool, Option<bool>)> = inspected
+                .entries
+                .into_iter()
+                .map(|m| (m.item, (m.exists, m.in_use)))
+                .collect();
+            potential
+                .into_iter()
+                .filter_map(|mut c| {
+                    let (exists, in_use) = by_item.get(&c.id).copied().unwrap_or((false, None));
+                    if !exists {
+                        return None;
+                    }
+                    c.in_use = in_use;
+                    Some(c)
+                })
+                .collect()
         };
 
         let mut report = WorktreeBackfillReport {
@@ -145,9 +180,6 @@ impl Core {
             enqueued: 0,
             failed: 0,
         };
-        let procs = (!candidates.is_empty())
-            .then(crate::workspace::process_dirs)
-            .flatten();
 
         for cand in candidates {
             let mut needs_outbox = false;
@@ -168,11 +200,7 @@ impl Core {
                     }
                 }
             }
-            if !needs_outbox
-                && procs
-                    .as_deref()
-                    .is_some_and(|p| crate::workspace::in_use(Path::new(&cand.cwd), p))
-            {
+            if !needs_outbox && cand.in_use == Some(true) {
                 tracing::warn!(
                     item = %cand.id,
                     cwd = %cand.cwd,
@@ -180,7 +208,7 @@ impl Core {
                 );
                 metrics::counter!(
                     "steve_worktree_cleanup_total",
-                    "backend" => "core",
+                    "backend" => "node",
                     "outcome" => "deferred",
                     "branch" => "kept"
                 )
@@ -200,7 +228,7 @@ impl Core {
                     Ok(TidyOutcome::Failed) => {
                         report.failed += 1;
                     }
-                    Ok(TidyOutcome::Busy) => {
+                    Ok(TidyOutcome::Busy | TidyOutcome::DeferredInUse) => {
                         needs_outbox = true;
                     }
                     Err(e) => {
@@ -268,58 +296,43 @@ impl Core {
     }
 }
 
-/// Preserve the familiar branch unless another worktree already owns it. Separate installations
-/// can share a repository and item numbers: never steal that other installation's branch.
-pub(crate) fn worktree_branch(item: &Item, repo: &Path, target: &Path) -> String {
-    let branch = item
-        .branch
+/// Deterministic item worktree branch name (never queries local git on the Hub).
+pub(crate) fn worktree_branch(item: &Item) -> String {
+    item.branch
         .clone()
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("steve/{}", item.id.to_lowercase()));
-    // Branch names cannot contain newlines. Avoid parsing porcelain paths: older Git lacks -z,
-    // and its C quoting of Unicode/control characters does not name the literal directory.
-    let listing = git::git(repo, &["worktree", "list", "--porcelain"]).unwrap_or_default();
-    let occupied = listing
-        .lines()
-        .any(|l| l.strip_prefix("branch refs/heads/") == Some(branch.as_str()));
-    let same_worktree = occupied
-        && git::git(target, &["rev-parse", "--show-toplevel"])
-            .is_ok_and(|root| same_dir(&root, &target.to_string_lossy()))
-        && git::git(target, &["symbolic-ref", "--short", "HEAD"]).is_ok_and(|head| head == branch);
-    if !occupied || same_worktree {
-        return branch;
+        .unwrap_or_else(|| format!("steve/{}", item.id.to_lowercase()))
+}
+
+/// Lexically normalizes a path (collapsing `.` and `..`, and stripping macOS `/private` prefix on
+/// `/private/tmp` and `/private/var`) without touching the local filesystem.
+fn normalize_lexical(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
     }
-    let namespace = crate::util::sha(&target.parent().unwrap_or(target).to_string_lossy());
-    format!("steve/{}-{}", &namespace[..12], item.id.to_lowercase())
+    if let Ok(rest) = out.strip_prefix("/private")
+        && (rest.starts_with("tmp") || rest.starts_with("var"))
+    {
+        return Path::new("/").join(rest);
+    }
+    out
 }
 
-/// Two spellings of the same directory (a symlinked temp dir, say).
-fn same_dir(a: &str, b: &str) -> bool {
-    a == b
-        || matches!(
-            (Path::new(a).canonicalize(), Path::new(b).canonicalize()),
-            (Ok(x), Ok(y)) if x == y
-        )
-}
-
-/// Whether `cwd` lies inside `root` (handles symlinked vs canonicalized roots such as `/tmp` vs
-/// `/private/tmp` and `/var` vs `/private/var` on macOS).
+/// Whether `cwd` lies inside `root` (pure lexical check; no local filesystem syscalls on the Hub).
 fn path_under_root(root: &Path, cwd: &Path) -> bool {
     if cwd.starts_with(root) && cwd != root {
         return true;
     }
-    let Ok(real_root) = root.canonicalize() else {
-        return false;
-    };
-    if let Ok(real_cwd) = cwd.canonicalize() {
-        return real_cwd.starts_with(&real_root) && real_cwd != real_root;
-    }
-    if let Some(parent) = cwd.parent()
-        && let Ok(real_parent) = parent.canonicalize()
-    {
-        return real_parent.starts_with(&real_root);
-    }
-    false
+    let nr = normalize_lexical(root);
+    let nc = normalize_lexical(cwd);
+    nc.starts_with(&nr) && nc != nr
 }
 
 impl Tx<'_> {
@@ -328,19 +341,23 @@ impl Tx<'_> {
         !cwd.is_empty() && path_under_root(&self.cfg().worktrees, Path::new(cwd))
     }
 
-    /// The item's managed worktree directory under `cfg.worktrees`, if recorded or still present at
-    /// the conventional `<worktrees>/<item_id>` path.
-    pub(crate) fn item_worktree_dir(&self, item: &Item) -> Option<String> {
+    /// The item's managed worktree directory under `cfg.worktrees`, if recorded or expected at the
+    /// conventional `<worktrees>/<item_id>` path for a git worktree project.
+    pub(crate) fn item_worktree_dir(&self, item: &Item) -> Result<Option<String>> {
         if let Some(cwd) = item.cwd.as_deref().filter(|c| self.under_worktrees(c)) {
-            return Some(cwd.to_string());
+            return Ok(Some(cwd.to_string()));
         }
-        if item.project_id.is_some() {
-            let fallback: PathBuf = self.cfg().worktrees.join(&item.id);
-            if fallback.exists() {
-                return Some(fallback.to_string_lossy().into());
+        if let Some(pid) = item.project_id.as_deref() {
+            let project = self.db().project(Some(pid))?;
+            let is_worktree_project = project
+                .as_ref()
+                .is_none_or(|p| p.kind == "git" && p.worktree);
+            if is_worktree_project {
+                let fallback: PathBuf = self.cfg().worktrees.join(&item.id);
+                return Ok(Some(fallback.to_string_lossy().into()));
             }
         }
-        None
+        Ok(None)
     }
 
     /// Appends a system timeline note on `item_id` unless an identical note is already recorded.
@@ -357,51 +374,61 @@ impl Tx<'_> {
         Ok(())
     }
 
-    /// Where the item's worktree goes when its session's backend may make it: `(dir, branch)`.
-    /// `None`: the core makes the item's directory itself ([`Self::prepare_cwd`] says why not, if
-    /// it cannot).
+    /// Where the item's worktree goes on its Node: `(dir, branch)`.
     pub(crate) fn planned_worktree(&self, item: &Item) -> Result<Option<(String, String)>> {
-        if !self.rt().makes_worktrees() {
-            return Ok(None);
-        }
         let Some(p) = self.db().project(item.project_id.as_deref())? else {
             return Ok(None);
         };
-        let path = Path::new(&p.path);
-        if p.device_id != "hub"
-            || p.kind != "git"
-            || !p.worktree
-            || !path.exists()
-            || !git::is_git(path)
-        {
+        if p.device_id != "hub" || p.kind != "git" || !p.worktree {
             return Ok(None);
         }
         Ok(Some((
             self.cfg().worktrees.join(&item.id).to_string_lossy().into(),
-            worktree_branch(item, path, &self.cfg().worktrees.join(&item.id)),
+            worktree_branch(item),
         )))
     }
 
-    /// The item's current session works in a worktree its backend makes again when it opens:
-    /// a removed one is not made here.
-    pub(crate) fn backend_remakes(&self, item_id: &str) -> Result<bool> {
-        if !self.rt().makes_worktrees() {
-            return Ok(false);
-        }
-        Ok(self
-            .active_session(item_id)?
-            .is_some_and(|s| self.rt().makes_workspace(&s.id)))
-    }
-
     /// A closed item's worktree that its backend made is given back by it. `true`: dispatched to
-    /// the backend (or already removed by it); `false`: the core tidies directly (no backend owns
-    /// this worktree).
+    /// the backend; `false`: fall through to Node housekeeping (`disk_reclaim`).
     pub(crate) fn tidy_by_backend(
         &self,
         i: &Item,
         p: &crate::repo::Project,
         branch: Option<&str>,
         cwd: &str,
+    ) -> Result<bool> {
+        if !self.has_backend_workspace(&i.id)? {
+            return Ok(false);
+        }
+        let keep_branch = branch.is_none_or(|b| {
+            !self
+                .c
+                .inspect_branch(&p.path, b)
+                .is_some_and(|(merged, _)| merged)
+        });
+        self.tidy_by_backend_with_branch(i, branch, cwd, keep_branch)
+    }
+
+    /// Whether the backend tracks a prepared workspace for any session of `item_id`.
+    pub(crate) fn has_backend_workspace(&self, item_id: &str) -> Result<bool> {
+        if !self.rt().makes_worktrees() {
+            return Ok(false);
+        }
+        Ok(self
+            .db()
+            .sessions_of_item(item_id)?
+            .into_iter()
+            .any(|s| self.rt().makes_workspace(&s.id)))
+    }
+
+    /// Dispatches closed-item worktree cleanup to the Node backend using a pre-inspected
+    /// `keep_branch` flag so callers can keep `inspect_branch` RPCs off the Core lock.
+    pub(crate) fn tidy_by_backend_with_branch(
+        &self,
+        i: &Item,
+        branch: Option<&str>,
+        cwd: &str,
+        keep_branch: bool,
     ) -> Result<bool> {
         if !self.rt().makes_worktrees() {
             return Ok(false);
@@ -415,14 +442,6 @@ impl Tx<'_> {
         else {
             return Ok(false);
         };
-        /* the backend that made the worktree is the only one that gives it back: once it is gone, the
-         * backend did (its result is told when its receipt is applied), never the Hub's own git */
-        if !Path::new(cwd).exists() {
-            return Ok(true);
-        }
-        let repo = Path::new(&p.path);
-        let base = git::default_base(repo);
-        let keep_branch = branch.is_none_or(|b| !git::branch_facts(repo, b, base).merged);
         match self.rt().tidy(&s.id, keep_branch) {
             Ok(true) => {
                 let branch_label = if keep_branch { "preserved" } else { "deleted" };
@@ -497,7 +516,7 @@ impl Tx<'_> {
         let Some((s, i)) = self.current(session)? else {
             return Ok(());
         };
-        if !i.cwd.as_deref().is_some_and(|c| same_dir(c, path)) {
+        if i.cwd.as_deref() != Some(path) {
             self.db().item_patch(&i.id, patch![cwd: path])?;
         }
         if let Some(b) = branch
@@ -505,23 +524,25 @@ impl Tx<'_> {
         {
             self.db().item_patch(&i.id, patch![branch: b])?;
         }
-        if !same_dir(&s.cwd, path) {
+        if s.cwd != path {
             self.db().session_patch(&s.id, patch![cwd: path])?;
         }
         Ok(())
     }
 
-    fn workspace_failed(&mut self, session: &str, disk_low: bool, detail: &str) -> Result<()> {
+    fn workspace_failed(&mut self, session: &str, failure: WorkspaceFailure<'_>) -> Result<()> {
         let Some((_, i)) = self.current(session)? else {
             return Ok(());
         };
         if i.is_closed() || i.is_paused() {
             return Ok(());
         }
-        let why = if disk_low {
-            self.c.disk_low(self.c.worktrees_free().unwrap_or(0))
-        } else {
-            detail.to_string()
+        let why = match failure {
+            WorkspaceFailure::DiskLow => self.c.disk_low(self.c.worktrees_free().unwrap_or(0)),
+            WorkspaceFailure::DirMissing(path) => {
+                steve_i18n::t!("core.project.dir_missing", path = path)
+            }
+            WorkspaceFailure::Other(detail) => detail.to_string(),
         };
         self.fail(&i.id, &format!("开不了会话：{why}"))
     }
@@ -531,7 +552,7 @@ impl Tx<'_> {
             return Ok(());
         };
         let cwd = self
-            .item_worktree_dir(&i)
+            .item_worktree_dir(&i)?
             .or_else(|| i.cwd.clone().filter(|c| !c.is_empty()))
             .unwrap_or_else(|| self.cfg().worktrees.join(item_id).to_string_lossy().into());
         let project = self.db().project(i.project_id.as_deref())?;
@@ -587,50 +608,61 @@ impl Tx<'_> {
                     "delete_failed",
                 )
             }
-            (Some(p), Some(branch)) => {
-                let head = git::git_read(
-                    Path::new(&p.path),
-                    &["rev-parse", "--short", &format!("refs/heads/{branch}")],
-                );
-                match head {
-                    Ok(h) => {
-                        tracing::info!(
-                            item = item_id,
-                            cwd = %cwd,
-                            branch,
-                            head = %h,
-                            "node removed worktree and preserved unmerged branch"
-                        );
-                        (
-                            steve_i18n::t!(
-                                "core.worktree.removed_unmerged",
-                                cwd = cwd.as_str(),
-                                branch = branch,
-                                head = h.as_str()
-                            ),
-                            "removed",
-                            "preserved",
-                        )
-                    }
-                    Err(_) => {
-                        tracing::info!(
-                            item = item_id,
-                            cwd = %cwd,
-                            branch,
-                            "node removed worktree and deleted merged branch"
-                        );
-                        (
-                            steve_i18n::t!(
-                                "core.worktree.removed_merged",
-                                cwd = cwd.as_str(),
-                                branch = branch
-                            ),
-                            "removed",
-                            "deleted",
-                        )
-                    }
+            (Some(p), Some(branch)) => match self.c.inspect_branch(&p.path, branch) {
+                Some((_, Some(h))) => {
+                    tracing::info!(
+                        item = item_id,
+                        cwd = %cwd,
+                        branch,
+                        head = %h,
+                        "node removed worktree and preserved unmerged branch"
+                    );
+                    (
+                        steve_i18n::t!(
+                            "core.worktree.removed_unmerged",
+                            cwd = cwd.as_str(),
+                            branch = branch,
+                            head = h.as_str()
+                        ),
+                        "removed",
+                        "preserved",
+                    )
                 }
-            }
+                Some((_, None)) => {
+                    tracing::info!(
+                        item = item_id,
+                        cwd = %cwd,
+                        branch,
+                        "node removed worktree and deleted merged branch"
+                    );
+                    (
+                        steve_i18n::t!(
+                            "core.worktree.removed_merged",
+                            cwd = cwd.as_str(),
+                            branch = branch
+                        ),
+                        "removed",
+                        "deleted",
+                    )
+                }
+                None => {
+                    tracing::info!(
+                        item = item_id,
+                        cwd = %cwd,
+                        branch,
+                        "node removed worktree; branch status unavailable"
+                    );
+                    (
+                        steve_i18n::t!(
+                            "core.worktree.removed_unmerged_no_sha",
+                            cwd = cwd.as_str(),
+                            branch = branch
+                        ),
+                        "removed",
+                        "preserved",
+                    )
+                }
+            },
             _ => {
                 tracing::info!(item = item_id, cwd = %cwd, "node removed worktree");
                 (

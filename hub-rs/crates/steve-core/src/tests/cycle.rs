@@ -35,26 +35,26 @@ fn done_events(k: &Kit, item: &str) -> usize {
 #[test]
 fn the_fingerprint_follows_file_content_not_just_git_status() {
     let k = Kit::new();
+    let ng = k.wire_node_git();
     let r = repo(k.home());
-    let cwd = r.to_string_lossy().to_string();
     std::fs::write(r.join("a.txt"), "one\n").unwrap();
     std::fs::write(r.join("new.txt"), "x\n").unwrap();
     let status = g(&r, &["status", "--porcelain"]);
-    let before = cycle::fingerprint(Some(&cwd)).unwrap();
+    let before = ng.fingerprint_dir(&r).unwrap();
     // same status lines (` M a.txt`, `?? new.txt`), other bytes
     std::fs::write(r.join("a.txt"), "two\n").unwrap();
     assert_eq!(g(&r, &["status", "--porcelain"]), status);
-    let tracked = cycle::fingerprint(Some(&cwd)).unwrap();
+    let tracked = ng.fingerprint_dir(&r).unwrap();
     assert_ne!(before, tracked, "a tracked file changed under the same `M`");
     std::fs::write(r.join("new.txt"), "y\n").unwrap();
     assert_eq!(g(&r, &["status", "--porcelain"]), status);
-    let untracked = cycle::fingerprint(Some(&cwd)).unwrap();
+    let untracked = ng.fingerprint_dir(&r).unwrap();
     assert_ne!(
         tracked, untracked,
         "an untracked file changed under the same `??`"
     );
     // the same content again is the same fingerprint, and the item's own index is untouched
-    assert_eq!(cycle::fingerprint(Some(&cwd)).unwrap(), untracked);
+    assert_eq!(ng.fingerprint_dir(&r).unwrap(), untracked);
     assert_eq!(g(&r, &["status", "--porcelain"]), status);
     assert_eq!(cycle::fingerprint_head(&before).len(), 40);
 }
@@ -88,19 +88,20 @@ fn an_edit_that_keeps_the_status_still_voids_the_frozen_result() {
             vec![],
         )
         .unwrap();
-    let rev = k.db().item(&x.id).unwrap().unwrap().delivery_revision;
-    assert!(
+    steve_runtime::testkit::eventually_blocking("The Node fingerprint is frozen.", || {
         k.db()
             .item(&x.id)
             .unwrap()
             .unwrap()
             .closing
-            .unwrap()
-            .fingerprint
-            .is_some()
-    );
+            .is_some_and(|c| !c.print_pending && c.fingerprint.is_some())
+    });
+    let rev = k.db().item(&x.id).unwrap().unwrap().delivery_revision;
     std::fs::write(wt.join("x.txt"), "second\n").unwrap();
     k.core.resolve(&d, "pass", "", "me").unwrap();
+    steve_runtime::testkit::eventually_blocking("The changed worktree reopens the item.", || {
+        k.phase(&x.id) == "active"
+    });
     // the change is found before anything starts on the acceptance: nothing is asked to publish
     // a result that is not what was accepted
     let ops = k
@@ -149,6 +150,14 @@ fn the_tick_does_not_fingerprint_while_the_acceptance_is_still_open() {
             vec![],
         )
         .unwrap();
+    steve_runtime::testkit::eventually_blocking("The Node fingerprint is frozen.", || {
+        k.db()
+            .item(&x.id)
+            .unwrap()
+            .unwrap()
+            .closing
+            .is_some_and(|c| !c.print_pending && c.fingerprint.is_some())
+    });
     k.rt.end_turn(&k.core, &x.session, "end_turn", None);
     std::fs::write(wt.join("x.txt"), "second\n").unwrap();
     // the acceptance holds the closing anyway: the tick leaves the worktree alone
@@ -156,6 +165,9 @@ fn the_tick_does_not_fingerprint_while_the_acceptance_is_still_open() {
     assert_eq!(k.phase(&x.id), "closing");
     // the answer that would clear it looks, and finds the change
     k.core.resolve(&d, "pass", "", "me").unwrap();
+    steve_runtime::testkit::eventually_blocking("The changed worktree reopens the item.", || {
+        k.phase(&x.id) == "active"
+    });
     let i = k.db().item(&x.id).unwrap().unwrap();
     assert_eq!(i.phase.as_str(), "active");
     assert_eq!(i.phase, steve_types::ItemPhase::Active);

@@ -75,6 +75,8 @@ pub struct NodeService {
     pub ingress: Ingress,
     /// Bound loopback listener for the service Node on this machine.
     pub(crate) local_listener: std::sync::OnceLock<SocketAddr>,
+    /// Live updating status and wake handle for the colocated local service Node supervisor.
+    pub(crate) local_status: Arc<crate::wire::local_service::LocalNodeStatus>,
     pub registry: Arc<NodeRegistry>,
     pub fleet: Arc<NodeFleet>,
     pub limiter: pairing::Limiter,
@@ -189,6 +191,7 @@ impl NodeService {
             pin,
             ingress,
             local_listener: std::sync::OnceLock::new(),
+            local_status: Arc::new(crate::wire::local_service::LocalNodeStatus::default()),
             registry: Arc::new(NodeRegistry::default()),
             fleet,
             limiter: pairing::Limiter::default(),

@@ -1,0 +1,242 @@
+{
+  "adapters": {
+    "antigravity": {
+      "name": "Antigravity CLI",
+      "brand_mark": "google",
+      "brand_substrings": [
+        "antigravity"
+      ]
+    },
+    "claude-code": {
+      "name": "Claude Code",
+      "brand_mark": "anthropic",
+      "brand_substrings": [
+        "claude"
+      ],
+      "model_strip_prefixes": [
+        "claude-"
+      ]
+    },
+    "codebuddy-code": {
+      "name": "CodeBuddy Code",
+      "brand_mark": "tencent",
+      "brand_substrings": [
+        "codebuddy"
+      ]
+    },
+    "codex": {
+      "name": "Codex",
+      "brand_mark": "openai",
+      "brand_substrings": [
+        "codex",
+        "openai"
+      ]
+    },
+    "cursor": {
+      "name": "Cursor",
+      "brand_mark": "anysphere",
+      "brand_substrings": [
+        "cursor"
+      ]
+    },
+    "factory-droid": {
+      "name": "Factory Droid",
+      "brand_mark": "other"
+    },
+    "gemini": {
+      "name": "Gemini CLI",
+      "brand_mark": "google",
+      "brand_substrings": [
+        "gemini"
+      ]
+    },
+    "github-copilot-cli": {
+      "name": "GitHub Copilot CLI",
+      "brand_mark": "github",
+      "brand_substrings": [
+        "copilot"
+      ]
+    },
+    "goose": {
+      "name": "goose",
+      "brand_mark": "other"
+    },
+    "grok-build": {
+      "name": "Grok Build",
+      "brand_mark": "other"
+    },
+    "kilo": {
+      "name": "Kilo Code",
+      "brand_mark": "other"
+    },
+    "kimi-code": {
+      "name": "Kimi Code",
+      "brand_mark": "moonshot",
+      "brand_substrings": [
+        "kimi",
+        "moonshot"
+      ]
+    },
+    "kiro": {
+      "name": "Kiro CLI",
+      "brand_mark": "other"
+    },
+    "mistral-vibe": {
+      "name": "Mistral Vibe",
+      "brand_mark": "mistral",
+      "brand_substrings": [
+        "mistral"
+      ],
+      "brand_words": [
+        "vibe"
+      ]
+    },
+    "opencode": {
+      "name": "OpenCode",
+      "brand_mark": "sst",
+      "brand_substrings": [
+        "opencode"
+      ]
+    },
+    "pi": {
+      "name": "Pi",
+      "brand_mark": "other"
+    },
+    "qoder": {
+      "name": "Qoder CLI",
+      "brand_mark": "other"
+    },
+    "qwen-code": {
+      "name": "Qwen Code",
+      "brand_mark": "alibaba",
+      "brand_substrings": [
+        "qwen"
+      ]
+    }
+  },
+  "model_brands": [
+    {
+      "mark": "anthropic",
+      "substrings": [
+        "claude",
+        "anthropic",
+        "opus",
+        "sonnet",
+        "haiku",
+        "fable"
+      ]
+    },
+    {
+      "mark": "openai",
+      "substrings": [
+        "openai",
+        "codex"
+      ],
+      "words": [
+        "gpt",
+        "o1",
+        "o2",
+        "o3",
+        "o4",
+        "o5",
+        "o6",
+        "o7",
+        "o8",
+        "o9"
+      ]
+    },
+    {
+      "mark": "google",
+      "substrings": [
+        "gemini",
+        "google"
+      ]
+    },
+    {
+      "mark": "moonshot",
+      "substrings": [
+        "kimi",
+        "moonshot"
+      ]
+    },
+    {
+      "mark": "mistral",
+      "substrings": [
+        "mistral",
+        "devstral",
+        "codestral",
+        "ministral",
+        "magistral"
+      ]
+    },
+    {
+      "mark": "alibaba",
+      "substrings": [
+        "qwen"
+      ]
+    }
+  ],
+  "mcp_clients": [
+    {
+      "id": "generic",
+      "language": "json",
+      "wrap": false,
+      "template": {
+        "mcpServers": {
+          "{{name}}": {
+            "type": "http",
+            "url": "{{url}}",
+            "headers": {
+              "Authorization": "{{bearer}}"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "claudeDesktop",
+      "language": "json",
+      "file": "claude_desktop_config.json",
+      "wrap": false,
+      "template": {
+        "mcpServers": {
+          "{{name}}": {
+            "command": "npx",
+            "args": [
+              "-y",
+              "mcp-remote",
+              "{{url}}",
+              "--header",
+              "Authorization:${STEVE_AUTH}"
+            ],
+            "env": {
+              "STEVE_AUTH": "{{bearer}}"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "cursor",
+      "language": "json",
+      "file": "mcp.json",
+      "wrap": false,
+      "template": {
+        "mcpServers": {
+          "{{name}}": {
+            "url": "{{url}}",
+            "headers": {
+              "Authorization": "{{bearer}}"
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "claudeCode",
+      "language": "bash",
+      "wrap": true,
+      "command_template": "claude mcp add --transport http {{name}} {{url}} --header {{auth_header}}"
+    }
+  ]
+}

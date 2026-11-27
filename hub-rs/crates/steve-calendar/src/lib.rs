@@ -111,8 +111,10 @@ struct Inner {
     settings: Settings,
     /// One sync per connection at a time.
     running: Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
-    /// Connection → (next due, failures in a row), for the background job.
-    due: Mutex<HashMap<String, (i64, u32)>>,
+    /// Per-connection not-before fences owned by `steve_runtime::due::RowDeadlines`.
+    deadlines: steve_runtime::due::RowDeadlines,
+    /// Consecutive sync failure count per connection for exponential backoff.
+    failures: Mutex<HashMap<String, u32>>,
 }
 
 pub struct CalendarBuilder {
@@ -143,7 +145,8 @@ impl CalendarBuilder {
             sources: self.sources,
             settings: self.settings,
             running: Mutex::default(),
-            due: Mutex::default(),
+            deadlines: steve_runtime::due::RowDeadlines::default(),
+            failures: Mutex::default(),
         }))
     }
 }

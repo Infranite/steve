@@ -4,6 +4,8 @@
 //! the PAT repository hook. Everything runs against the fake GitHub; the hooks are served on a real
 //! local port so the fake can POST to them.
 
+mod support_git_nodes;
+
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -86,6 +88,7 @@ async fn setup_observing(observe: impl Fn(&steve_store::BusEvent) + Send + Sync 
     );
     let sink = RecordingSink::new();
     gh.set_event_sink(sink.clone());
+    gh.set_git_nodes(support_git_nodes::TestGitNodes::new(env.store().clone()));
     let api = manifest::routes(gh.clone())
         .merge(repos::routes(gh.clone()))
         .merge(connections::routes(conns.clone()))
@@ -1655,10 +1658,25 @@ async fn failed_poll_replays_durable_half_without_duplicate_effects() {
         .write::<_, steve_store::StoreError>(|c| Seed::FailPollMidway.apply(c, &[]))
         .unwrap();
     assert!(h.gh.poll_repo(&repo).await.is_err());
-    assert_eq!(
-        poll_state(&h, &repo),
-        before,
-        "no cursor or ETag committed after failure"
+    let after = poll_state(&h, &repo);
+    for key in [
+        "last_poll",
+        "pulls_scan",
+        "pulls_since",
+        "pulls_etag",
+        "last_issues_poll",
+        "issues_since",
+    ] {
+        assert_eq!(
+            after.get(key),
+            before.get(key),
+            "no cursor or ETag ({key}) committed after failure"
+        );
+    }
+    assert_eq!(after["consecutive_failures"], json!(1));
+    assert!(
+        after["next_retry_at"].as_i64().unwrap_or(0) > h.env.clock.now(),
+        "failure records retry backoff: {after}"
     );
     assert_eq!(q(&h, Inspect::GhPrsCount2, &[&repo]), json!(60));
     h.env
@@ -1670,4 +1688,76 @@ async fn failed_poll_replays_durable_half_without_duplicate_effects() {
     assert_eq!(q(&h, Inspect::GhDeliveriesCount3, &[&repo]), json!(120));
     assert_eq!(q(&h, Inspect::GhPrsCount2, &[&repo]), json!(120));
     assert!(h.sink.duplicates().is_empty());
+    let recovered = poll_state(&h, &repo);
+    assert!(recovered.get("consecutive_failures").is_none());
+    assert!(recovered.get("next_retry_at").is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn repeated_poll_failures_back_off_exponentially_and_reset_on_success() {
+    let h = setup().await;
+    let con = pat(&h).await;
+    h.fake.set_hooks_allowed(REPO, false);
+    let linked = link(&h, &con, defaults::REPO_ID, None).await;
+    assert_eq!(linked["ingest"], json!("poll"));
+    let repo = linked["id"].as_str().expect("repo id").to_string();
+    let t0 = h.env.clock.now() + steve_github::poll::POLL_EVERY_MS;
+    h.env.clock.set(t0);
+    assert!(
+        h.gh.poll_is_due(&repo, t0).unwrap(),
+        "poll repo is due once POLL_EVERY_MS has elapsed"
+    );
+    // Inject a persistent failure on delivery writes so poll_due fails cleanly.
+    h.env
+        .store()
+        .write::<_, steve_store::StoreError>(|c| Seed::FailPollMidway.apply(c, &[]))
+        .unwrap();
+    cursor_prs(&h, 120);
+
+    // 1st failure: backs off by POLL_FAIL_BACKOFF_BASE_MS (30s).
+    assert_eq!(h.gh.poll_due().await, 1);
+    let st1 = poll_state(&h, &repo);
+    assert_eq!(st1["consecutive_failures"], json!(1));
+    let retry1 = st1["next_retry_at"].as_i64().unwrap();
+    assert_eq!(retry1, t0 + steve_github::poll::POLL_FAIL_BACKOFF_BASE_MS);
+    assert!(
+        !h.gh.poll_is_due(&repo, retry1 - 1).unwrap(),
+        "must not immediately re-poll before retry1"
+    );
+    assert!(h.gh.poll_is_due(&repo, retry1).unwrap());
+
+    // Advance clock to retry1 and fail again: backoff doubles (60s).
+    h.env.clock.set(retry1);
+    assert_eq!(h.gh.poll_due().await, 1);
+    let st2 = poll_state(&h, &repo);
+    assert_eq!(st2["consecutive_failures"], json!(2));
+    let retry2 = st2["next_retry_at"].as_i64().unwrap();
+    assert_eq!(
+        retry2,
+        retry1 + steve_github::poll::POLL_FAIL_BACKOFF_BASE_MS * 2
+    );
+    assert!(!h.gh.poll_is_due(&repo, retry2 - 1).unwrap());
+
+    // Cap check: high failure count never exceeds POLL_FAIL_BACKOFF_MAX_MS.
+    assert_eq!(
+        steve_github::poll::poll_failure_backoff_ms(20),
+        steve_github::poll::POLL_FAIL_BACKOFF_MAX_MS
+    );
+
+    // Allow writes and advance to retry2 -> success resets failure counter and backoff.
+    h.env
+        .store()
+        .write::<_, steve_store::StoreError>(|c| Seed::AllowPollWrites.apply(c, &[]))
+        .unwrap();
+    h.env.clock.set(retry2);
+    assert_eq!(h.gh.poll_due().await, 1);
+    let ok_st = poll_state(&h, &repo);
+    assert!(ok_st.get("consecutive_failures").is_none());
+    assert!(ok_st.get("next_retry_at").is_none());
+    assert_eq!(ok_st["last_poll"], json!(retry2));
+    assert!(!h.gh.poll_is_due(&repo, retry2 + 1).unwrap());
+    assert!(
+        h.gh.poll_is_due(&repo, retry2 + steve_github::poll::POLL_EVERY_MS)
+            .unwrap()
+    );
 }
