@@ -26,12 +26,15 @@ mod file_access;
 pub mod git;
 mod harness_context;
 mod harness_login;
+mod harness_settings;
 mod harness_updates;
 pub mod history;
 mod host;
+pub mod housekeeping;
 mod inline_images;
 mod job;
 mod journal;
+mod library_mcp;
 mod procs;
 pub mod project_setup;
 mod research;
@@ -58,7 +61,12 @@ use tokio::sync::mpsc;
 use actor::{Actor, Msg};
 pub use artifact::read_delivery_file;
 use journal::{Journal, Op, SessionRow, Tx, WorkspaceRow, internal};
+pub use steve_node_api::LocalDir;
 pub use workspace::Root;
+
+/// Concurrent think/research jobs allowed on the colocated local Node (unbounded by slot count,
+/// matching the prior in-process behavior so bursts do not back off on job capacity).
+pub const LOCAL_JOB_CAPACITY: u32 = u32::MAX;
 
 /// What stages and switches a Node's release when the Hub asks ([`Discovery::upgrade_stage`]):
 /// the host that installed the Node as a service (`steve-node`), never the Node library itself.
@@ -465,6 +473,16 @@ pub(crate) struct Inner {
     research: research::Research,
     /// The OS sandbox around what this Node starts for runs ([`confine`]).
     confine: confine::Confine,
+    /// Host project creation/clone operations on this machine.
+    setup_mgr: Arc<project_setup::SetupManager>,
+    /// Sandboxed `stdio` library MCP servers hosted on this Node.
+    stdio_mcp: library_mcp::StdioMcpHost,
+    /// Optional OS sandbox around capability servers (`stdio` MCP).
+    capability_sandbox: Mutex<Option<Arc<steve_confine::Sandbox>>>,
+    /// Explicit opt-in for colocated host operations (`host.*`, `workspace.disk_*`, `mcp.stdio_*`).
+    /// Enabled only by `steve-node --local-node` (and colocated test fixtures); remote Nodes leave
+    /// this `false` so a compromised Hub cannot reach outside configured roots or spawn stdio MCP.
+    host_ops: AtomicBool,
 }
 
 impl Inner {
@@ -1150,7 +1168,10 @@ fn tool_evidence(
                         _ => return None,
                     }
                 }
-                ToolCategory::Read | ToolCategory::Edit | ToolCategory::Delete
+                ToolCategory::Read
+                | ToolCategory::Edit
+                | ToolCategory::Delete
+                | ToolCategory::Move
                     if !fact.paths.is_empty() =>
                 {
                     let paths = fact
@@ -1161,12 +1182,16 @@ fn tool_evidence(
                     // Preserve line ranges or other input that affects what the tool reads.
                     digest_of(&(paths, fact.input()))
                 }
+                ToolCategory::Search => digest_of(&("search", &fact.query, fact.input())),
+                ToolCategory::Fetch => digest_of(&("fetch", &fact.url, fact.input())),
+                ToolCategory::Steve => digest_of(&("steve", &fact.name, fact.input())),
                 _ => return None,
             }
             .ok()?;
             let exit = fact
                 .raw
                 .pointer("/rawOutput/exitCode")
+                .or_else(|| fact.raw.pointer("/rawOutput/exit_code"))
                 .and_then(serde_json::Value::as_i64);
             let signature =
                 digest_of(&(workspace, &fact.name, fact.category, target, exit)).ok()?;
@@ -1174,28 +1199,63 @@ fn tool_evidence(
         }
         ToolPhase::Succeeded if fact.category == ToolCategory::Edit => {
             let mut changed = Vec::new();
-            for diff in fact
+            if let Some(items) = fact
                 .raw
-                .get("content")?
-                .as_array()?
-                .iter()
-                .filter(|d| d["type"] == "diff")
+                .get("content")
+                .and_then(serde_json::Value::as_array)
             {
-                let new = diff.get("newText")?.as_str()?;
-                let old = diff.get("oldText").and_then(serde_json::Value::as_str);
-                if old != Some(new) {
-                    changed.push((
-                        scoped(diff.get("path")?.as_str()?)?,
-                        Digest::sha256(new.as_bytes()),
-                    ));
+                for diff in items.iter().filter(|d| d["type"] == "diff") {
+                    let new = diff.get("newText")?.as_str()?;
+                    let old = diff.get("oldText").and_then(serde_json::Value::as_str);
+                    if old != Some(new) {
+                        changed.push((
+                            scoped(diff.get("path")?.as_str()?)?,
+                            Digest::sha256(new.as_bytes()),
+                        ));
+                    }
                 }
             }
-            if changed.is_empty() {
-                return None;
+            if !changed.is_empty() {
+                changed.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
+                let signature = digest_of(&(workspace, changed)).ok()?;
+                return Some(ToolEvidence::ContentChanged { signature });
             }
-            changed.sort_unstable_by(|a, b| a.0.as_str().cmp(b.0.as_str()));
-            let signature = digest_of(&(workspace, changed)).ok()?;
-            Some(ToolEvidence::ContentChanged { signature })
+            // Some adapters (e.g. write_file/edit_file without ACP diff content blocks) carry
+            // structured edit inputs rather than content diffs. Require a real edit input (not a
+            // no-op where old_string == new_string) bound to workspace paths.
+            if let Some(change) = &fact.change
+                && !fact.paths.is_empty()
+                && !fact.raw.get("content").is_some_and(|c| {
+                    c.as_array()
+                        .is_some_and(|items| items.iter().any(|d| d["type"] == "diff"))
+                })
+            {
+                let input = fact.input();
+                let noop_input = match (
+                    input
+                        .get("old_string")
+                        .or_else(|| input.get("Target"))
+                        .and_then(serde_json::Value::as_str),
+                    input
+                        .get("new_string")
+                        .or_else(|| input.get("Replacement"))
+                        .and_then(serde_json::Value::as_str),
+                ) {
+                    (Some(old), Some(new)) => old == new,
+                    _ => false,
+                };
+                if !noop_input {
+                    let mut paths = fact
+                        .paths
+                        .iter()
+                        .map(|p| scoped(p))
+                        .collect::<Option<Vec<_>>>()?;
+                    paths.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+                    let signature = digest_of(&(workspace, paths, change)).ok()?;
+                    return Some(ToolEvidence::ContentChanged { signature });
+                }
+            }
+            None
         }
         _ => None,
     }
@@ -1226,11 +1286,7 @@ pub(crate) fn bind_permission(
     };
     let action = match fact.category {
         ToolCategory::Steve => Action::Tool {
-            name: fact
-                .name
-                .strip_prefix("mcp__steve__")
-                .unwrap_or(&fact.name)
-                .to_string(),
+            name: fact.name.clone(),
             args: fact.input().clone(),
         },
         ToolCategory::Exec => {
@@ -1439,16 +1495,6 @@ fn failed(e: Error) -> Observed {
 #[derive(Clone)]
 pub struct LocalNode(Arc<Inner>);
 
-/// A bound workspace's directory on this machine, for a Hub running on the same machine as its
-/// Node (see [`LocalNode::local_dir`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalDir {
-    /// Canonical, checked against the Node's roots when asked.
-    pub path: PathBuf,
-    /// The Node made it (a worktree or scratch dir), rather than adopting an existing directory.
-    pub owned: bool,
-}
-
 struct NodeUpgradeHold<'a> {
     active: &'a AtomicBool,
     _prefix: steve_acp::managed::PrefixLock,
@@ -1552,6 +1598,10 @@ impl LocalNode {
             push_timeout: AtomicU64::new(git::PUSH_TIMEOUT.as_millis() as u64),
             tasks: Mutex::new(Vec::new()),
             research: Default::default(),
+            setup_mgr: Arc::new(project_setup::SetupManager::new()),
+            stdio_mcp: Default::default(),
+            capability_sandbox: Mutex::new(None),
+            host_ops: AtomicBool::new(false),
         }));
         node.0
             .j
@@ -1721,6 +1771,7 @@ impl LocalNode {
                 let _ = wait.await;
             }
         }
+        self.0.stdio_mcp.shutdown();
         // All effects have quiesced. Preserve unresolved outcomes for explicit Hub recovery.
         let _ = self.0.j.tx(|t| t.mark_unknown());
         self.0.wake.notify_one();
@@ -1806,6 +1857,44 @@ impl LocalNode {
     /// Hub last wrote to `path` (a JSON list of [`Root`]), read again whenever the file changed.
     pub fn follow_roots_file(&self, path: PathBuf) {
         *self.0.roots_file.lock().unwrap() = Some((path, None));
+    }
+
+    /// Host bridge: run research jobs with scratch/attachments stored in `scratch`.
+    pub fn enable_research_in(&self, scratch: PathBuf) {
+        self.enable_research(steve_research::ResearchConfig::new(scratch));
+    }
+
+    /// Host bridge: configure the OS sandbox used for Node-hosted `stdio` library MCP servers.
+    pub fn set_capability_sandbox(&self, sandbox: Option<steve_confine::Sandbox>) {
+        *self.0.capability_sandbox.lock().unwrap() = sandbox.map(Arc::new);
+    }
+
+    /// Host bridge: enable the default OS sandbox for Node-hosted `stdio` library MCP servers.
+    pub fn enable_capability_sandbox(&self) {
+        let sandbox = steve_confine::Sandbox::open(&self.0.cfg.acp.steve_home, &self.0.cfg.home);
+        self.set_capability_sandbox(Some(sandbox));
+    }
+
+    /// Host bridge: opt this Node in to colocated host operations (`host.*`, `workspace.disk_*`,
+    /// `mcp.stdio_*`). Must ONLY be enabled for `steve-node --local-node` (never remote Nodes).
+    pub fn enable_host_ops(&self) {
+        self.0.host_ops.store(true, Ordering::Release);
+    }
+
+    fn require_host_ops(&self, op: &'static str) -> ApiResult<()> {
+        if self.0.host_ops.load(Ordering::Acquire) {
+            return Ok(());
+        }
+        metrics::counter!(
+            "steve_security_refusals_total",
+            "boundary" => "node_host_ops",
+            "reason" => op
+        )
+        .increment(1);
+        Err(Error::new(
+            Code::Forbidden,
+            "host operations require a colocated local node",
+        ))
     }
 
     /// Host bridge, like [`Self::set_roots`]: where this machine's harnesses keep their history and
@@ -3266,6 +3355,60 @@ impl ExecutionControl for LocalNode {
     }
 }
 
+fn local_output_paths(
+    input: &Path,
+    home: &Path,
+    raw_home: &Path,
+    item: &str,
+) -> Option<(PathBuf, PathBuf)> {
+    let prefix = Path::new("workspaces").join(item).join("outputs");
+    if let Ok(path) = input
+        .strip_prefix(home)
+        .or_else(|_| input.strip_prefix(raw_home))
+    {
+        let rel = path.strip_prefix(&prefix).ok()?;
+        return (!rel.as_os_str().is_empty()).then(|| (path.to_path_buf(), rel.to_path_buf()));
+    }
+    if !input.is_absolute()
+        || input.components().any(|c| {
+            matches!(
+                c,
+                std::path::Component::ParentDir | std::path::Component::Prefix(_)
+            )
+        })
+    {
+        return None;
+    }
+    // Match an OS symlink alias above `home` (e.g. macOS `/var` -> `/private/var`) without
+    // canonicalizing the assistant-supplied file or any component beneath `outputs`.
+    let comps: Vec<_> = input.components().collect();
+    for i in 1..comps.len() {
+        let std::path::Component::Normal(a) = comps[i] else {
+            continue;
+        };
+        if a != "workspaces" {
+            continue;
+        }
+        if i + 3 >= comps.len() {
+            break;
+        }
+        let (std::path::Component::Normal(b), std::path::Component::Normal(c)) =
+            (comps[i + 1], comps[i + 2])
+        else {
+            continue;
+        };
+        if b != item || c != "outputs" {
+            continue;
+        }
+        let cand_home: PathBuf = comps[..i].iter().collect();
+        if std::fs::canonicalize(&cand_home).ok().as_deref() == Some(home) {
+            let rel: PathBuf = comps[i + 3..].iter().collect();
+            return (!rel.as_os_str().is_empty()).then(|| (prefix.join(&rel), rel));
+        }
+    }
+    None
+}
+
 fn check_reply_path(rel: &Path, path: &Path, protected: &[PathBuf]) -> ApiResult<()> {
     if inline_images::protected_path(rel, path, protected)
         || rel.components().any(|c| {
@@ -3372,7 +3515,7 @@ impl WorkspaceExecutor for LocalNode {
                             .await
                             .map_err(|e| Error::new(Code::Internal, e.to_string()))
                             .and_then(|r| r)
-                            .map(|_| (p, Some(repo), Some(branch.clone())))
+                            .map(|actual_branch| (p, Some(repo), Some(actual_branch)))
                         }
                         (Err(e), _) | (_, Err(e)) => Err(e),
                     }
@@ -3999,14 +4142,13 @@ impl WorkspaceExecutor for LocalNode {
                 {
                     let prefix = Path::new("workspaces").join(item).join("outputs");
                     let input = Path::new(&q.location);
-                    if let Ok(path) = input
-                        .strip_prefix(home)
-                        .or_else(|_| input.strip_prefix(&self.0.cfg.acp.steve_home))
-                        && let Ok(rel) = path.strip_prefix(&prefix)
+                    if let Some((path, rel)) =
+                        local_output_paths(input, home, &self.0.cfg.acp.steve_home, item)
                     {
-                        let full = home.join(path);
-                        check_reply_path(rel, &full, &protected)?;
-                        if t.overlaps_other_workspace(&q.workspace.id, &home.join(prefix), &full)? {
+                        let full = home.join(&path);
+                        check_reply_path(&rel, &full, &protected)?;
+                        if t.overlaps_other_workspace(&q.workspace.id, &home.join(&prefix), &full)?
+                        {
                             return Err(denied());
                         }
                         output = Some((
@@ -4179,6 +4321,78 @@ impl WorkspaceExecutor for LocalNode {
                     .with_param("operation", s.to_string()))
             }
         }
+    }
+
+    async fn browse_dir(&self, q: BrowseDirRequest) -> ApiResult<BrowseDirResponse> {
+        self.require_host_ops("browse_dir")?;
+        blocking(move || Ok(project_setup::browse_dir(&q.path))).await
+    }
+
+    async fn describe_dir(&self, q: DescribeDirRequest) -> ApiResult<DescribeDirResponse> {
+        self.require_host_ops("describe_dir")?;
+        blocking(move || project_setup::describe_dir(&q.path, q.with_readme)).await
+    }
+
+    async fn path_check(&self, q: PathCheckRequest) -> ApiResult<PathCheckResponse> {
+        self.require_host_ops("path_check")?;
+        blocking(move || Ok(project_setup::path_check(&q.path))).await
+    }
+
+    async fn project_setup_preview(
+        &self,
+        q: ProjectSetupPreviewRequest,
+    ) -> ApiResult<ProjectSetupPreview> {
+        self.require_host_ops("project_setup_preview")?;
+        let mgr = self.0.setup_mgr.clone();
+        blocking(move || Ok(mgr.preview(&q))).await
+    }
+
+    async fn project_setup_start(
+        &self,
+        c: Command<ProjectSetupRequest>,
+    ) -> ApiResult<ProjectSetupStatus> {
+        self.require_host_ops("project_setup_start")?;
+        self.0.cfg.ceiling.check_exec()?;
+        c.check_window()?;
+        self.0.setup_mgr.start(c.id, c.body).await
+    }
+
+    async fn project_setup_status(&self, op: OperationId) -> ApiResult<ProjectSetupStatus> {
+        self.require_host_ops("project_setup_status")?;
+        self.0.setup_mgr.status(&op)
+    }
+
+    async fn disk_inspect(&self, q: DiskInspectRequest) -> ApiResult<DiskInspectResponse> {
+        self.require_host_ops("disk_inspect")?;
+        blocking(move || Ok(housekeeping::disk_inspect(&q))).await
+    }
+
+    async fn disk_reclaim(&self, q: DiskReclaimRequest) -> ApiResult<DiskReclaimResponse> {
+        self.require_host_ops("disk_reclaim")?;
+        self.0.cfg.ceiling.check_exec()?;
+        blocking(move || Ok(housekeeping::disk_reclaim(&q))).await
+    }
+
+    async fn mcp_stdio_list(&self, server: McpStdioServer) -> ApiResult<Vec<McpStdioTool>> {
+        self.require_host_ops("mcp_stdio_list")?;
+        self.0.cfg.ceiling.check_exec()?;
+        let sandbox = self.0.capability_sandbox.lock().unwrap().clone();
+        let secrets = self.0.secrets.lock().unwrap().clone();
+        self.0.stdio_mcp.list(sandbox, secrets, server).await
+    }
+
+    async fn mcp_stdio_call(&self, req: McpStdioCallRequest) -> ApiResult<McpStdioCallResponse> {
+        self.require_host_ops("mcp_stdio_call")?;
+        self.0.cfg.ceiling.check_exec()?;
+        let sandbox = self.0.capability_sandbox.lock().unwrap().clone();
+        let secrets = self.0.secrets.lock().unwrap().clone();
+        self.0.stdio_mcp.call(sandbox, secrets, req).await
+    }
+
+    async fn mcp_stdio_sweep(&self, req: McpStdioSweepRequest) -> ApiResult<()> {
+        self.require_host_ops("mcp_stdio_sweep")?;
+        self.0.stdio_mcp.sweep(&req.live);
+        Ok(())
     }
 }
 
@@ -4523,7 +4737,16 @@ impl Discovery for LocalNode {
             },
             // a command's secret as a temp file on this machine
             features: {
-                let mut f = vec![FEATURE_SECRET_FILE.into()];
+                let mut f = vec![FEATURE_SECRET_FILE.into(), FEATURE_RESUME_PROBE.into()];
+                if self.0.host_ops.load(Ordering::Acquire) {
+                    f.push(FEATURE_COLOCATED_HOST.into());
+                }
+                if self.0.research.is_enabled()
+                    && self.0.cfg.capacity.jobs > 0
+                    && self.0.cfg.ceiling.jobs
+                {
+                    f.push(FEATURE_RESEARCH_JOBS.into());
+                }
                 if self.0.remover.get().is_some() {
                     f.push(FEATURE_NODE_REMOVE.into());
                 }
@@ -4628,11 +4851,7 @@ impl Discovery for LocalNode {
         let (op, source, expected) = (c.id.clone(), c.body.source.clone(), c.body.expected);
         let events = tokio::task::spawn_blocking(move || {
             let h = &d.homes;
-            let harness_of_key = match source.key.get(..3) {
-                Some("cc:") => history::CLAUDE_CODE,
-                Some("cx:") => history::CODEX,
-                _ => "",
-            };
+            let harness_of_key = history::harness_of_key(&source.key).unwrap_or("");
             if harness_of_key != source.harness || !history::listed(h, &source.key) {
                 return Err(Error::new(Code::Invalid, "not a history this node lists"));
             }
@@ -4667,6 +4886,38 @@ impl Discovery for LocalNode {
         tokio::task::spawn_blocking(move || history::locate(&d.homes, &source))
             .await
             .map_err(|e| Error::new(Code::Internal, format!("locate: {e}")))?
+    }
+    async fn resume_probe(&self, req: ResumeProbeRequest) -> ApiResult<ResumeProbeResponse> {
+        let homes = match self.0.discovery.read().unwrap().as_ref() {
+            Some(d) => d.homes.clone(),
+            None => {
+                let acp = &self.0.cfg.acp;
+                let mut state_dirs = std::collections::BTreeMap::new();
+                for b in steve_harness_spec::builtins() {
+                    if let Some(state) = &b.properties.state {
+                        let dir = match state.env.as_str() {
+                            "CLAUDE_CONFIG_DIR" => Some(
+                                acp.claude_config_dir
+                                    .clone()
+                                    .unwrap_or_else(|| acp.user_home.join(&state.default)),
+                            ),
+                            "CODEX_HOME" => Some(acp.codex_home.clone()),
+                            _ => None,
+                        };
+                        if let Some(dir) = dir {
+                            state_dirs.insert(b.id.to_string(), dir);
+                        }
+                    }
+                }
+                history::Homes {
+                    user_home: acp.user_home.clone(),
+                    steve_home: acp.steve_home.clone(),
+                    state_dirs,
+                }
+            }
+        };
+        let declared = self.0.cfg.acp.declared.clone();
+        blocking(move || Ok(history::resume_probe(&homes, &declared, &req))).await
     }
 }
 
@@ -4720,6 +4971,57 @@ mod binding_tests {
         let changed = edit("open", "closed");
         assert!(matches!(changed, Some(ToolEvidence::ContentChanged { .. })));
         assert_eq!(changed, edit("pending", "closed"));
+
+        // Snake-case exit_code (e.g. agy run_command) and Steve MCP failures also produce typed evidence
+        norm.update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "agy_exec", "kind": "execute",
+            "status": "failed", "rawInput": { "CommandLine": "cargo test" },
+            "rawOutput": { "exit_code": 101 },
+        }));
+        let agy_fail_101 = tool_evidence(norm.fact("agy_exec").unwrap(), dir.path(), &workspace);
+        norm.update(&json!({
+            "sessionUpdate": "tool_call_update", "toolCallId": "agy_exec", "kind": "execute",
+            "status": "failed", "rawInput": { "CommandLine": "cargo test" },
+            "rawOutput": { "exit_code": 1 },
+        }));
+        let agy_fail_1 = tool_evidence(norm.fact("agy_exec").unwrap(), dir.path(), &workspace);
+        assert!(matches!(agy_fail_101, Some(ToolEvidence::Failed { .. })));
+        assert_ne!(agy_fail_101, agy_fail_1);
+
+        norm.update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "mcp_fail", "name": "mcp__steve__steve_item_read",
+            "kind": "other", "status": "failed", "rawInput": { "id": "ST-1" },
+        }));
+        assert!(matches!(
+            tool_evidence(norm.fact("mcp_fail").unwrap(), dir.path(), &workspace),
+            Some(ToolEvidence::Failed { .. })
+        ));
+
+        // Input-only edit without ACP diff content blocks still yields ContentChanged unless no-op
+        norm.update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "input_edit_noop", "kind": "edit",
+            "status": "completed", "rawInput": { "Path": "README.md", "Target": "same", "Replacement": "same" },
+        }));
+        assert_eq!(
+            tool_evidence(
+                norm.fact("input_edit_noop").unwrap(),
+                dir.path(),
+                &workspace
+            ),
+            None
+        );
+        norm.update(&json!({
+            "sessionUpdate": "tool_call", "toolCallId": "input_edit_real", "kind": "edit",
+            "status": "completed", "rawInput": { "Path": "README.md", "Target": "old", "Replacement": "new" },
+        }));
+        assert!(matches!(
+            tool_evidence(
+                norm.fact("input_edit_real").unwrap(),
+                dir.path(),
+                &workspace
+            ),
+            Some(ToolEvidence::ContentChanged { .. })
+        ));
     }
 
     #[test]
@@ -4929,5 +5231,284 @@ mod fit_tests {
         let probed = node.probe_build().await.unwrap();
         assert!(!probed.upgradable);
         assert_eq!(probed.build, Some(build.into()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_output_paths_matches_symlinked_home_alias_and_rejects_foreign_items() {
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real");
+        let home = real.join("steve");
+        std::fs::create_dir_all(home.join("workspaces/ST-1/outputs")).unwrap();
+        std::fs::create_dir_all(home.join("workspaces/ST-2/outputs")).unwrap();
+        let alias = dir.path().join("alias");
+        std::os::unix::fs::symlink(&real, &alias).unwrap();
+        let canon_home = home.canonicalize().unwrap();
+
+        let own = alias.join("steve/workspaces/ST-1/outputs/sub/result.txt");
+        assert_eq!(
+            local_output_paths(&own, &canon_home, &canon_home, "ST-1"),
+            Some((
+                PathBuf::from("workspaces/ST-1/outputs/sub/result.txt"),
+                PathBuf::from("sub/result.txt"),
+            ))
+        );
+        let foreign = alias.join("steve/workspaces/ST-2/outputs/result.txt");
+        assert_eq!(
+            local_output_paths(&foreign, &canon_home, &canon_home, "ST-1"),
+            None
+        );
+        let traversal = alias.join("steve/workspaces/ST-1/outputs/../ST-2/outputs/result.txt");
+        assert_eq!(
+            local_output_paths(&traversal, &canon_home, &canon_home, "ST-1"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn host_ops_and_unsandboxed_stdio_mcp_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let make_node = |id: &str, ceiling: PolicyCeiling| {
+            let home = dir.path().join(id);
+            LocalNode::open(NodeConfig {
+                node: NodeId::new(id).unwrap(),
+                home: home.clone(),
+                acp: AcpConfig {
+                    adapters: Default::default(),
+                    declared: Default::default(),
+                    node: PathBuf::from("/usr/bin/false"),
+                    claude_executable: PathBuf::from("/usr/bin/false"),
+                    claude_config_dir: None,
+                    steve_home: dir.path().to_path_buf(),
+                    codex_home: dir.path().to_path_buf(),
+                    user_home: dir.path().to_path_buf(),
+                    version: "0.14.0".into(),
+                },
+                roots: vec![],
+                capacity: Capacity {
+                    sessions: 1,
+                    jobs: 0,
+                    execs: 0,
+                },
+                storage: Storage::default(),
+                ceiling,
+            })
+            .unwrap()
+        };
+        let now_ms = now();
+        let mcp_server = McpStdioServer {
+            id: "srv1".into(),
+            name: "test".into(),
+            updated: 1,
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "echo pwned".into()],
+            env: vec![],
+            secret_env: vec![],
+            operation: OperationId::new("op_mcp_sec").unwrap(),
+        };
+        let setup_cmd = Command {
+            id: OperationId::new("op_setup_sec").unwrap(),
+            issued_at: Timestamp(now_ms),
+            accept_before: Timestamp(now_ms + 60_000),
+            grant: GrantId::new("g_sec").unwrap(),
+            body: ProjectSetupRequest {
+                parent: dir.path().to_string_lossy().into_owned(),
+                directory: "proj".into(),
+                preview: dir.path().join("proj").to_string_lossy().into_owned(),
+                mode: ProjectSetupMode::Empty,
+            },
+        };
+
+        // 1. Default (remote) LocalNode without enable_host_ops refuses all 11 host/disk/MCP RPCs
+        //    and does not advertise FEATURE_COLOCATED_HOST.
+        let remote = make_node("n_remote_sec", PolicyCeiling::unlimited());
+        let caps = remote.probe(false).await.unwrap();
+        assert!(!caps.supports_colocated_host());
+        assert!(caps.supports_resume_probe());
+        assert_eq!(
+            remote
+                .browse_dir(BrowseDirRequest {
+                    path: dir.path().to_string_lossy().into_owned()
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .describe_dir(DescribeDirRequest {
+                    path: dir.path().to_string_lossy().into_owned(),
+                    with_readme: false
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .path_check(PathCheckRequest {
+                    path: dir.path().to_string_lossy().into_owned()
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .project_setup_preview(ProjectSetupPreviewRequest {
+                    parent: dir.path().to_string_lossy().into_owned(),
+                    directory: "proj".into()
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .project_setup_start(setup_cmd.clone())
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .project_setup_status(OperationId::new("op_setup_sec").unwrap())
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .disk_inspect(DiskInspectRequest {
+                    worktrees_root: dir.path().to_string_lossy().into_owned(),
+                    entries: vec![],
+                    scratch: vec![]
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .disk_reclaim(DiskReclaimRequest {
+                    worktrees_root: dir.path().to_string_lossy().into_owned(),
+                    git_projects: vec![],
+                    closed_worktrees: vec![],
+                    idle_worktrees: vec![],
+                    ended_scratch: vec![],
+                    low_bytes: 0,
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .mcp_stdio_list(mcp_server.clone())
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .mcp_stdio_call(McpStdioCallRequest {
+                    server: mcp_server.clone(),
+                    tool: "echo".into(),
+                    arguments: json!({})
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            remote
+                .mcp_stdio_sweep(McpStdioSweepRequest { live: vec![] })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        remote.shutdown().await;
+
+        // 2. Even with host_ops enabled, a ceiling with exec=false refuses mutating/exec host RPCs.
+        let no_exec = make_node("n_no_exec_sec", PolicyCeiling::default());
+        no_exec.enable_host_ops();
+        assert_eq!(
+            no_exec
+                .project_setup_start(setup_cmd)
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            no_exec
+                .disk_reclaim(DiskReclaimRequest {
+                    worktrees_root: dir.path().to_string_lossy().into_owned(),
+                    git_projects: vec![],
+                    closed_worktrees: vec![],
+                    idle_worktrees: vec![],
+                    ended_scratch: vec![],
+                    low_bytes: 0,
+                })
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        assert_eq!(
+            no_exec
+                .mcp_stdio_list(mcp_server.clone())
+                .await
+                .unwrap_err()
+                .code,
+            Code::Forbidden
+        );
+        no_exec.shutdown().await;
+
+        // 3. Even with host_ops + unlimited ceiling, stdio MCP refuses without an active sandbox.
+        let unsandboxed = make_node("n_unsandboxed_sec", PolicyCeiling::unlimited());
+        unsandboxed.enable_host_ops();
+        assert!(
+            unsandboxed
+                .probe(false)
+                .await
+                .unwrap()
+                .supports_colocated_host()
+        );
+        let err = unsandboxed
+            .mcp_stdio_list(mcp_server.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, Code::Forbidden);
+        assert!(err.safe_detail.contains("sandbox"), "{}", err.safe_detail);
+
+        // Explicitly disabled sandbox (STEVE_CONFINE=off) is also refused.
+        unsandboxed.set_capability_sandbox(Some(steve_confine::Sandbox::choose(
+            dir.path(),
+            dir.path(),
+            Some("off".into()),
+        )));
+        let err = unsandboxed
+            .mcp_stdio_call(McpStdioCallRequest {
+                server: mcp_server,
+                tool: "echo".into(),
+                arguments: json!({}),
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, Code::Forbidden);
+        assert!(err.safe_detail.contains("sandbox"), "{}", err.safe_detail);
+        unsandboxed.shutdown().await;
     }
 }

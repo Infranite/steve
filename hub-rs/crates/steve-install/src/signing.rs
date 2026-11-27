@@ -389,7 +389,9 @@ pub(crate) fn validate_bundle(
     let manifest = json_file(&candidate.join("release.json"))?;
     let web = json_file(&candidate.join("web/dist/release.json"))?;
     let info = build_info(&candidate.join("bin/steve-hub"))?;
-    for value in [&manifest, &web, &info] {
+    let node_info = build_info(&candidate.join("bin/steve-node"))
+        .context("bundle missing valid bin/steve-node")?;
+    for value in [&manifest, &web, &info, &node_info] {
         ensure!(
             value.is_object() && value["version"] == version && value["commit"] == commit,
             "bundle component identity differs from expected version/commit"
@@ -400,6 +402,7 @@ pub(crate) fn validate_bundle(
             && manifest["hub_version"] == version
             && manifest["web_version"] == version
             && info["target"] == "aarch64-apple-darwin"
+            && node_info["target"] == info["target"]
             && manifest["schema"]["target"] == info["schema"],
         "release metadata does not match the macOS Hub build"
     );
@@ -1375,6 +1378,10 @@ pub(crate) mod tests {
             "#!/bin/sh\nif [ \"$2\" = provision-signing ]; then\n  pass=$(cat)\n  [ \"${#pass}\" -eq 64 ]\n  exit $?\nfi\nprintf '%s\\n' '{\"version\":\"1.2.3\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target\":\"aarch64-apple-darwin\",\"schema\":54}'\n",
         );
         executable(
+            &candidate.join("bin/steve-node"),
+            "#!/bin/sh\nprintf '%s\\n' '{\"version\":\"1.2.3\",\"commit\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"target\":\"aarch64-apple-darwin\"}'\n",
+        );
+        executable(
             &candidate.join("bin/steve-keyhelper"),
             "#!/bin/sh\nexit 0\n",
         );
@@ -1637,6 +1644,21 @@ exit 0
             .is_err()
         );
         fs::remove_file(home.join("current")).unwrap();
+        // Removing bin/steve-node must fail bundle validation before signing or switching.
+        let node_bin = candidate.join("bin/steve-node");
+        let saved_node = fs::read(&node_bin).unwrap();
+        fs::remove_file(&node_bin).unwrap();
+        assert!(
+            validate_bundle(
+                home,
+                &candidate,
+                "1.2.3",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+            )
+            .is_err(),
+            "bundle without bin/steve-node must be rejected"
+        );
+        executable(&node_bin, std::str::from_utf8(&saved_node).unwrap());
         std::os::unix::fs::symlink("/tmp", candidate.join("unexpected")).unwrap();
         assert!(
             validate_bundle(
@@ -2135,6 +2157,12 @@ esac
                 &format!(
                     "#!/bin/sh\nif [ \"$2\" = provision-signing ]; then\n  cat > '{}'\n  exit $?\nfi\nprintf '%s\\n' '{{\"version\":\"{version}\",\"commit\":\"{commit}\",\"target\":\"aarch64-apple-darwin\",\"schema\":54}}'\n",
                     captured_pass.display()
+                ),
+            );
+            executable(
+                &candidate.join("bin/steve-node"),
+                &format!(
+                    "#!/bin/sh\nprintf '%s\\n' '{{\"version\":\"{version}\",\"commit\":\"{commit}\",\"target\":\"aarch64-apple-darwin\"}}'\n"
                 ),
             );
             executable(

@@ -21,7 +21,7 @@ export function briefHead(text: string): string {
   const line = text.split("\n").find((l) => l.trim())?.trim() ?? ""
   return !line ? t("core:brief.plain") : line.length > 120 ? line.slice(0, 120) + "…" : line
 }
-const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", exec: "run", fetch: "search", think: "read", delete: "edit", move: "edit" }
+const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", exec: "run", fetch: "fetch", think: "read", delete: "edit", move: "edit", other: "other" }
 const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
 const diffText = (d: any) => [...String(d.old ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).map((l) => "- " + l), ...String(d.new ?? "").split("\n").map((l) => "+ " + l)].join("\n")
 function toolName(name: string) {
@@ -31,14 +31,15 @@ function toolName(name: string) {
 
 /** a tool's whole current view (transcript `tool`, the Node protocol's ToolView) → its transcript tuple, in place */
 function toolEv(t: Ev, v: any) {
-  const name = String(v.name ?? ""), short = name.replace(/^mcp__steve__/, ""), title = String(v.title ?? "")
+  const name = String(v.name ?? ""), short = name.replace(/^mcp__[^_]+__/, ""), title = String(v.title ?? "")
   const steve = v.origin === "steve" || v.category === "steve", live = v.phase === "succeeded" || v.phase === "failed" ? 0 : 1
   const args = v.action?.type === "tool" && v.action.args && typeof v.action.args === "object" ? v.action.args : undefined
   const result: any[] = Array.isArray(v.result) ? v.result : [], diffs = result.filter((p) => p?.type === "diff")
   const text = result.filter((p) => p?.type === "text").map((p) => String(p.text ?? "")).join("\n")
+  const kind = KIND[v.category] ?? (v.action?.type === "exec" ? "run" : "other")
   t.length = 0
   if (steve) t.push("tool", "steve", toolName(short), "Steve", "", live)
-  else t.push("tool", KIND[v.category] ?? "run", name || title.split(" ")[0] || i18n.t("core:tool.fallback"), v.target ?? title.split(" ").slice(1).join(" ").slice(0, 80), "", live)
+  else t.push("tool", kind, name || title.split(" ")[0] || i18n.t("core:tool.fallback"), v.target ?? title.split(" ").slice(1).join(" ").slice(0, 80), "", live)
   if (diffs.length) { t[4] = diffs.map(diffText).join("\n⋯\n"); t[6] = diffs.reduce((n, d) => n + (d.added ?? 0), 0); t[7] = diffs.reduce((n, d) => n + (d.removed ?? 0), 0); if (!steve && diffs[0].path) t[3] = diffs[0].path }
   else if (text) t[4] = t[1] === "run" ? unfence(text) : text
   if (!t[4] && v.error) t[4] = String(v.error)
@@ -369,7 +370,18 @@ export function appendToTurn(prev: TranscriptTurn, fresh: readonly REvent[]): Tr
       push(sub, e.seq)
       continue
     }
-    if (e.kind === "system") { push(d.faulted ? ["sys", d.text, "faulted"] : ["sys", d.text], e.seq); continue }
+    if (e.kind === "system") {
+      if (d.faulted) push(["sys", d.text, "faulted"], e.seq)
+      else if (d.code === "auto_mode_classifier_unavailable") {
+        push(["sys", d.text, "auto_mode_classifier_unavailable", {
+          code: "auto_mode_classifier_unavailable",
+          harness: typeof d.harness === "string" ? d.harness : "",
+          stopped: Boolean(d.stopped || d.severity === "error"),
+          text: String(d.text ?? ""),
+        } satisfies AutoModeClassifierWarning], e.seq)
+      } else push(["sys", d.text], e.seq)
+      continue
+    }
     if (e.kind === "permission") { push(["ask", String(d.title ?? t("core:tool.permission")), d.decision], e.seq); continue }
     if (e.kind === "turn_end") { push(["end", d.stopReason ?? ""], e.seq); continue }
     if (e.kind === "queued") { push(["sys", t("core:queueLine.queued", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
@@ -404,6 +416,26 @@ function mapTurn(events: REvent[]): TranscriptTurn {
 }
 
 export type Transcript = { turns: TranscriptTurn[]; oldest: number | null; newest: number }
+
+export type AutoModeClassifierWarning = {
+  code: "auto_mode_classifier_unavailable"
+  harness: string
+  stopped: boolean
+  text: string
+}
+
+/** Latest auto-mode classifier unavailability warning in the active/most recent turn, or null once a new turn runs cleanly. */
+export function autoModeWarningOf(transcript: Transcript | undefined): AutoModeClassifierWarning | null {
+  if (!transcript?.turns.length) return null
+  const latest = transcript.turns.at(-1)!
+  for (let i = latest.ev.length - 1; i >= 0; i--) {
+    const e = latest.ev[i]
+    if (e[0] === "sys" && e[2] === "auto_mode_classifier_unavailable" && e[3]) {
+      return e[3] as AutoModeClassifierWarning
+    }
+  }
+  return null
+}
 
 export type ActiveSubtask = { subtask: RSubtaskView; started?: number; childSteps: number }
 /** Active (running/queued/needs_you) subtasks in the latest turn, for the header's RunningNow capsule. */

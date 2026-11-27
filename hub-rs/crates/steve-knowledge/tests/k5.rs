@@ -2,8 +2,11 @@
 //! lines, apply, undo); a draft with a refused path has one line with the reason and no operation;
 //! plus the `kb_source:<id>` patch (owner rule, staleness) and `doc.patch` / `note.create`.
 
+mod common;
+
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 use steve_store::testkit::knowledge as fixture;
 
@@ -39,6 +42,9 @@ fn setup() -> Env {
     )
     .unwrap();
     assert!(kb.set_folder_policy(FolderPolicy::new(&home, home.join(".steve"))));
+    assert!(kb.set_folder_places(Arc::new(common::TestDiskRouter(
+        common::TestDiskPlaces::new(env.store().clone())
+    ))));
     fixture::seed_draft_org(env.store()).unwrap();
     let app = steve_knowledge::routes(kb.clone()).with_state(env.modules.clone());
     Env {
@@ -526,4 +532,86 @@ async fn note_create_and_doc_patch() {
     e.undo(ME, &note_cs);
     assert_eq!(e.get(ME, "/kb/docs").await, json!([]));
     assert_eq!(e.get(ME, "/kb/search?q=e2e").await["hits"], json!([]));
+}
+
+/// N1: `SourceCreateOp::apply` must probe the folder path via the Node *before* opening SQLite's
+/// single write transaction so a slow Node RPC cannot hold the SQLite writer lock.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn source_create_draft_apply_probes_node_outside_write_transaction() {
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use steve_knowledge::sources::folder_node::{FolderPlace, FolderPlaces, Unplaced};
+
+    struct WriteLockCheckingPlaces {
+        inner: common::TestDiskRouter,
+        store: steve_store::Store,
+        probes_without_write_lock: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl FolderPlaces for WriteLockCheckingPlaces {
+        async fn place(
+            &self,
+            source: &str,
+            scanning: bool,
+        ) -> Result<Option<FolderPlace>, Unplaced> {
+            self.inner.place(source, scanning).await
+        }
+
+        async fn check_path(
+            &self,
+            path: &str,
+        ) -> Result<Option<steve_node_api::PathCheckResponse>, Unplaced> {
+            // Taking a write transaction on the same Store *during* the Node path probe would
+            // deadlock/fail if `changes::apply` had already opened SQLite's write lock.
+            self.store
+                .write(|_tx| Ok::<(), steve_store::StoreError>(()))
+                .expect("SQLite write lock must NOT be held during Node check_path RPC");
+            self.probes_without_write_lock
+                .fetch_add(1, Ordering::SeqCst);
+            self.inner.check_path(path).await
+        }
+    }
+
+    let kb = Knowledge::new(|_| {});
+    let k2 = kb.clone();
+    let env = TestEnv::new(move |r| drafts::register(r, k2));
+    let home_dir = tempfile::tempdir().unwrap();
+    let home = fs::canonicalize(home_dir.path()).unwrap();
+    for d in [".steve", "wiki/客户"] {
+        fs::create_dir_all(home.join(d)).unwrap();
+    }
+    assert!(kb.set_folder_policy(FolderPolicy::new(&home, home.join(".steve"))));
+    let places = Arc::new(WriteLockCheckingPlaces {
+        inner: common::TestDiskRouter(common::TestDiskPlaces::new(env.store().clone())),
+        store: env.store().clone(),
+        probes_without_write_lock: AtomicUsize::new(0),
+    });
+    assert!(kb.set_folder_places(places.clone()));
+    fixture::seed_draft_org(env.store()).unwrap();
+
+    let wiki = home.join("wiki/客户").to_string_lossy().into_owned();
+    env.gateway.reply(
+        json!({ "ops": [{"op": "kb_source.create", "path": wiki, "name": "客户资料"}] })
+            .to_string(),
+    );
+    let p = changes::draft(
+        &env.modules,
+        &caller(WS, ME),
+        "kb_source",
+        None,
+        "把客户资料加入知识库",
+        Origin::default(),
+    )
+    .await
+    .unwrap();
+    let before_apply = places.probes_without_write_lock.load(Ordering::SeqCst);
+    assert!(before_apply >= 1, "draft planning probed outside write tx");
+
+    let applied = changes::apply(&env.modules, &caller(WS, ME), &p.id).unwrap();
+    assert_eq!(applied["ok"], json!(true));
+    assert!(
+        places.probes_without_write_lock.load(Ordering::SeqCst) > before_apply,
+        "apply probed path outside SQLite write transaction"
+    );
 }

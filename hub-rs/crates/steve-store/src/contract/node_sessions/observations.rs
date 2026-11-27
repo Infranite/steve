@@ -103,6 +103,17 @@ pub fn first_user_since_turn(c: &mut impl Read, session: &str) -> Result<Option<
     .flatten())
 }
 
+pub fn session_harness(c: &mut impl Read, session: &str) -> Result<Option<String>> {
+    Ok(c.one(
+        Query::select()
+            .column("harness")
+            .from("sessions")
+            .and_where(Expr::col("id").eq(session)),
+        |r| r.get::<Option<String>>(0),
+    )?
+    .flatten())
+}
+
 pub fn has_system_code(c: &mut impl Read, session: &str, code: &str) -> Result<bool> {
     let field = c.db().dialect().json_field(Expr::col("data"), "code");
     Ok(c.one(
@@ -116,6 +127,38 @@ pub fn has_system_code(c: &mut impl Read, session: &str, code: &str) -> Result<b
         |_| Ok(()),
     )?
     .is_some())
+}
+
+/// Whether `session` already recorded a `system` timeline event with `code` (and optionally
+/// matching `severity`) after the latest `turn_end` boundary.
+pub fn has_system_code_since_turn(
+    c: &mut impl Read,
+    session: &str,
+    code: &str,
+    severity: Option<&str>,
+) -> Result<bool> {
+    let dialect = c.db().dialect();
+    let boundary = Query::select()
+        .expr(Func::coalesce([
+            Func::max(Expr::col("seq")).into(),
+            Expr::Constant(0_i64.into()),
+        ]))
+        .from("events")
+        .and_where(Expr::col("session_id").eq(session))
+        .and_where(Expr::col("kind").eq("turn_end"))
+        .take();
+    let mut q = Query::select();
+    q.column("seq")
+        .from("events")
+        .and_where(Expr::col("session_id").eq(session))
+        .and_where(Expr::col("kind").eq("system"))
+        .and_where(Expr::col("seq").gt(Expr::from(boundary)))
+        .and_where(dialect.json_field(Expr::col("data"), "code").eq(code));
+    if let Some(sev) = severity {
+        q.and_where(dialect.json_field(Expr::col("data"), "severity").eq(sev));
+    }
+    q.limit(1);
+    Ok(c.one(&q, |_| Ok(()))?.is_some())
 }
 
 fn message_start(

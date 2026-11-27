@@ -3,7 +3,7 @@ import { modReq } from "@/api"
 import type { AuditPage } from "@/audit"
 import { saveBackupSettings, type BackupSettings, type BackupStatus } from "@/backup"
 import type { DiskReport, Reclaimed } from "@/disk"
-import type { HubHealth } from "@/health"
+import type { HealthWindow, HubHealth } from "@/health"
 import type { OutboxReport } from "@/outbox"
 
 export const systemApi = {
@@ -16,7 +16,8 @@ export const systemApi = {
   backup: () => modReq<BackupStatus>("GET", "/system/backup"),
   saveBackup: (settings: BackupSettings) =>
     saveBackupSettings(settings, (method, path, body) => modReq<BackupSettings>(method, path, body)),
-  health: () => modReq<HubHealth>("GET", "/system/health"),
+  health: (window: HealthWindow = "15m") =>
+    modReq<HubHealth>("GET", `/system/health?window=${encodeURIComponent(window)}`),
   outbox: () => modReq<OutboxReport>("GET", "/system/outbox"),
   reviveOutbox: (consumer: string) =>
     modReq<{ revived: number }>("POST", "/system/outbox/revive", { consumer }),

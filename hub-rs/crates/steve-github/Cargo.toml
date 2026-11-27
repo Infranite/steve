@@ -18,7 +18,7 @@ fake = [
 ]
 
 [dependencies]
-steve-runtime = { path = "../steve-runtime", default-features = false, features = ["policy", "cache", "jobs", "process"] }
+steve-runtime = { path = "../steve-runtime", default-features = false, features = ["policy", "cache", "jobs"] }
 steve-types = { path = "../steve-types" }
 steve-flow = { path = "../steve-flow" }
 steve-modules = { path = "../steve-modules" }
@@ -51,6 +51,7 @@ regex = "=1.13.1"
 tempfile = "=3.27.0"
 
 [dev-dependencies]
+steve-flow = { path = "../steve-flow", features = ["testkit"] }
 steve-store = { path = "../steve-store", features = ["testkit"] }
 axum = "=0.8.9"
 tempfile = "=3.27.0"

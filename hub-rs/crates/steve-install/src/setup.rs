@@ -1325,20 +1325,17 @@ pub fn reconfigure_existing(options: Options) -> Result<()> {
     reconfigure::run(&options, &mut Terminal)
 }
 
-/// `bin/steve-hub --adapters …` or `bin/steve-node adapters …` of `release`, for the home.
+/// `bin/steve-node adapters …` of `release`, for the home (both Hub and standalone Node roles
+/// manage ACP adapters through the Node binary).
 fn adapter_command(
-    role: &str,
+    _role: &str,
     home: &Path,
     release: &Path,
     args: &[&str],
 ) -> std::process::Command {
-    let (program, first) = if role == "hub" {
-        (release.join("bin/steve-hub"), "--adapters")
-    } else {
-        (release.join("bin/steve-node"), "adapters")
-    };
+    let program = release.join("bin/steve-node");
     let mut command = clean_command(&program, Some(home));
-    command.arg(first).args(args);
+    command.arg("adapters").args(args);
     command
 }
 
@@ -3072,11 +3069,11 @@ exit 2"#,
         let release = temp.path().join("release");
         fs::create_dir_all(release.join("bin")).unwrap();
         let listing_file = temp.path().join("listing.json");
-        let bin = release.join("bin/steve-hub");
+        let bin = release.join("bin/steve-node");
         fs::write(
             &bin,
             format!(
-                "#!/bin/sh\n[ \"$1\" = --adapters ] && [ \"$2\" = list ] && cat '{}'\n",
+                "#!/bin/sh\n[ \"$1\" = adapters ] && [ \"$2\" = list ] && cat '{}'\n",
                 listing_file.display()
             ),
         )

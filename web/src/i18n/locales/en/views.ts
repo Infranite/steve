@@ -3,6 +3,16 @@ export default {
   decision: {
     turnRepeatedFailure: "The same tool action failed five times. Steve requested a stop.",
     turnNoProgress: "There was no verified progress for fifteen minutes of observable work. Steve requested a stop.",
+    turnNoProgressMinutes_one: "There was no verified progress for {{count}} minute of observable work. Steve requested a stop.",
+    turnNoProgressMinutes_other: "There was no verified progress for {{count}} minutes of observable work. Steve requested a stop.",
+    turnNoProgressBlocker_one: "No verified progress for {{count}} minute while waiting on {{kind}} ({{label}}). Steve requested a stop.",
+    turnNoProgressBlocker_other: "No verified progress for {{count}} minutes while waiting on {{kind}} ({{label}}). Steve requested a stop.",
+    stallBlockerKind: {
+      tool: "running tool",
+      subagent: "sub-agent",
+      background_task: "background task",
+      native_workflow: "workflow",
+    },
     mergePullRequest: "Merge PR #{{number}} ({{repo}})?",
     noExecutor_one: "{{count}} item has no eligible executor Bot. How should Steve proceed?",
     noExecutor_other: "{{count}} items have no eligible executor Bot. How should Steve proceed?",

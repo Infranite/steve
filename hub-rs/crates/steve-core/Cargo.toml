@@ -26,8 +26,6 @@ steve-work-api = { path = "../steve-work-api" }
 # Pure sandboxed JS workflow contract (schema validation, CallIdentity, StepInput/StepFrame).
 steve-workflow-api = { path = "../steve-workflow-api" }
 steve-stats = { path = "../steve-stats" }
-# One-shot ACP calls of the gateway in process; the gateway keeps model choice and fallback.
-steve-acp = { path = "../steve-acp" }
 steve-harness-spec = { path = "../steve-harness-spec" }
 steve-transcript = { path = "../steve-transcript" }
 steve-i18n = { path = "../steve-i18n" }
@@ -46,6 +44,7 @@ steve-store = { path = "../steve-store", features = ["testkit"] }
 steve-runtime = { path = "../steve-runtime", default-features = false, features = ["testkit", "due-contract"] }
 
 # node_git against a real local Node
+steve-acp = { path = "../steve-acp" }
 steve-node = { path = "../steve-node" }
 proptest = "=1.12.0"
 tempfile = "=3.27.0"

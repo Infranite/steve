@@ -572,6 +572,7 @@ impl NodeRuntime {
             let (turn, _) = node_turns::for_attempt(r, attempt)?;
             Ok::<_, StoreError>((row.revision, turn))
         })?;
+        let effective = self.effective_completion_in(tx, attempt, completion)?;
         let at = self.clock.now();
         node_write::attempt_cas_in(
             tx,
@@ -579,11 +580,11 @@ impl NodeRuntime {
             rev,
             "finished",
             None,
-            Some(&serde_json::to_value(completion).map_err(conflict)?),
+            Some(&serde_json::to_value(&effective).map_err(conflict)?),
             at,
         )?;
         self.close_cards_of_attempt_in(tx, attempt)?;
-        self.turn_over_in(tx, session, &turn, completion)?;
+        self.turn_over_in(tx, session, &turn, &effective)?;
         // the attempt's statistics row, if it had started, ends with this outcome (with the
         // runtime state); the business side hears it once this transaction committed (staged
         // until then, see `Self::write`)
@@ -592,14 +593,14 @@ impl NodeRuntime {
             &self.store,
             session,
             attempt,
-            completion,
+            &effective,
             &facts,
             at,
         )?;
         let finished = After::Finished {
             session: session.to_string(),
             attempt: attempt.to_string(),
-            completion: completion.clone(),
+            completion: effective.clone(),
             facts,
             at,
             measure,
@@ -607,13 +608,13 @@ impl NodeRuntime {
         let settled = self.plan_after_in(tx, session)? != Planned::Created;
         if settled {
             self.release_if_ended_in(tx, session)?;
-            self.status_in(session, settled_status(&completion.stop_reason))?;
+            self.status_in(session, settled_status(&effective.stop_reason))?;
         }
         let ended = settled.then(|| End {
             session: session.to_string(),
             attempt: Some(attempt.to_string()),
-            stop: completion.stop_reason.clone(),
-            error: completion.error.as_ref().map(said),
+            stop: effective.stop_reason.clone(),
+            error: effective.error.as_ref().map(said),
         });
         let mut staged = self.staged.lock().unwrap();
         staged.push(Tell::After(finished));

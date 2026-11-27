@@ -184,7 +184,7 @@ impl RoutedRuntime {
     fn dispatch_probe_target(&self, node: &str) -> Option<Option<u64>> {
         if node == "local" {
             self.node.as_ref().filter(|n| !n.is_stopped())?;
-            if self.host.local_node.get()?.in_process() {
+            if self.fleet.is_none() {
                 return Some(None);
             }
         }

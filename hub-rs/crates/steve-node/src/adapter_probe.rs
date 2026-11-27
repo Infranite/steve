@@ -13,8 +13,8 @@ use steve_acp::AcpConfig;
 use steve_acp::adapters::{Probe, ProbeStatus};
 use steve_node_api::{
     AdapterAuth, AdapterInfo, AdapterStatus, HarnessCapability, LOGIN_SHELL_PROBE_TIMEOUT_SECS,
-    MissingCommandDiagnostic, extract_login_shell_path, login_shell_path_script,
-    shell_supports_interactive_login,
+    MissingCommandDiagnostic, MissingCommandKind, extract_login_shell_path,
+    login_shell_path_script, shell_supports_interactive_login,
 };
 
 /// Cache TTL for adapter discovery probes (30 minutes) unless the Hub requests a fresh probe.
@@ -133,63 +133,153 @@ fn missing_command_diagnostic(
 ) -> MissingCommandDiagnostic {
     let service_os = OsStr::new(service_path);
     let login_os = login_env.map(|e| OsStr::new(e.path.as_str()));
+    let login_shell = login_env.map(|e| e.shell.clone());
+    let builtin = steve_harness_spec::builtin(id);
+    let declared = cfg.declared.contains_key(id);
 
-    let mut candidates: Vec<String> = Vec::new();
-    let mut primary = None;
+    // 1. Adapter script exists on disk, runs via Node.js, and bare `node` is missing from
+    //    the service PATH: diagnose the Node.js interpreter rather than the harness CLI.
+    if let Some(own) = cfg.adapters.get(id)
+        && own.is_file()
+        && steve_acp::is_node_script(own)
+        && cfg.node.components().count() == 1
+        && !cfg.node.is_absolute()
+        && let Some(node_bin) = cfg.node.to_str()
+        && steve_acp::which_in(node_bin, Some(service_os)).is_none()
+    {
+        let found_in_login = login_os
+            .and_then(|p| steve_acp::which_in(node_bin, Some(p)))
+            .map(|p| p.to_string_lossy().into_owned());
+        let kind = if found_in_login.is_some() {
+            MissingCommandKind::CommandNotInServicePath
+        } else {
+            MissingCommandKind::BothMissing
+        };
+        return MissingCommandDiagnostic {
+            kind,
+            command: node_bin.to_owned(),
+            adapter_package: None,
+            detected_cli: None,
+            cli_service_path: None,
+            service_path: service_path.to_owned(),
+            login_shell_path: found_in_login,
+            login_shell,
+            refresh_command: refresh_command.to_owned(),
+        };
+    }
+
+    // 2. Identify the actual ACP adapter command and npm package declared by the harness spec,
+    //    keeping `detect_bins` (underlying CLI) strictly separate from the adapter entry point.
+    let adapter_package = (!declared)
+        .then(|| builtin.and_then(|b| b.npm_package).map(str::to_owned))
+        .flatten();
+
+    let mut adapter_bins: Vec<String> = Vec::new();
+    let mut primary: Option<String> = None;
     if let Ok((program, _)) = cfg.adapter_command(id) {
         if program.components().count() == 1 && !program.is_absolute() {
             if let Some(name) = program.to_str() {
                 primary = Some(name.to_owned());
-                candidates.push(name.to_owned());
-            }
-        } else if cfg.adapters.get(id).is_some_and(|own| own.is_file())
-            && steve_acp::is_node_script(cfg.adapters.get(id).unwrap())
-            && cfg.node.components().count() == 1
-            && !cfg.node.is_absolute()
-            && cfg
-                .node
-                .to_str()
-                .is_some_and(|n| steve_acp::which_in(n, Some(service_os)).is_none())
-        {
-            if let Some(node_bin) = cfg.node.to_str() {
-                primary = Some(node_bin.to_owned());
-                candidates.push(node_bin.to_owned());
+                adapter_bins.push(name.to_owned());
             }
         } else if let Some(name) = program.to_str() {
             primary = Some(name.to_owned());
         }
     }
-    if let Some(b) = steve_harness_spec::builtin(id) {
-        if !candidates.iter().any(|c| c == b.cli_bin) {
-            candidates.push(b.cli_bin.to_owned());
-        }
-        for alt in &b.detect_bins {
-            if !candidates.iter().any(|c| c == *alt) {
-                candidates.push((*alt).to_owned());
+    if let Some(b) = builtin.filter(|_| !declared) {
+        match &b.command {
+            steve_harness_spec::DefaultCommand::Path { bin } => {
+                if !adapter_bins.iter().any(|c| c == bin) {
+                    adapter_bins.push(bin.clone());
+                }
+                if primary.is_none() {
+                    primary = Some(bin.clone());
+                }
             }
-        }
-        if primary.is_none() {
-            primary = Some(b.cli_bin.to_owned());
+            steve_harness_spec::DefaultCommand::Claude
+            | steve_harness_spec::DefaultCommand::Codex
+            | steve_harness_spec::DefaultCommand::NpmEntry { .. }
+            | steve_harness_spec::DefaultCommand::NpmBin { .. } => {
+                // `resolve_builtin_adapters` accepts `cli_bin` on PATH as an alternative to the
+                // managed npm prefix; check `cli_bin` (never `detect_bins`) for PATH mismatches.
+                if !adapter_bins.iter().any(|c| c == b.cli_bin) {
+                    adapter_bins.push(b.cli_bin.to_owned());
+                }
+                primary = Some(b.cli_bin.to_owned());
+            }
         }
     }
 
-    let mut found_in_login = None;
-    let mut found_command = None;
+    // 3. If the actual ACP adapter command is absent from service PATH yet present on the login
+    //    shell PATH, refreshing the service environment resolves it directly.
     if let Some(login_path) = login_os {
-        for candidate in &candidates {
-            if let Some(resolved) = steve_acp::which_in(candidate, Some(login_path)) {
-                found_in_login = Some(resolved.to_string_lossy().into_owned());
-                found_command = Some(candidate.clone());
-                break;
+        for bin in &adapter_bins {
+            if steve_acp::which_in(bin, Some(service_os)).is_none()
+                && let Some(resolved) = steve_acp::which_in(bin, Some(login_path))
+            {
+                return MissingCommandDiagnostic {
+                    kind: MissingCommandKind::CommandNotInServicePath,
+                    command: bin.clone(),
+                    adapter_package,
+                    detected_cli: None,
+                    cli_service_path: None,
+                    service_path: service_path.to_owned(),
+                    login_shell_path: Some(resolved.to_string_lossy().into_owned()),
+                    login_shell,
+                    refresh_command: refresh_command.to_owned(),
+                };
             }
         }
     }
 
+    // 4. Adapter command is absent everywhere. Inspect `detect_bins` (underlying harness CLI) to
+    //    distinguish "CLI present, ACP adapter missing" from "both missing". Check service PATH
+    //    first so a CLI already on service PATH is never misreported as a PATH mismatch.
+    if let Some(b) = builtin.filter(|_| !declared) {
+        for cli in &b.detect_bins {
+            if let Some(resolved) = steve_acp::which_in(cli, Some(service_os)) {
+                return MissingCommandDiagnostic {
+                    kind: MissingCommandKind::AdapterPackageMissing,
+                    command: primary.unwrap_or_else(|| b.cli_bin.to_owned()),
+                    adapter_package,
+                    detected_cli: Some((*cli).to_owned()),
+                    cli_service_path: Some(resolved.to_string_lossy().into_owned()),
+                    service_path: service_path.to_owned(),
+                    login_shell_path: None,
+                    login_shell: None,
+                    refresh_command: refresh_command.to_owned(),
+                };
+            }
+        }
+        if let Some(login_path) = login_os {
+            for cli in &b.detect_bins {
+                if let Some(resolved) = steve_acp::which_in(cli, Some(login_path)) {
+                    return MissingCommandDiagnostic {
+                        kind: MissingCommandKind::AdapterPackageMissing,
+                        command: primary.unwrap_or_else(|| b.cli_bin.to_owned()),
+                        adapter_package,
+                        detected_cli: Some((*cli).to_owned()),
+                        cli_service_path: None,
+                        service_path: service_path.to_owned(),
+                        login_shell_path: Some(resolved.to_string_lossy().into_owned()),
+                        login_shell,
+                        refresh_command: refresh_command.to_owned(),
+                    };
+                }
+            }
+        }
+    }
+
+    // 5. Neither the ACP adapter nor any underlying CLI was found in service or login PATH.
     MissingCommandDiagnostic {
-        command: found_command.or(primary).unwrap_or_else(|| id.to_owned()),
+        kind: MissingCommandKind::BothMissing,
+        command: primary.unwrap_or_else(|| id.to_owned()),
+        adapter_package,
+        detected_cli: None,
+        cli_service_path: None,
         service_path: service_path.to_owned(),
-        login_shell_path: found_in_login,
-        login_shell: login_env.map(|e| e.shell.clone()),
+        login_shell_path: None,
+        login_shell,
         refresh_command: refresh_command.to_owned(),
     }
 }
@@ -413,7 +503,11 @@ mod tests {
         let diag = info_missing
             .missing_command
             .expect("missing command diagnostic");
+        assert_eq!(diag.kind, MissingCommandKind::CommandNotInServicePath);
         assert_eq!(diag.command, "agy");
+        assert_eq!(diag.adapter_package, None);
+        assert_eq!(diag.detected_cli, None);
+        assert_eq!(diag.cli_service_path, None);
         assert_eq!(diag.service_path, "/usr/bin:/bin:/usr/sbin:/sbin");
         assert_eq!(
             diag.login_shell_path.as_deref(),
@@ -434,6 +528,7 @@ mod tests {
             "steve node refresh-env",
         );
         let truly_diag = info_truly_missing.missing_command.unwrap();
+        assert_eq!(truly_diag.kind, MissingCommandKind::BothMissing);
         assert_eq!(truly_diag.login_shell_path, None);
         assert_eq!(truly_diag.service_path, "/usr/bin:/bin");
 
@@ -701,5 +796,263 @@ exec /bin/sh -c "$script"
                 "background .zshrc child {bg_pid} survived shell probe"
             );
         }
+    }
+
+    fn write_exec(path: &Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn cfg_for_builtin(dir: &Path, id: &str, cmd: PathBuf) -> AcpConfig {
+        AcpConfig {
+            adapters: HashMap::from([(id.into(), cmd)]),
+            declared: HashMap::new(),
+            node: "node".into(),
+            claude_executable: "/usr/bin/false".into(),
+            claude_config_dir: None,
+            steve_home: dir.join("steve"),
+            codex_home: dir.join("codex"),
+            user_home: dir.to_path_buf(),
+            version: "test".into(),
+        }
+    }
+
+    /// Case 1: Adapter executable (PATH bin or npm cli_bin) is absent from service PATH yet
+    /// present in login shell PATH -> `CommandNotInServicePath` (suggests `refresh-env`).
+    #[tokio::test]
+    async fn diagnosis_command_not_in_service_path_for_path_and_npm_bins() {
+        let dir = tempfile::tempdir().unwrap();
+        let login_bin = dir.path().join("login-bin");
+        let empty_service_bin = dir.path().join("service-bin");
+        std::fs::create_dir_all(&login_bin).unwrap();
+        std::fs::create_dir_all(&empty_service_bin).unwrap();
+
+        let login_agy = login_bin.join("agy");
+        write_exec(&login_agy, "#!/bin/sh\nexit 0\n");
+        let login_pi_acp = login_bin.join("openma-pi-acp");
+        write_exec(&login_pi_acp, "#!/bin/sh\nexit 0\n");
+
+        let login_env = LoginShellEnv {
+            shell: "/bin/zsh".into(),
+            path: login_bin.to_string_lossy().into_owned(),
+        };
+        let service_path = empty_service_bin.to_string_lossy().into_owned();
+        let probes = AdapterProbes::default();
+
+        // PATH-command spec (`antigravity`, command = Path { bin: "agy" }): point the configured
+        // path at an absent temp file so the probe is isolated from whatever binaries exist on
+        // the test host's own PATH while `missing_command_diagnostic` still resolves `b.command`.
+        let agy_cfg = cfg_for_builtin(dir.path(), "antigravity", dir.path().join("no-agy"));
+        let agy_probe = probes.get(&agy_cfg, dir.path(), true).await;
+        let agy_info = info(
+            &agy_cfg,
+            "antigravity",
+            &agy_probe["antigravity"],
+            &service_path,
+            Some(&login_env),
+            "steve node refresh-env",
+        );
+        let agy_diag = agy_info.missing_command.expect("diagnostic");
+        assert_eq!(agy_diag.kind, MissingCommandKind::CommandNotInServicePath);
+        assert_eq!(agy_diag.command, "agy");
+        assert_eq!(agy_diag.adapter_package, None);
+        assert_eq!(
+            agy_diag.login_shell_path.as_deref(),
+            Some(login_agy.to_str().unwrap())
+        );
+
+        // npm_entry spec (`pi`, cli_bin = "openma-pi-acp"): when the ACP binary itself is in
+        // login shell PATH (and absent from service PATH), `refresh-env` resolves it.
+        let pi_managed = steve_acp::managed::command(&dir.path().join("steve"), "pi").unwrap();
+        let pi_cfg = cfg_for_builtin(dir.path(), "pi", pi_managed);
+        let pi_probe = probes.get(&pi_cfg, dir.path(), true).await;
+        let pi_info = info(
+            &pi_cfg,
+            "pi",
+            &pi_probe["pi"],
+            &service_path,
+            Some(&login_env),
+            "steve node refresh-env",
+        );
+        let pi_diag = pi_info.missing_command.expect("diagnostic");
+        assert_eq!(pi_diag.kind, MissingCommandKind::CommandNotInServicePath);
+        assert_eq!(pi_diag.command, "openma-pi-acp");
+        assert_eq!(pi_diag.adapter_package.as_deref(), Some("@openma/pi-acp"));
+        assert_eq!(
+            pi_diag.login_shell_path.as_deref(),
+            Some(login_pi_acp.to_str().unwrap())
+        );
+    }
+
+    /// Case 2: Underlying CLI (`detect_bins`, e.g. `pi` or `cursor`) is ALREADY in service PATH,
+    /// while the ACP adapter package/binary (`@openma/pi-acp` / `cursor-agent`) is missing ->
+    /// `AdapterPackageMissing` (never misclassified as `CommandNotInServicePath`).
+    #[tokio::test]
+    async fn diagnosis_cli_present_but_acp_adapter_package_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let shared_bin = dir.path().join("usr-local-bin");
+        std::fs::create_dir_all(&shared_bin).unwrap();
+        let pi_bin = shared_bin.join("pi");
+        write_exec(&pi_bin, "#!/bin/sh\nexit 0\n");
+        let cursor_bin = shared_bin.join("cursor");
+        write_exec(&cursor_bin, "#!/bin/sh\nexit 0\n");
+
+        // Same directory appears in both service PATH and login shell PATH (reproducing the
+        // MacBook Node screenshot where `/usr/local/bin/pi` was already on service PATH).
+        let shared_path = shared_bin.to_string_lossy().into_owned();
+        let login_env = LoginShellEnv {
+            shell: "/bin/zsh".into(),
+            path: shared_path.clone(),
+        };
+        let probes = AdapterProbes::default();
+
+        // npm_entry spec: `pi` (`@openma/pi-acp` missing, `pi` in service PATH)
+        let pi_managed = steve_acp::managed::command(&dir.path().join("steve"), "pi").unwrap();
+        let pi_cfg = cfg_for_builtin(dir.path(), "pi", pi_managed);
+        let pi_probe = probes.get(&pi_cfg, dir.path(), true).await;
+        assert_eq!(pi_probe["pi"].status, ProbeStatus::AdapterMissing);
+        let pi_info = info(
+            &pi_cfg,
+            "pi",
+            &pi_probe["pi"],
+            &shared_path,
+            Some(&login_env),
+            "steve node refresh-env",
+        );
+        let pi_diag = pi_info.missing_command.expect("diagnostic");
+        assert_eq!(pi_diag.kind, MissingCommandKind::AdapterPackageMissing);
+        assert_eq!(pi_diag.command, "openma-pi-acp");
+        assert_eq!(pi_diag.adapter_package.as_deref(), Some("@openma/pi-acp"));
+        assert_eq!(pi_diag.detected_cli.as_deref(), Some("pi"));
+        assert_eq!(
+            pi_diag.cli_service_path.as_deref(),
+            Some(pi_bin.to_str().unwrap())
+        );
+        assert_eq!(
+            pi_diag.login_shell_path, None,
+            "CLI already on service PATH must not be misreported as login-shell-only"
+        );
+
+        // Also when `pi` CLI is ONLY in login shell PATH and `@openma/pi-acp` is missing:
+        // still `AdapterPackageMissing` (since refresh-env alone cannot install `@openma/pi-acp`),
+        // carrying the login shell CLI path as evidence.
+        let empty_service = dir.path().join("empty-service");
+        std::fs::create_dir_all(&empty_service).unwrap();
+        let pi_login_only = info(
+            &pi_cfg,
+            "pi",
+            &pi_probe["pi"],
+            empty_service.to_str().unwrap(),
+            Some(&login_env),
+            "steve node refresh-env",
+        );
+        let pi_login_diag = pi_login_only.missing_command.expect("diagnostic");
+        assert_eq!(
+            pi_login_diag.kind,
+            MissingCommandKind::AdapterPackageMissing
+        );
+        assert_eq!(pi_login_diag.detected_cli.as_deref(), Some("pi"));
+        assert_eq!(pi_login_diag.cli_service_path, None);
+        assert_eq!(
+            pi_login_diag.login_shell_path.as_deref(),
+            Some(pi_bin.to_str().unwrap())
+        );
+
+        // PATH-command spec with distinct `detect_bins`: `cursor` (`cursor` in service PATH,
+        // `cursor-agent` missing everywhere).
+        let cursor_cfg = cfg_for_builtin(dir.path(), "cursor", dir.path().join("no-cursor-agent"));
+        let cursor_probe = probes.get(&cursor_cfg, dir.path(), true).await;
+        let cursor_info = info(
+            &cursor_cfg,
+            "cursor",
+            &cursor_probe["cursor"],
+            &shared_path,
+            Some(&login_env),
+            "steve node refresh-env",
+        );
+        let cursor_diag = cursor_info.missing_command.expect("diagnostic");
+        assert_eq!(cursor_diag.kind, MissingCommandKind::AdapterPackageMissing);
+        assert_eq!(cursor_diag.adapter_package, None);
+        assert_eq!(cursor_diag.detected_cli.as_deref(), Some("cursor"));
+        assert_eq!(
+            cursor_diag.cli_service_path.as_deref(),
+            Some(cursor_bin.to_str().unwrap())
+        );
+        assert_eq!(cursor_diag.login_shell_path, None);
+    }
+
+    /// Case 3: Neither the ACP adapter nor any `detect_bins` CLI exists in service or login PATH
+    /// -> `BothMissing`.
+    #[tokio::test]
+    async fn diagnosis_both_cli_and_adapter_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let empty = dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        let empty_path = empty.to_string_lossy().into_owned();
+        let login_env = LoginShellEnv {
+            shell: "/bin/zsh".into(),
+            path: empty_path.clone(),
+        };
+        let probes = AdapterProbes::default();
+
+        let pi_managed = steve_acp::managed::command(&dir.path().join("steve"), "pi").unwrap();
+        let pi_cfg = cfg_for_builtin(dir.path(), "pi", pi_managed);
+        let pi_probe = probes.get(&pi_cfg, dir.path(), true).await;
+        let pi_info = info(
+            &pi_cfg,
+            "pi",
+            &pi_probe["pi"],
+            &empty_path,
+            Some(&login_env),
+            "steve node refresh-env",
+        );
+        let pi_diag = pi_info.missing_command.expect("diagnostic");
+        assert_eq!(pi_diag.kind, MissingCommandKind::BothMissing);
+        assert_eq!(pi_diag.adapter_package.as_deref(), Some("@openma/pi-acp"));
+        assert_eq!(pi_diag.detected_cli, None);
+        assert_eq!(pi_diag.cli_service_path, None);
+        assert_eq!(pi_diag.login_shell_path, None);
+    }
+
+    /// Case 4: Adapter binary/package IS installed, but fails to start (non-executable or exits
+    /// before answering `initialize`) -> `AdapterStatus::InitializeFailed` with no
+    /// `missing_command` diagnostic.
+    #[tokio::test]
+    async fn diagnosis_installed_adapter_startup_failure_is_initialize_failed() {
+        let dir = tempfile::tempdir().unwrap();
+        let probes = AdapterProbes::default();
+
+        // 4a. Installed adapter exists, starts, and exits immediately without answering initialize.
+        let crashing = dir.path().join("crashing-adapter");
+        write_exec(&crashing, "#!/bin/sh\nexit 1\n");
+        let crash_cfg = cfg_for_builtin(dir.path(), "antigravity", crashing);
+        let crash_probe = probes.get(&crash_cfg, dir.path(), true).await;
+        let crash_info = info(
+            &crash_cfg,
+            "antigravity",
+            &crash_probe["antigravity"],
+            "/usr/bin:/bin",
+            None,
+            "steve node refresh-env",
+        );
+        assert_eq!(crash_info.status, AdapterStatus::InitializeFailed);
+        assert!(crash_info.missing_command.is_none());
+
+        // 4b. Installed adapter file exists on disk, but cannot even spawn (not executable).
+        let unexec = dir.path().join("non-executable-adapter");
+        std::fs::write(&unexec, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&unexec, std::fs::Permissions::from_mode(0o644)).unwrap();
+        let unexec_cfg = cfg_for_builtin(dir.path(), "antigravity", unexec);
+        let unexec_probe = probes.get(&unexec_cfg, dir.path(), true).await;
+        let unexec_info = info(
+            &unexec_cfg,
+            "antigravity",
+            &unexec_probe["antigravity"],
+            "/usr/bin:/bin",
+            None,
+            "steve node refresh-env",
+        );
+        assert_eq!(unexec_info.status, AdapterStatus::InitializeFailed);
+        assert!(unexec_info.missing_command.is_none());
     }
 }

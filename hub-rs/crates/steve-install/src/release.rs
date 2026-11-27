@@ -1874,10 +1874,13 @@ where
             runtime.lift()?;
         }
         runtime.wait_health(|h| {
+            let node_ok = !h["node"]["enabled"].as_bool().unwrap_or(false)
+                || h["node"]["linked"].as_bool() != Some(false);
             h["version"] == version
                 && (h["web_version"].is_null() || h["web_version"] == version)
                 && h["drain"] != true
                 && h["recovery"]["state"] != "failed"
+                && node_ok
         })
     })();
 
@@ -3101,6 +3104,11 @@ exec {quoted} --exact release::tests::fixture_process --nocapture
         fs::copy(
             staged_like_candidate.join("web/dist/index.html"),
             ext_candidate.join("web/dist/index.html"),
+        )
+        .unwrap();
+        fs::copy(
+            staged_like_candidate.join("bin/steve-node"),
+            ext_candidate.join("bin/steve-node"),
         )
         .unwrap();
         let helper = std::env::current_exe().unwrap();

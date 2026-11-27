@@ -36,6 +36,11 @@ use crate::journal::{Tx, internal};
 use crate::procs::{self, Stopped};
 use crate::{Inner, now};
 
+/// Periodic workspace change sensing interval while a turn is prompting.
+const WORKSPACE_POLL_INTERVAL: Duration = Duration::from_secs(15);
+/// Minimum gap between tool-triggered workspace fingerprint probes.
+const WORKSPACE_PROBE_DEBOUNCE: Duration = Duration::from_secs(2);
+
 pub(crate) enum Msg {
     /// Start the harness as configured now and confirm it; finish `op` (open, configure).
     Open {
@@ -106,6 +111,11 @@ pub(crate) enum Msg {
     UsageSettled {
         token: u64,
         facts: Vec<Fact>,
+    },
+    WorkspaceChanged {
+        token: u64,
+        workspace: WorkspaceRef,
+        revision: Revision,
     },
     /// Still running after its grace: its group is stopped.
     Kill {
@@ -405,6 +415,8 @@ struct Run {
     usage_stop: Option<oneshot::Sender<Vec<Fact>>>,
     usage_task: Option<UsageTask>,
     usage_pending: bool,
+    workspace_task: Option<UsageTask>,
+    workspace_poke: Option<Arc<tokio::sync::Notify>>,
     unknown: Option<String>,
     images: crate::inline_images::Images,
     image_scope: crate::inline_images::Scope,
@@ -703,6 +715,27 @@ impl Actor {
                         let _ = self.tx(|t| crate::emit_all(&self.inner, t, diagnostics));
                     }
                     self.commit_end();
+                }
+            }
+            Msg::WorkspaceChanged {
+                token,
+                workspace,
+                revision,
+            } => {
+                if let Some(run) = self.run.as_ref().filter(|r| {
+                    r.token == token && r.phase == Phase::Prompting && r.ending.is_none()
+                }) {
+                    let mut evs = vec![(
+                        Subject::Execution(run.exec.clone()),
+                        EventBody::WorkspaceChanged {
+                            workspace,
+                            revision,
+                        },
+                    )];
+                    let session = self.session.clone();
+                    if let Err(error) = self.record_update(&session, &mut evs, &[]) {
+                        self.update_failed(error, evs, true);
+                    }
                 }
             }
             Msg::Kill { token } => {
@@ -1183,6 +1216,8 @@ impl Actor {
             usage_stop: None,
             usage_task: None,
             usage_pending: false,
+            workspace_task: None,
+            workspace_poke: None,
             unknown: None,
             images: crate::inline_images::Images::for_replies(),
             image_scope,
@@ -1327,6 +1362,63 @@ impl Actor {
         });
         if let Some(r) = self.run.as_mut() {
             r.usage_task = Some(UsageTask(usage_task));
+            if let RunDirectory::Workspace { workspace } = &r.spec.run.directory {
+                let cwd = r.image_scope.cwd.clone();
+                let workspace = workspace.clone();
+                let poke = Arc::new(tokio::sync::Notify::new());
+                let poke_rx = poke.clone();
+                let tx = self.tx.clone();
+                let workspace_task = tokio::spawn(async move {
+                    let mut last = tokio::task::spawn_blocking({
+                        let cwd = cwd.clone();
+                        move || crate::workspace::fingerprint(&cwd)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    let mut tick = tokio::time::interval(WORKSPACE_POLL_INTERVAL);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    // First tick fires immediately; wait one interval unless poked by a mutating tool.
+                    tick.tick().await;
+                    let mut last_probe = tokio::time::Instant::now();
+                    loop {
+                        tokio::select! {
+                            _ = tick.tick() => {}
+                            _ = poke_rx.notified() => {
+                                let elapsed = last_probe.elapsed();
+                                if elapsed < WORKSPACE_PROBE_DEBOUNCE {
+                                    tokio::time::sleep(WORKSPACE_PROBE_DEBOUNCE - elapsed).await;
+                                }
+                            }
+                        }
+                        last_probe = tokio::time::Instant::now();
+                        let next = tokio::task::spawn_blocking({
+                            let cwd = cwd.clone();
+                            move || crate::workspace::fingerprint(&cwd)
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        if let Some(rev) = next
+                            && last.as_ref() != Some(&rev)
+                        {
+                            last = Some(rev.clone());
+                            if tx
+                                .send(Msg::WorkspaceChanged {
+                                    token,
+                                    workspace: workspace.clone(),
+                                    revision: rev,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                });
+                r.workspace_poke = Some(poke);
+                r.workspace_task = Some(UsageTask(workspace_task));
+            }
             r.phase = Phase::Prompting;
         }
         // from here the adapter's messages are this attempt's
@@ -1514,6 +1606,18 @@ impl Actor {
                     Fact::Event(mut e) => {
                         if let EventBody::ToolChanged { tool } = &mut e {
                             run.acted = true;
+                            if tool.phase == ToolPhase::Succeeded
+                                && matches!(
+                                    tool.category,
+                                    ToolCategory::Edit
+                                        | ToolCategory::Delete
+                                        | ToolCategory::Move
+                                        | ToolCategory::Exec
+                                )
+                                && let Some(poke) = &run.workspace_poke
+                            {
+                                poke.notify_one();
+                            }
                             if let RunDirectory::Workspace { workspace } = &run.spec.run.directory
                                 && let Some(fact) = u
                                     .get("toolCallId")
@@ -2297,11 +2401,35 @@ fn read_owner_regular_file(own: &std::path::Path, segs: &[std::ffi::OsString]) -
     }
 }
 
+/// Derives the owner's ambient state root matching the isolated `state_root` layout: strips
+/// `sd.import_into` from `sd.owner_source(user_home)` when present (for example
+/// `~/.gemini/antigravity-cli` with `import_into = "antigravity-cli"` -> `~/.gemini`), avoiding
+/// positional assumptions about `sd.extra_dirs`.
+fn owner_state_root(
+    sd: &steve_harness_spec::StateDir,
+    user_home: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let own = sd.owner_source(user_home)?;
+    if let Some(sub) = sd.import_into.as_deref().filter(|s| !s.is_empty()) {
+        let sub_path = std::path::Path::new(sub);
+        if own.ends_with(sub_path) {
+            let depth = sub_path.components().count();
+            let mut root = own.as_path();
+            for _ in 0..depth {
+                root = root.parent()?;
+            }
+            return Some(root.to_path_buf());
+        }
+    }
+    Some(own)
+}
+
 fn harness_state(
     inner: &Inner,
     s: &HarnessState,
     sd: &steve_harness_spec::StateDir,
     skills: Option<&str>,
+    state_settings: steve_harness_spec::StateSettings,
 ) -> ApiResult<std::path::PathBuf> {
     if !s.valid() {
         return Err(Error::new(
@@ -2378,6 +2506,20 @@ fn harness_state(
             Err(why) => {
                 return Err(internal(format!("harness state: sign-in: {why}")));
             }
+        }
+    }
+    let owner_root = s
+        .import_owner
+        .then(|| owner_state_root(sd, &inner.cfg.acp.user_home))
+        .flatten();
+    match crate::harness_settings::apply(&dir, &target, state_settings, owner_root.as_deref()) {
+        Ok(left) => {
+            for why in left {
+                tracing::info!("harness state: settings: {why}");
+            }
+        }
+        Err(why) => {
+            return Err(internal(format!("harness state: settings: {why}")));
         }
     }
     // the owner's personal instructions and extensions, linked where the harness reads them, when
@@ -2507,7 +2649,7 @@ async fn open_harness(
     let state = match (&row.open.state, declared_state.as_ref()) {
         (Some(s), Some(sd)) => {
             let props = inner.cfg.acp.adapter_properties(&harness);
-            let dir = harness_state(inner, s, sd, props.skills.as_deref())?;
+            let dir = harness_state(inner, s, sd, props.skills.as_deref(), props.state_settings)?;
             let mut env =
                 sd.isolation_env_for(&dir, Some(&inner.cfg.acp.user_home), s.import_owner);
             // its credential store where the Node's harness keeps it, apart from the directory
@@ -2709,6 +2851,7 @@ async fn open_harness(
             log_tag: format!("[node {session}]"),
             clean_env: fresh.is_some(),
             prefix: inner.cfg.acp.adapter_prefix(&harness),
+            harness: Some(harness.clone()),
         },
         HARNESS_MAX_FRAME_BYTES,
         move |bytes| {
@@ -3066,6 +3209,23 @@ mod state_import_tests {
         let real_segs = valid_rel_path("real.json").unwrap();
         assert!(read_owner_regular_file(&own, &real_segs).is_some());
     }
+
+    #[test]
+    fn owner_state_root_strips_import_into_independently_of_extra_dirs() {
+        let mut sd = steve_harness_spec::builtin("antigravity")
+            .unwrap()
+            .properties
+            .state
+            .clone()
+            .unwrap();
+        let home = std::path::Path::new("/fixture/home");
+        assert_eq!(owner_state_root(&sd, home), Some(home.join(".gemini")));
+        // Reordering or clearing extra_dirs must not affect the derived owner state root.
+        sd.extra_dirs = vec![".gemini/sandbox".into(), ".gemini/config".into()];
+        assert_eq!(owner_state_root(&sd, home), Some(home.join(".gemini")));
+        sd.extra_dirs.clear();
+        assert_eq!(owner_state_root(&sd, home), Some(home.join(".gemini")));
+    }
 }
 
 #[cfg(test)]
@@ -3147,6 +3307,8 @@ mod journal_regressions {
             usage_stop: None,
             usage_task: None,
             usage_pending: false,
+            workspace_task: None,
+            workspace_poke: None,
             unknown: None,
             images: crate::inline_images::Images::for_replies(),
             image_scope: crate::inline_images::Scope::new(dir.into(), vec![dir.into()], vec![]),

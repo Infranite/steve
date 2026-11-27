@@ -67,23 +67,51 @@ createRoot(document.getElementById("root")!).render(<Fixture />)
 window.addEventListener("fixture-thinking-stage", (event) => {
   const stage = (event as CustomEvent<string>).detail
   const t0 = Date.now() - 5000
-  updateChat({ live: null, draft: null, thinking: true, phase: "route" })
+  updateChat({ live: null, draft: null, thinking: true, thinkingStartedAt: t0, thinkingAt: Date.now(), phase: "route" })
   seedMessages(short.slice(0, 3))
   const reasoning = Array.from({length:12}, (_,i) => `第 ${i+1} 步：核对实际模型与工具事件，保留来源、失败和已执行的步骤。`).join("\n\n")
   if (stage === "thought") updateChat({ draft: { mid:"request",text:"",thought:reasoning,t0 } })
+  if (stage === "steve-gap") {
+    updateChat({
+      phase: "research",
+      live: {
+        mid: "request",
+        run: "fixture-research",
+        startedAt: t0,
+        at: Date.now(),
+        stage: "calling_tool",
+        plan: [{ content: "定位计时归零问题", status: "completed" }, { content: "验证长分析过程透出", status: "in_progress" }],
+        tools: [{ name: "Read", brief: "src/app.ts", description: "读取主入口文件", kind: "read", ok: true, ms: 320, excerpt: "export function App() {}" }],
+        now: { name: "steve_items_search", brief: "ST-226", description: "查询事项上下文", kind: "steve", startedAt: Date.now() - 1000 },
+        subtasks: [{ id: "sub-1", origin: "subagent", status: "running", title: "扫描后端事件链路", actor: "Explore", progress: "正在检查 research.rs", started_at: Date.now() - 2000 }],
+      },
+    })
+  }
   if (stage === "research" || stage === "research-update") {
-    const live: NonNullable<Parameters<typeof updateChat>[0]["live"]> = { mid:"request",run:"fixture-research",startedAt:t0,tools:[{name:"Read",brief:"src/app.ts",kind:"read",ok:true},{name:"Read",brief:"src/config.ts",kind:"read",ok:true}],now:{name:"Grep",brief:"model settings",kind:"search"} }
-    if (stage === "research-update") { live.tools.push({name:"Grep",brief:"model settings",kind:"search",ok:true}); live.now={name:"Bash",brief:"npm run check",kind:"exec"} }
+    const live: NonNullable<Parameters<typeof updateChat>[0]["live"]> = {
+      mid:"request", run:"fixture-research", startedAt:t0, at: Date.now(),
+      plan: [{ content: "定位计时归零问题", status: "completed" }, { content: "验证长分析过程透出", status: "in_progress" }],
+      tools:[
+        {name:"Read",brief:"src/app.ts",description:"读取主入口文件",kind:"read",ok:true,ms:180,excerpt:"export function App() {}"},
+        {name:"Read",brief:"src/config.ts",kind:"read",ok:true,ms:90}
+      ],
+      now:{name:"Grep",brief:"model settings",description:"搜索模型配置定义",kind:"search",startedAt:Date.now()-1000},
+      subtasks:[{id:"sub-1",origin:"subagent",status:"running",title:"扫描后端事件链路",actor:"Explore",progress:"正在检查 research.rs",started_at:Date.now()-2000}],
+    }
+    if (stage === "research-update") {
+      live.tools.push({name:"Grep",brief:"model settings",description:"搜索模型配置定义",kind:"search",ok:true,ms:120});
+      live.now={name:"Bash",brief:"npm run check",description:"执行前端类型检查",kind:"exec",startedAt:Date.now()-500}
+    }
     updateChat({ phase: "research", live })
   }
   if (stage === "reply") { updateChat({ phase: "answer", draft: {mid:"request",thought:reasoning,text:"核对完成，正在生成回答。",t0} }) }
   if (["complete","failure","stopped"].includes(stage)) {
-    updateChat({ thinking: false })
+    updateChat({ thinking: false, thinkingStartedAt: undefined, thinkingAt: undefined })
     seedMessages([...short.slice(0,3), {id:"thinking-result",k:"steve",origin:"request",created:Date.now(),t:stage==="failure"?"模型服务暂时不可用。":"已核对。",stopped:stage==="stopped"||undefined,
       ...(stage==="stopped"?{}:{steps:{route:{kind:"research",title:"",bot:"steve",project:null,tags:[],newTags:[],why:"核对模型配置",model:"fixture-model",fallback:false,ms:200},
         answer:{thought:reasoning,model:"fixture-model",ms:5000,failed:stage==="failure"},
         research:{run:"fixture-research",model:"fixture-model",ms:28000,turns:2,tools:3,stopped:stage==="failure"?"failed":undefined},
-        tools:[{name:"Read",kind:"read",args:{brief:"src/app.ts"},status:"ok",ms:20},{name:"Read",kind:"read",args:{brief:"src/config.ts"},status:"ok",ms:20},{name:"Bash",kind:"exec",args:{brief:"npm run check"},result:{records:Array.from({length:1200}, (_, i) => `output record ${i}`),end:"fixture output end"},status:"failed",error:"transport",ms:500}]}}) }])
+        tools:[{name:"Read",kind:"read",description:"读取主入口文件",args:{brief:"src/app.ts"},excerpt:"export function App() {}",status:"ok",ms:20},{name:"Read",kind:"read",args:{brief:"src/config.ts"},status:"ok",ms:20},{name:"Bash",kind:"exec",args:{brief:"npm run check"},result:{records:Array.from({length:1200}, (_, i) => `output record ${i}`),end:"fixture output end"},status:"failed",error:"transport",ms:500}]}}) }])
   }
   emit()
 })

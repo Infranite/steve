@@ -70,9 +70,24 @@ pub(super) fn describe() {
         "Time to assess and rank one Bot dispatch request."
     );
     describe_counter!(
+        "steve_bot_selection_total",
+        Count,
+        "Completed Bot placement selections by winning reason. Label: reason."
+    );
+    describe_counter!(
         "steve_bot_selection_blocked_total",
         Count,
         "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
+    );
+    describe_counter!(
+        "steve_offer_preview_total",
+        Count,
+        "OFFER card Bot placement previews computed for inline answers. Label: result (placed, coordinator, unassigned)."
+    );
+    describe_counter!(
+        "steve_offer_action_total",
+        Count,
+        "OFFER card user actions handled. Labels: action (take, dismiss, already), bot_override (explicit, auto)."
     );
     describe_counter!(
         "steve_dispatch_no_executor_total",
@@ -510,6 +525,21 @@ pub(super) fn describe() {
         "Attempts whose harness never listed Steve's tools (a Node diagnostic)."
     );
     describe_counter!(
+        "steve_session_auto_mode_unavailable_total",
+        Count,
+        "Session diagnostics reporting that a harness auto-mode classifier returned no safety verdict. Labels: severity (warning, error)."
+    );
+    describe_counter!(
+        "steve_acp_permission_check_status_total",
+        Count,
+        "Harness permission_check_status signals observed by ACP adapters. Labels: harness, status (checking, done), source (acp, stderr)."
+    );
+    describe_counter!(
+        "steve_acp_classifier_unavailable_total",
+        Count,
+        "Tool calls denied or turns stopped because a harness auto-mode classifier returned no safety verdict. Labels: harness, kind (denied, stopped)."
+    );
+    describe_counter!(
         "steve_node_ingest_commits_total",
         Count,
         "Event batches committed. Labels: node."
@@ -548,6 +578,11 @@ pub(super) fn describe() {
         "steve_orchestration_stalls_total",
         Count,
         "Logical turns held by a repeated failure or lack of progress. Labels: reason."
+    );
+    describe_counter!(
+        "steve_orchestration_stall_evaluations_total",
+        Count,
+        "Turn stall progress evaluation outcomes by outcome (advanced, deduplicated, deferred, stalled) and reason."
     );
     describe_histogram!(
         "steve_orchestration_stall_seconds",
@@ -618,6 +653,11 @@ pub(super) fn describe() {
         "steve_hub_harness_upgrades_total",
         Count,
         "Harness upgrades finished on Nodes. Labels: trigger (manual, auto), outcome (succeeded, failed)."
+    );
+    describe_counter!(
+        "steve_hub_harness_installs_total",
+        Count,
+        "Owner-initiated harness adapter installations routed to Nodes. Label: outcome (accepted, rejected)."
     );
     describe_counter!(
         "steve_hub_harness_auto_upgrade_policy_changes_total",
@@ -953,6 +993,26 @@ pub(super) fn describe() {
         "steve_gateway_requests_total",
         Count,
         "Think prompts confirmed submitted by a Node's adapter transport."
+    );
+    describe_counter!(
+        "steve_thread_progress_events_total",
+        Count,
+        "Main-thread progress events emitted to live clients. Labels: kind (stage, thought, plan, subtask, tool_running, tool_done)."
+    );
+    describe_counter!(
+        "steve_thread_progress_throttled_total",
+        Count,
+        "Main-thread progress updates suppressed by emission throttling. Labels: kind (thought)."
+    );
+    describe_counter!(
+        "steve_thread_progress_redactions_total",
+        Count,
+        "Main-thread progress fields where credential patterns were redacted before live publication or persistence."
+    );
+    describe_counter!(
+        "steve_thread_live_hydrations_total",
+        Count,
+        "GET /api/summary responses that hydrated an active main-thread live snapshot."
     );
     describe_histogram!(
         "steve_model_call_seconds",

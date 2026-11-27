@@ -1,17 +1,7 @@
-/* ── outputs read through the Node that has the item's files (N0e-E5b) ──
-With the local Node on (`STEVE_NODE_MODE=local`), or for an item on another device, a document,
-file or folder is read with the Node's files face (`list_root`/`list_dir`/`read_file`) and a
-branch or commit with its git face, so the Hub opens nothing in the item's places. What is shown
-is the same as the Hub's own reads give (the JSON, the bytes, a Range).
-
-Where it is looked for, in order: the workspace of the item's bound session, then its own
-directory and its project (as the Hub did: on the Hub's device each path under the local Node's
-root that holds it; on another device the places the store names there). An absolute location is
-read only on the Hub's own device, and only inside the item's places; one in the temp directory
-is the Hub's own and still read where it is (no other device has it). Git: a bound workspace's
-through its Node; else the Hub's own checkout on the Hub's device, and on another device none. On
-the Hub's device a workspace that has no such repository, branch or commit (a plain directory under
-a git project) leaves it to the Hub's own checkout, as the Hub looked there first. */
+/* ── outputs read strictly through the Node that holds the item's files and git ──
+Every document, file, folder, branch, or commit outside Hub-owned durable deliverables is read
+strictly via `steve-node-api` (`list_root` / `list_dir` / `read_file` / `git_facts`). The Hub
+never touches project directories, worktrees, or runs `git` locally. */
 
 use std::path::{Component, Path as FsPath, PathBuf};
 use std::sync::Arc;
@@ -21,8 +11,8 @@ use serde_json::{Value, json};
 use steve_node_api as na;
 
 use super::{
-    DIFF_MAX, Found, LIST_MAX, Out, TEXT_MAX, branch, commit, first_word, git_doc, home_tilde,
-    is_hash, media, plain, text_value,
+    DIFF_MAX, Found, LIST_MAX, Out, TEXT_MAX, first_word, home_tilde, is_hash, media, plain,
+    text_value,
 };
 use crate::api::blocking;
 use crate::api::projects::{normalize, offline, placement_error};
@@ -44,18 +34,26 @@ enum Place {
     Ws(na::WorkspaceRef, String),
 }
 
-/// Where the branch and commit views read git.
+/// Where the branch and commit views read git (always through a Node, never Hub-local git).
+#[derive(Clone)]
 enum Git {
-    /// A bound workspace, through its Node; on the Hub's device (`true`) what the workspace's git
-    /// does not have is looked for in the Hub's own checkout.
-    Node(Arc<dyn na::Node>, na::WorkspaceRef, bool),
-    /// The Hub's own checkout (the project or the item's directory) on the Hub's device.
-    Hub,
-    /// On another device with no workspace to ask: not shown.
+    /// A prepared workspace on a Node (and optional project root on the same Node to prepare if
+    /// the primary workspace has no git repository).
+    Node {
+        node: Arc<dyn na::Node>,
+        workspace: na::WorkspaceRef,
+        fallback_root: Option<na::RootPath>,
+    },
+    /// A project root on the colocated Node that can be prepared on demand for git queries.
+    ProjectRoot {
+        node: Arc<dyn na::Node>,
+        root: na::RootPath,
+    },
+    /// On another device with no prepared workspace to ask: not shown.
     Elsewhere,
 }
 
-/// The Hub's own device.
+/// The Hub's own device (accessed through the colocated Node).
 struct Local {
     ws: Arc<Workspaces>,
     /// The item's places as the Hub has them (its directory, project, worktree and scratch dir).
@@ -226,7 +224,7 @@ impl Addr {
     /// its directory's listing.
     async fn stat(&self) -> Result<Seen, ApiError> {
         let seen = |e: na::Error| match e.code {
-            na::Code::Invalid => Ok(Seen::Gone),
+            na::Code::Invalid | na::Code::NotFound => Ok(Seen::Gone),
             na::Code::Forbidden => Ok(Seen::Outside),
             _ => Err(node_error(e)),
         };
@@ -265,8 +263,7 @@ impl Addr {
         }
     }
 
-    /// Everything right below, as far as a person could look through (an unreadable directory
-    /// lists nothing, as on the Hub's disk).
+    /// Everything right below, as far as a person could look through.
     async fn list(&self) -> Result<Vec<na::FileInfo>, ApiError> {
         const MAX: usize = 50_000;
         let mut out = vec![];
@@ -274,7 +271,12 @@ impl Addr {
         loop {
             let page = match self.page(cursor, 1000).await {
                 Ok(p) => p,
-                Err(e) if matches!(e.code, na::Code::Invalid | na::Code::Forbidden) => {
+                Err(e)
+                    if matches!(
+                        e.code,
+                        na::Code::Invalid | na::Code::NotFound | na::Code::Forbidden
+                    ) =>
+                {
                     return Ok(out);
                 }
                 Err(e) => return Err(node_error(e)),
@@ -287,10 +289,6 @@ impl Addr {
         }
     }
 
-    /// `len` bytes from `offset` (fewer at the end), of the file at `expected` when given. Once
-    /// the first answer tells how much the Node's link gives per read, up to [`READ_WINDOW`]
-    /// reads go at once (a remote Node's chunks are small: one at a time would wait a round trip
-    /// for each).
     async fn read(
         &self,
         expected: Option<na::Revision>,
@@ -317,7 +315,6 @@ impl Addr {
             });
             let chunks = futures::future::join_all(reads).await;
             for (i, c) in chunks.into_iter().enumerate() {
-                // a short read before this one: what follows is asked again from there
                 if at + i as u64 * each != offset + out.len() as u64 {
                     break;
                 }
@@ -341,50 +338,51 @@ impl Addr {
 /// Reads of one file in flight at once ([`Addr::read`]).
 const READ_WINDOW: u64 = 4;
 
-/// Where the outputs of `item` are read, or `None` when the Hub reads its own disk as always (the
-/// local Node is off and the item is on the Hub's device).
+/// Where the outputs of `item` are read through its Node (colocated or remote).
 pub(super) async fn view(
     ws: Arc<Workspaces>,
     item: String,
     project: Option<String>,
     o: &Out,
     tmp: Vec<PathBuf>,
-) -> Result<Option<View>, ApiError> {
+) -> Result<View, ApiError> {
     let (cwd, proj) = (o.cwd.clone(), o.project.clone());
-    let places: Vec<PathBuf> = o
-        .roots
-        .iter()
-        .filter(|r| !tmp.contains(r))
-        .cloned()
-        .collect();
+    let places = o.roots.clone();
     let w = ws.clone();
     enum Pre {
-        Local(Option<(Arc<dyn na::Node>, na::WorkspaceRef)>, Vec<Addr>),
+        Local {
+            bound: Option<(Arc<dyn na::Node>, na::WorkspaceRef)>,
+            bases: Vec<Addr>,
+            project_root: Option<(Arc<dyn na::Node>, na::RootPath)>,
+        },
         Remote(Vec<crate::wire::workspaces::Placement>),
     }
     let pre = blocking(move || {
-        let fail = |e: PlacementError| match e {
-            PlacementError::LocalOff => Ok(None),
-            e => Err(placement_error(e)),
-        };
         let item_p = match w.placement_of(Subject::Item(&item)) {
             Ok(p) => Some(p),
             Err(PlacementError::NoWorkspace | PlacementError::NotFound(_)) => None,
-            Err(e) => return fail(e),
+            Err(e) => return Err(placement_error(e)),
         };
         if item_p.as_ref().is_none_or(|p| w.is_local_placement(p)) {
             if let Err(e) = w.local_roots() {
-                return fail(e);
+                return Err(placement_error(e));
             }
             let bound = item_p.and_then(|p| match p.at {
                 At::Workspace(r) => Some((p.node, r)),
                 At::Root(_) => None,
             });
             let mut bases = vec![];
-            for d in [cwd, proj].into_iter().flatten() {
+            let mut project_root = None;
+            for (is_proj, d) in [(false, cwd), (true, proj)]
+                .into_iter()
+                .filter_map(|(is_p, d)| d.map(|p| (is_p, p)))
+            {
                 match w.hub_path(&PathBuf::from(normalize(&d.to_string_lossy()))) {
                     Ok(p) => {
                         if let At::Root(at) = p.at {
+                            if is_proj {
+                                project_root = Some((p.node.clone(), at.clone()));
+                            }
                             bases.push(Addr {
                                 node: p.node,
                                 at: Place::Root(at),
@@ -392,27 +390,33 @@ pub(super) async fn view(
                             });
                         }
                     }
-                    // not a root (an archived project): nothing is read there
                     Err(PlacementError::Outside) => {}
-                    Err(e) => return fail(e),
+                    Err(e) => return Err(placement_error(e)),
                 }
             }
-            return Ok(Some(Pre::Local(bound, bases)));
+            return Ok(Pre::Local {
+                bound,
+                bases,
+                project_root,
+            });
         }
         let mut found = vec![item_p.expect("not on the Hub's device")];
         if let Some(pid) = project {
             match w.placement_of(Subject::Project(&pid)) {
                 Ok(p) if p.at != found[0].at => found.push(p),
                 Ok(_) | Err(PlacementError::NoWorkspace | PlacementError::NotFound(_)) => {}
-                Err(e) => return fail(e),
+                Err(e) => return Err(placement_error(e)),
             }
         }
-        Ok(Some(Pre::Remote(found)))
+        Ok(Pre::Remote(found))
     })
     .await?;
-    let Some(pre) = pre else { return Ok(None) };
-    Ok(Some(match pre {
-        Pre::Local(bound, rest) => local_view(ws, places, tmp, bound, rest).await?,
+    Ok(match pre {
+        Pre::Local {
+            bound,
+            bases: rest,
+            project_root,
+        } => local_view(ws, places, tmp, bound, rest, project_root).await?,
         Pre::Remote(found) => {
             let mut bases = vec![];
             let mut git = Git::Elsewhere;
@@ -422,7 +426,11 @@ pub(super) async fn view(
                         if let Some(a) = workspace_base(&p.node, &w).await? {
                             bases.push(a);
                             if matches!(git, Git::Elsewhere) {
-                                git = Git::Node(p.node.clone(), w, false);
+                                git = Git::Node {
+                                    node: p.node.clone(),
+                                    workspace: w,
+                                    fallback_root: None,
+                                };
                             }
                         }
                     }
@@ -442,28 +450,39 @@ pub(super) async fn view(
                 git,
             }
         }
-    }))
+    })
 }
 
-/// A local bound workspace's Node git; else the project's checkout on the Hub.
+/// A local bound workspace's Node git, with optional fallback to the project's root workspace on
+/// the same colocated Node (never Hub-local git).
 async fn local_view(
     ws: Arc<Workspaces>,
     places: Vec<PathBuf>,
     tmp: Vec<PathBuf>,
     bound: Option<(Arc<dyn na::Node>, na::WorkspaceRef)>,
     rest: Vec<Addr>,
+    project_root: Option<(Arc<dyn na::Node>, na::RootPath)>,
 ) -> Result<View, ApiError> {
     let mut bases = vec![];
     let git = match bound {
         Some((node, w)) => match workspace_base(&node, &w).await? {
             Some(a) => {
                 bases.push(a);
-                Git::Node(node, w, true)
+                Git::Node {
+                    node,
+                    workspace: w,
+                    fallback_root: project_root.map(|(_, r)| r),
+                }
             }
-            // the workspace is gone there: the project's checkout, as the Hub had it
-            None => Git::Hub,
+            None => match project_root {
+                Some((node, root)) => Git::ProjectRoot { node, root },
+                None => Git::Elsewhere,
+            },
         },
-        None => Git::Hub,
+        None => match project_root {
+            Some((node, root)) => Git::ProjectRoot { node, root },
+            None => Git::Elsewhere,
+        },
     };
     bases.extend(rest);
     Ok(View {
@@ -471,6 +490,52 @@ async fn local_view(
         local: Some(Local { ws, places, tmp }),
         git,
     })
+}
+
+/// Prepares a read-only handle to a project root directory on the colocated Node so git queries
+/// run on the Node when an item's worktree is gone or is not itself a checkout.
+async fn prepare_root_workspace(
+    node: &Arc<dyn na::Node>,
+    root: &na::RootPath,
+) -> Result<na::WorkspaceRef, na::Error> {
+    let resource = format!("preview-root:{}:{}", root.root.as_str(), root.rel.as_str());
+    let now = steve_store::now();
+    let op = na::OperationId::new(format!("op_prev_{}", uuid::Uuid::new_v4().simple()))
+        .map_err(|e| na::Error::new(na::Code::Invalid, e.to_string()))?;
+    let cmd = na::Command {
+        id: op.clone(),
+        issued_at: na::Timestamp(now),
+        accept_before: na::Timestamp(now + 60_000),
+        grant: na::GrantId::new("hub").expect("constant grant"),
+        body: na::Prepare {
+            resource,
+            kind: na::PrepareKind::Existing { dir: root.clone() },
+        },
+    };
+    let mut r = node.prepare_workspace(cmd).await?;
+    for _ in 0..100 {
+        match r.state {
+            na::Observed::Finished {
+                result: Some(na::OperationResult::Workspace(v)),
+                ..
+            } => return Ok(v.workspace),
+            na::Observed::Finished { error: Some(e), .. } => return Err(e),
+            na::Observed::Finished { .. } | na::Observed::Unknown { .. } => {
+                return Err(na::Error::new(
+                    na::Code::Internal,
+                    "prepare workspace ended",
+                ));
+            }
+            _ => {
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                r = node.operation(op.clone()).await?;
+            }
+        }
+    }
+    Err(na::Error::new(
+        na::Code::Internal,
+        "prepare workspace timed out",
+    ))
 }
 
 /// The top of a bound workspace, shown as its Node shows it; `None` when it is gone there.
@@ -502,11 +567,49 @@ pub(crate) async fn locate(o: &Out, v: &View, sub: Option<&str>) -> Result<Locat
             return Err(outside());
         };
         let p = PathBuf::from(normalize(&loc));
-        let mine = l
+        let target = if l
             .places
             .iter()
-            .any(|r| p.starts_with(normalize(&r.to_string_lossy())));
-        if !mine {
+            .any(|r| p.starts_with(normalize(&r.to_string_lossy())))
+        {
+            Some(p)
+        } else if let Some(local_node) = l.ws.local_node() {
+            // Resolve symlinks (e.g. macOS `/var` -> `/private/var`) on the colocated Node so the
+            // Hub never calls `canonicalize` on project/worktree paths directly.
+            let resolved = local_node
+                .path_check(na::PathCheckRequest {
+                    path: p.to_string_lossy().into_owned(),
+                })
+                .await
+                .ok()
+                .and_then(|r| r.canonical)
+                .map(PathBuf::from);
+            let mut matched = None;
+            if let Some(resolved) = resolved {
+                for r in &l.places {
+                    let norm_r = normalize(&r.to_string_lossy());
+                    if resolved.starts_with(&norm_r) {
+                        matched = Some(resolved.clone());
+                        break;
+                    }
+                    if let Ok(rc) = local_node
+                        .path_check(na::PathCheckRequest {
+                            path: r.to_string_lossy().into_owned(),
+                        })
+                        .await
+                        && let Some(canon_r) = rc.canonical
+                        && resolved.starts_with(FsPath::new(&canon_r))
+                    {
+                        matched = Some(resolved.clone());
+                        break;
+                    }
+                }
+            }
+            matched
+        } else {
+            None
+        };
+        let Some(p) = target else {
             // the temp directory is the Hub's own: read where it is, as always
             let hub = Out {
                 cwd: None,
@@ -519,7 +622,7 @@ pub(crate) async fn locate(o: &Out, v: &View, sub: Option<&str>) -> Result<Locat
                 .await?
                 .map(Located::Disk)
                 .map_err(Fail::Missing);
-        }
+        };
         let ws = l.ws.clone();
         let q = p.clone();
         let placed = blocking(move || Ok(ws.hub_path(&q))).await?;
@@ -592,55 +695,72 @@ pub(crate) async fn locate(o: &Out, v: &View, sub: Option<&str>) -> Result<Locat
     }
 }
 
-/// The document `loc` as the item's branch, else HEAD, has it.
-async fn node_doc(o: &Out, v: &View, loc: &str) -> Result<Option<Located>, Fail> {
-    let hub = || {
-        let (o, loc) = (o.clone(), loc.to_string());
-        async move {
-            Ok(blocking(move || Ok(git_doc(&o, &loc)))
-                .await?
-                .map(|f| match f {
-                    Found::Git(rev, rel, text) => Located::Git(rev, rel, text),
-                    f => Located::Disk(f),
-                }))
-        }
+async fn read_git_doc_in(
+    node: &Arc<dyn na::Node>,
+    w: &na::WorkspaceRef,
+    o: &Out,
+    loc: &str,
+) -> Result<Option<Located>, Fail> {
+    let Ok(path) = na::RelPath::new(loc) else {
+        return Ok(None);
     };
+    let revs = o
+        .branch
+        .iter()
+        .filter(|b| !b.is_empty() && !b.starts_with('-'))
+        .cloned()
+        .chain(["HEAD".to_string()]);
+    for rev in revs {
+        let read = na::GitRead::Show {
+            rev: rev.clone(),
+            path: Some(path.clone()),
+            max: (TEXT_MAX + 4096) as u32,
+        };
+        let f = match facts(node, w, vec![], vec![read]).await {
+            Ok(f) => f,
+            Err(e) => match e.code {
+                na::Code::Unavailable => return Err(Fail::Api(offline())),
+                na::Code::Invalid | na::Code::Unsupported => continue,
+                _ => return Err(Fail::Missing(steve_i18n::t!("hub.output.git_failed"))),
+            },
+        };
+        if let Some(na::GitAnswer::Blob {
+            found: true, bytes, ..
+        }) = f.reads.into_iter().next().map(|r| r.answer)
+        {
+            let text = String::from_utf8_lossy(&bytes).trim().to_string();
+            return Ok(Some(Located::Git(rev, loc.to_string(), text)));
+        }
+    }
+    Ok(None)
+}
+
+/// The document `loc` as the item's branch, else HEAD, has it on its Node.
+async fn node_doc(o: &Out, v: &View, loc: &str) -> Result<Option<Located>, Fail> {
     match &v.git {
         Git::Elsewhere => Ok(None),
-        Git::Hub => hub().await,
-        Git::Node(node, w, on_hub) => {
-            let Ok(path) = na::RelPath::new(loc) else {
-                return Ok(None);
+        Git::Node {
+            node,
+            workspace,
+            fallback_root,
+        } => {
+            if let Some(found) = read_git_doc_in(node, workspace, o, loc).await? {
+                return Ok(Some(found));
+            }
+            if let Some(root) = fallback_root
+                && let Ok(pw) = prepare_root_workspace(node, root).await
+            {
+                return read_git_doc_in(node, &pw, o, loc).await;
+            }
+            Ok(None)
+        }
+        Git::ProjectRoot { node, root } => {
+            let pw = match prepare_root_workspace(node, root).await {
+                Ok(w) => w,
+                Err(e) if e.code == na::Code::Unavailable => return Err(Fail::Api(offline())),
+                Err(_) => return Ok(None),
             };
-            let revs = o.branch.iter().cloned().chain(["HEAD".to_string()]);
-            for rev in revs {
-                let read = na::GitRead::Show {
-                    rev: rev.clone(),
-                    path: Some(path.clone()),
-                    // past what is shown, so the cut is made where the Hub's own read made it
-                    max: (TEXT_MAX + 4096) as u32,
-                };
-                let f = match facts(node, w, vec![], vec![read]).await {
-                    Ok(f) => f,
-                    Err(e) => match e.code {
-                        na::Code::Unavailable => return Err(Fail::Api(offline())),
-                        // not there (or no checkout): the next revision, then the Hub's
-                        na::Code::Invalid | na::Code::Unsupported => continue,
-                        _ => return Err(Fail::Missing(steve_i18n::t!("hub.output.git_failed"))),
-                    },
-                };
-                if let Some(na::GitAnswer::Blob {
-                    found: true, bytes, ..
-                }) = f.reads.into_iter().next().map(|r| r.answer)
-                {
-                    let text = String::from_utf8_lossy(&bytes).trim().to_string();
-                    return Ok(Some(Located::Git(rev, loc.to_string(), text)));
-                }
-            }
-            match on_hub {
-                true => hub().await,
-                false => Ok(None),
-            }
+            read_git_doc_in(node, &pw, o, loc).await
         }
     }
 }
@@ -680,22 +800,44 @@ pub(crate) async fn describe(o: Out, v: View, sub: Option<String>) -> Result<Val
     if sub.is_none() {
         let is_commit = k.contains("提交") || k == "commit";
         if is_commit || k.contains("分支") || k == "branch" {
-            let hub =
-                |o: Out| blocking(move || Ok(if is_commit { commit(&o) } else { branch(&o) }));
             return match &v.git {
-                Git::Hub => hub(o).await,
                 Git::Elsewhere => Ok(missing(steve_i18n::t!("hub.output.git_elsewhere"))),
-                Git::Node(node, w, on_hub) => {
+                Git::Node {
+                    node,
+                    workspace,
+                    fallback_root,
+                } => {
                     let shown = match is_commit {
-                        true => node_commit(&o, node, w).await?,
-                        false => node_branch(&o, &v, node, w).await?,
+                        true => node_commit(&o, node, workspace).await?,
+                        false => node_branch(&o, &v, node, workspace).await?,
                     };
                     match shown {
                         Ok(shown) => Ok(shown),
-                        // what the workspace's git does not have, the Hub's checkout may
-                        Err(_) if *on_hub => hub(o).await,
-                        Err(reason) => Ok(missing(reason)),
+                        Err(reason) => {
+                            if let Some(root) = fallback_root
+                                && let Ok(pw) = prepare_root_workspace(node, root).await
+                            {
+                                let fb = match is_commit {
+                                    true => node_commit(&o, node, &pw).await?,
+                                    false => node_branch(&o, &v, node, &pw).await?,
+                                };
+                                return Ok(fb.unwrap_or_else(missing));
+                            }
+                            Ok(missing(reason))
+                        }
                     }
+                }
+                Git::ProjectRoot { node, root } => {
+                    let pw = match prepare_root_workspace(node, root).await {
+                        Ok(w) => w,
+                        Err(e) if e.code == na::Code::Unavailable => return Err(offline()),
+                        Err(_) => return Ok(missing(steve_i18n::t!("hub.output.no_repo"))),
+                    };
+                    let shown = match is_commit {
+                        true => node_commit(&o, node, &pw).await?,
+                        false => node_branch(&o, &v, node, &pw).await?,
+                    };
+                    Ok(shown.unwrap_or_else(missing))
                 }
             };
         }
@@ -741,7 +883,6 @@ async fn node_file(a: &Addr, e: &Entry) -> Result<Value, ApiError> {
             json!({ "type": form, "name": name, "mime": mime, "large": super::large(form, e.size) })
         }
         (None, _) => {
-            // a file that went or changed meanwhile reads as empty, as on the Hub's disk
             let buf = match a.read(e.version.clone(), 0, TEXT_MAX as u64 + 1).await {
                 Ok(b) => b,
                 Err(err) if err.code == na::Code::Unavailable => return Err(offline()),
@@ -756,12 +897,8 @@ async fn node_file(a: &Addr, e: &Entry) -> Result<Value, ApiError> {
     Ok(v)
 }
 
-/// What a git view shows, or why the workspace's git does not have it (`Err`: the Hub's own
-/// checkout may, on its device).
 type Shown = Result<Value, String>;
 
-/// A git failure: offline fails the request; a Node with no git face, or git not finishing (its
-/// deadline), says so; git refusing (no checkout, no such revision) is `otherwise`.
 fn git_miss(e: na::Error, otherwise: String) -> Result<Shown, ApiError> {
     match e.code {
         na::Code::Unavailable => Err(offline()),
@@ -771,7 +908,6 @@ fn git_miss(e: na::Error, otherwise: String) -> Result<Shown, ApiError> {
     }
 }
 
-/// A log's hash as git abbreviates it there (`%h`); the first 7 from a Node that does not say.
 fn short(c: &na::CommitInfo) -> String {
     c.abbrev
         .clone()
@@ -801,7 +937,6 @@ async fn node_commit(
         path: None,
         max: DIFF_MAX as u32,
     };
-    // one round: a refusal is no checkout there, an answer of no commit is a commit gone
     let f = match facts(node, w, vec![], vec![read]).await {
         Ok(f) => f,
         Err(e) => return git_miss(e, steve_i18n::t!("hub.output.no_repo")),
@@ -890,9 +1025,7 @@ async fn node_branch(
         Ok(f) => f.reads.into_iter().map(|r| r.answer).collect(),
         Err(e) => match e.code {
             na::Code::Unavailable => return Err(offline()),
-            // what git would not say is left empty, as on the Hub's disk
             na::Code::Invalid | na::Code::Unsupported => vec![],
-            // git not finishing is said, never shown as an empty log
             _ => return Ok(Ok(missing(steve_i18n::t!("hub.output.git_failed")))),
         },
     };
@@ -960,10 +1093,8 @@ async fn worktree(o: &Out, v: &View) -> Result<Value, ApiError> {
     })
 }
 
-/// `len` bytes of the file at `a` from `start`, read from its Node as they are sent. A file that
-/// changed meanwhile ends the body early (the client sees a short read, never mixed content).
+/// `len` bytes of the file at `a` from `start`, read from its Node as they are sent.
 pub(crate) fn stream(a: Addr, e: &Entry, start: u64, len: u64) -> Body {
-    /// A read at a time: what the local Node gives in one go.
     const CHUNK: u64 = 96 * 1024;
     let expected = e.version.clone();
     let s = futures::stream::unfold((a, start, len), move |(a, at, left)| {
@@ -997,7 +1128,6 @@ mod tests {
     use steve_node_api::WorkspaceExecutor as _;
     use steve_node_api::testkit::FakeNode;
 
-    /// A local Node with one root, `dir` (canonical, so what the Hub shows of it is the same).
     fn local_node(dir: &FsPath) -> Arc<steve_node::LocalNode> {
         Arc::new(
             steve_node::LocalNode::open(steve_node::NodeConfig {
@@ -1043,7 +1173,6 @@ mod tests {
         }
     }
 
-    /// A workspace of `rel` prepared on the local Node (as a bound session's).
     async fn workspace_of(n: &Arc<steve_node::LocalNode>, rel: &str) -> na::WorkspaceRef {
         let mut c = na::testkit::build::cmd(
             "op_prep",
@@ -1085,26 +1214,15 @@ mod tests {
         }
     }
 
-    async fn both(o: &Out, v: &View, sub: Option<&str>) -> (Value, Value) {
-        let disk = {
-            let (o, sub) = (o.clone(), sub.map(str::to_string));
-            tokio::task::spawn_blocking(move || on_disk(&o, sub.as_deref()))
-                .await
-                .unwrap()
-        };
+    async fn through(o: &Out, v: &View, sub: Option<&str>) -> Value {
         let v = View {
             bases: v.bases.clone(),
             local: None,
-            git: match &v.git {
-                Git::Node(n, w, h) => Git::Node(n.clone(), w.clone(), *h),
-                Git::Hub => Git::Hub,
-                Git::Elsewhere => Git::Elsewhere,
-            },
+            git: v.git.clone(),
         };
-        let node = describe(o.clone(), v, sub.map(str::to_string))
+        describe(o.clone(), v, sub.map(str::to_string))
             .await
-            .unwrap();
-        (disk, node)
+            .unwrap()
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1122,14 +1240,20 @@ mod tests {
         let n = local_node(&dir);
         let ws = workspace_of(&n, "wt").await;
         let node: Arc<dyn na::Node> = n.clone();
-        // the item's directory as a root path, and as the bound session's workspace
-        let as_root = view(vec![root_at(node.clone(), &dir, "wt")], Git::Hub);
+        let as_root = view(vec![root_at(node.clone(), &dir, "wt")], Git::Elsewhere);
         let mut top = Addr {
             node: node.clone(),
             at: Place::Ws(ws.clone(), String::new()),
             shown: home_tilde(&w),
         };
-        let as_ws = view(vec![top.clone()], Git::Node(node.clone(), ws.clone(), true));
+        let as_ws = view(
+            vec![top.clone()],
+            Git::Node {
+                node: node.clone(),
+                workspace: ws.clone(),
+                fallback_root: None,
+            },
+        );
         for v in [&as_root, &as_ws] {
             for (loc, sub) in [
                 ("docs/说明.md", None),
@@ -1146,29 +1270,28 @@ mod tests {
                 ("https://a.example/x", None),
             ] {
                 let o = out("文档", "x", Some(loc), &w, None);
-                let (disk, node) = both(&o, v, sub).await;
-                assert_eq!(node, disk, "{loc} {sub:?}");
+                let disk = on_disk(&o, sub);
+                let got = through(&o, v, sub).await;
+                assert_eq!(got, disk, "{loc} {sub:?}");
             }
         }
         assert_eq!(
-            both(
+            through(
                 &out("文档", "x", Some("docs/说明.md"), &w, None),
                 &as_ws,
                 None
             )
-            .await
-            .1["text"],
+            .await["text"],
             "# 标题\n\n正文"
         );
 
-        // raw: the same bytes, a span of them too
         let o = out("文件", "x", Some("docs/shots"), &w, None);
         let Ok(Located::Node(a, e)) = locate(&o, &as_ws, Some("a.png")).await else {
             panic!("located")
         };
         assert!(matches!(
             locate_disk(&o, Some("a.png")),
-            Ok(Found::Disk(..))
+            Ok(super::super::Found::Disk(..))
         ));
         let read = |a: Addr, start, len| {
             let body = stream(a, &e, start, len);
@@ -1179,22 +1302,20 @@ mod tests {
             [0x89, b'P', b'N', b'G', 0, 0]
         );
         assert_eq!(&read(a.clone(), 1, 3).await[..], b"PNG");
-        // a file changed since it was listed ends the body: never mixed content
         std::fs::write(w.join("docs/shots/a.png"), b"changed!").unwrap();
         let body = stream(a, &e, 0, 6);
         assert!(axum::body::to_bytes(body, usize::MAX).await.is_err());
 
-        // a link out of the item's place is refused, as the Hub refused it
         let elsewhere = tempfile::tempdir().unwrap();
         std::fs::write(elsewhere.path().join("key"), "s").unwrap();
         std::os::unix::fs::symlink(elsewhere.path(), w.join("link")).unwrap();
         let o = out("文件", "x", Some("link/key"), &w, None);
         for v in [&as_root, &as_ws] {
-            let (disk, node) = both(&o, v, None).await;
+            let disk = on_disk(&o, None);
+            let got = through(&o, v, None).await;
             assert_eq!(disk["type"], "missing");
-            assert_eq!(node, disk);
+            assert_eq!(got, disk);
         }
-        // and nothing above the place it is in
         top.shown = "x".into();
         assert!(top.join("../wt").is_none());
     }
@@ -1204,7 +1325,6 @@ mod tests {
         let t = tempfile::tempdir().unwrap();
         let dir = t.path().canonicalize().unwrap();
         let r = repo(&dir);
-        // a hash length other than 7, as in a repository of real size (`%h` follows it)
         g(&r, &["config", "core.abbrev", "10"]);
         g(&r, &["checkout", "-q", "-b", "steve/st-1"]);
         std::fs::create_dir_all(r.join("docs")).unwrap();
@@ -1223,8 +1343,11 @@ mod tests {
                 at: Place::Ws(ws.clone(), String::new()),
                 shown: home_tilde(&r),
             }],
-            // the Node's own answers, never the Hub's checkout behind them
-            Git::Node(node.clone(), ws.clone(), false),
+            Git::Node {
+                node: node.clone(),
+                workspace: ws.clone(),
+                fallback_root: None,
+            },
         );
 
         let mut b = out(
@@ -1234,36 +1357,59 @@ mod tests {
             &gone,
             Some(&r),
         );
-        let (disk, through) = both(&b, &v, None).await;
-        assert_eq!(disk["type"], "branch", "{disk}");
-        assert_eq!(disk["commits"][0]["hash"].as_str().unwrap().len(), 10);
-        assert_eq!(through, disk);
-        for title in [
-            format!("{hash} 加方案"),
-            "1234567 不存在".into(),
-            "无".into(),
-        ] {
-            let o = out("提交", &title, None, &gone, Some(&r));
-            let (disk, through) = both(&o, &v, None).await;
-            assert_eq!(through, disk, "{title}");
-        }
-        // the worktree is gone and main does not have it: the branch still does
+        let got = through(&b, &v, None).await;
+        assert_eq!(got["type"], "branch", "{got}");
+        assert_eq!(got["base"], "main");
+        assert_eq!(got["commits"][0]["subject"], "加方案");
+        assert_eq!(got["commits"][0]["hash"].as_str().unwrap().len(), 10);
+        assert!(got["diff"].as_str().unwrap().contains("+# 方案"));
+        assert_eq!(got["worktree"], Value::Null);
+
+        let c = through(
+            &out("提交", &format!("{hash} 加方案"), None, &gone, Some(&r)),
+            &v,
+            None,
+        )
+        .await;
+        assert_eq!(c["type"], "commit", "{c}");
+        assert_eq!(c["message"], "加方案");
+        assert!(c["stat"].as_str().unwrap().contains("docs/方案.md"));
+        assert!(
+            c["diff"]
+                .as_str()
+                .unwrap()
+                .contains("diff --git a/docs/方案.md")
+        );
+        assert_eq!(
+            through(
+                &out("提交", "1234567 不存在", None, &gone, Some(&r)),
+                &v,
+                None
+            )
+            .await["type"],
+            "missing"
+        );
+        assert_eq!(
+            through(&out("提交", "无", None, &gone, Some(&r)), &v, None).await["type"],
+            "missing"
+        );
+
         b.kind = "文档".into();
         b.loc = Some("docs/方案.md".into());
         b.branch = Some("steve/st-1".into());
-        let (disk, through) = both(&b, &v, None).await;
-        assert_eq!(disk["from"], "git steve/st-1", "{disk}");
-        assert_eq!(through, disk);
+        let doc = through(&b, &v, None).await;
+        assert_eq!(doc["type"], "text", "{doc}");
+        assert_eq!(doc["text"], "# 方案");
+        assert_eq!(doc["from"], "git steve/st-1");
+
         b.kind = "分支".into();
         b.title = "steve/st-9".into();
         b.branch = None;
-        let (disk, through) = both(&b, &v, None).await;
-        assert_eq!(disk["type"], "missing");
-        assert_eq!(through, disk);
+        assert_eq!(through(&b, &v, None).await["type"], "missing");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn a_workspace_that_is_no_checkout_leaves_git_to_the_hubs_checkout() {
+    async fn a_workspace_that_is_no_checkout_falls_back_to_the_projects_node_workspace() {
         let t = tempfile::tempdir().unwrap();
         let dir = t.path().canonicalize().unwrap();
         let r = repo(&dir);
@@ -1273,7 +1419,6 @@ mod tests {
         g(&r, &["commit", "-q", "-m", "加方案"]);
         let hash = g(&r, &["rev-parse", "--short", "HEAD"]);
         g(&r, &["checkout", "-q", "main"]);
-        // the session ran in a plain directory, not under the project's checkout
         let plain = dir.join("scratch");
         std::fs::create_dir_all(&plain).unwrap();
         let n = local_node(&dir);
@@ -1284,10 +1429,20 @@ mod tests {
             at: Place::Ws(ws.clone(), String::new()),
             shown: home_tilde(&plain),
         };
-        let on_hub = view(vec![top.clone()], Git::Node(node.clone(), ws.clone(), true));
+        let with_project = view(
+            vec![top.clone()],
+            Git::Node {
+                node: node.clone(),
+                workspace: ws.clone(),
+                fallback_root: Some(na::RootPath {
+                    root: na::RootId::new("r").unwrap(),
+                    rel: na::RelPath::new("repo").unwrap(),
+                }),
+            },
+        );
         let mut doc = out("文档", "x", Some("方案.md"), &plain, Some(&r));
         doc.branch = Some("steve/st-1".into());
-        for (o, shown) in [
+        for (o, expected_type) in [
             (out("分支", "steve/st-1", None, &plain, Some(&r)), "branch"),
             (
                 out("提交", &format!("{hash} 加方案"), None, &plain, Some(&r)),
@@ -1299,12 +1454,17 @@ mod tests {
             ),
             (doc, "text"),
         ] {
-            let (disk, through) = both(&o, &on_hub, None).await;
-            assert_eq!(disk["type"], shown, "{disk}");
-            assert_eq!(through, disk, "{}", o.title);
+            let got = through(&o, &with_project, None).await;
+            assert_eq!(got["type"], expected_type, "{got}");
         }
-        // on another device there is no Hub checkout to fall back on: the workspace's answer
-        let far = view(vec![top], Git::Node(node.clone(), ws, false));
+        let far = view(
+            vec![top],
+            Git::Node {
+                node: node.clone(),
+                workspace: ws,
+                fallback_root: None,
+            },
+        );
         let o = out("分支", "steve/st-1", None, &plain, Some(&r));
         let shown = describe(o, far, None).await.unwrap();
         assert_eq!(
@@ -1394,10 +1554,8 @@ mod tests {
             d(o("文件", "docs"), Some("b.png")).await.unwrap()["type"],
             "image"
         );
-        // an absolute path means nothing on another device
         let abs = d(o("文件", "/etc/hosts"), None).await.unwrap();
         assert_eq!(abs["reason"], steve_i18n::t!("hub.output.outside_roots"));
-        // a root the Node does not allow is refused, not read
         let mut far = v.bases[0].clone();
         far.at = Place::Root(na::RootPath {
             root: na::RootId::new("elsewhere").unwrap(),

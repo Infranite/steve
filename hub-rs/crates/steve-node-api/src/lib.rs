@@ -19,6 +19,7 @@ pub mod glob;
 pub mod harness_updates;
 pub mod ids;
 pub mod intent;
+pub mod oneshot;
 pub mod ports;
 pub mod run;
 pub mod stop;
@@ -37,12 +38,15 @@ pub use events::*;
 pub use harness_updates::*;
 pub use ids::*;
 pub use intent::{Intent, IntentKey};
+pub use oneshot::*;
 pub use ports::*;
 pub use run::*;
 pub use steve_types::devices::{
-    FileAccessReport, FileAccessStatus, LOGIN_SHELL_PROBE_TIMEOUT_SECS, MissingCommandDiagnostic,
-    NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET, ProtectedAccess, ProtectedLocation,
-    extract_login_shell_path, login_shell_path_script, shell_supports_interactive_login,
+    DEFAULT_DISK_FLOOR_BYTES, FileAccessReport, FileAccessStatus, LOCAL_SERVICE_LINK_FILE,
+    LOCAL_SERVICE_PID_FILE, LOGIN_SHELL_PROBE_TIMEOUT_SECS, LocalServiceLink, LocalServicePid,
+    MissingCommandDiagnostic, MissingCommandKind, NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET,
+    ProtectedAccess, ProtectedLocation, extract_login_shell_path, login_shell_path_script,
+    shell_supports_interactive_login,
 };
 pub use steve_types::gateway::{GatewayFailure, TimeoutPhase};
 pub use steve_types::{
@@ -53,6 +57,10 @@ pub use stop::*;
 pub use tools::*;
 pub use workspace::*;
 
+/// Additive RPCs that the Hub calls only when the Node advertises them through
+/// [`Capabilities::features`] (or [`Capacity`]) are capability-negotiated and keep `PROTOCOL`
+/// unchanged, so running Nodes stay connected across upgrades.
+///
 /// Exact ordinary wire contract between the Hub and a Node.
 ///
 /// Peers compare `PROTOCOL` for exact equality in [`upgrade_v1::Mode::between`]: any mismatch
@@ -103,6 +111,10 @@ pub const NODE_RESTARTED: &str = "node_restarted";
 /// The code of the [`EventBody::Diagnostic`] for an attempt whose session's harness was given
 /// Steve's tools and never listed them: its agent ran without them.
 pub const STEVE_TOOLS_MISSING: &str = "steve_tools_missing";
+/// The code of the [`EventBody::Diagnostic`] when a harness's native auto-mode safety classifier
+/// repeatedly returns no verdict (`Severity::Warning`) or halts auto mode for the turn
+/// (`Severity::Error`).
+pub const AUTO_MODE_CLASSIFIER_UNAVAILABLE: &str = "auto_mode_classifier_unavailable";
 /// Version of [`events::NodeEvent`] bodies, separate from the transport.
 pub const EVENT_SCHEMA: u16 = 1;
 

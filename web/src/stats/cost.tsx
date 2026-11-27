@@ -45,7 +45,7 @@ function usageText(u:Usage) {
 /** a turn; `owner` is the sub-item it belongs to, named with it where the turn shows out of its group (the most expensive step) */
 function turnStep(tn: Turn, refs: Map<string, Ref>, owner?: string): CostStep {
   const stop = STOP()
-  const failed = tn.stop_reason === "error" || tn.transient
+  const failed = tn.stop_reason === "error" || tn.stop_reason === "turn_stall_no_progress" || tn.stop_reason === "turn_stall_repeated_failure" || tn.transient
   const reason = tn.transient ? t("stats:drill.gatewayDown") : stop[tn.stop_reason ?? ""] ?? tn.stop_reason ?? undefined
   const id = "turn:" + tn.id
   refs.set(id, { turn: tn })

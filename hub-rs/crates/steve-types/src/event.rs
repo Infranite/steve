@@ -228,10 +228,30 @@ impl BusEvent {
             _ => None,
         };
         let id = match self {
-            Self::Domain(e) => e.entity_id().unwrap_or_default(),
-            Self::Live(_) | Self::Patch(_) => "",
+            Self::Domain(e) => e.entity_id().unwrap_or_default().to_owned(),
+            Self::Live(crate::LiveEvent::Work(crate::WorkLiveEvent::SteveTool {
+                run,
+                call,
+                ..
+            })) => match call {
+                Some(n) => format!("{run}:{n}"),
+                None => run.clone(),
+            },
+            Self::Live(crate::LiveEvent::Work(crate::WorkLiveEvent::SteveProgress {
+                run,
+                body,
+                ..
+            })) => match body {
+                crate::ThreadProgressKind::Stage { .. } => format!("{run}:stage"),
+                crate::ThreadProgressKind::Thought { id, .. } => format!("{run}:thought:{id}"),
+                crate::ThreadProgressKind::Plan { .. } => format!("{run}:plan"),
+                crate::ThreadProgressKind::Subtask { subtask } => {
+                    format!("{run}:subtask:{}", subtask.id)
+                }
+            },
+            Self::Live(_) | Self::Patch(_) => String::new(),
         };
-        Some((self.wire_type(), ws, id.to_owned()))
+        Some((self.wire_type(), ws, id))
     }
 }
 
@@ -319,7 +339,7 @@ impl From<crate::WorkLiveEvent> for BusEvent {
 /// Every SSE wire type a bus event can have, one per variant across all domain and live sub-enums.
 /// Tests on both sides of the wire iterate this list (steve-types `tests/wire.rs` checks it against the
 /// variant counts), so a new variant cannot be missed by one of them.
-pub const WIRE_TYPES: [&str; 38] = [
+pub const WIRE_TYPES: [&str; 40] = [
     "item",
     "decision",
     "session",
@@ -328,8 +348,10 @@ pub const WIRE_TYPES: [&str; 38] = [
     "steve.thinking",
     "steve.draft",
     "steve.tool",
+    "steve.progress",
     "workflow.run",
     "release.hold",
+    "local_node.updating",
     "bot",
     "project",
     "tag",

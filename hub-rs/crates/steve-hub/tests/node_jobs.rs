@@ -153,7 +153,7 @@ impl Local {
                 roots: vec![],
                 capacity: Capacity {
                     sessions: 0,
-                    jobs: steve_hub::wire::LOCAL_JOB_CAPACITY,
+                    jobs: steve_node::LOCAL_JOB_CAPACITY,
                     execs: 0,
                 },
                 storage: steve_node::Storage::default(),

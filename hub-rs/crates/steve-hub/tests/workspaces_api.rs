@@ -11,8 +11,12 @@ use steve_hub::api::AppState;
 use steve_hub::bus::Bus;
 use steve_hub::config::Config;
 
+#[path = "support/local_node.rs"]
+mod local_node;
+
 struct Env {
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     base: String,
     http: reqwest::Client,
     cookie: String,
@@ -39,7 +43,7 @@ impl Env {
     }
 }
 
-async fn start() -> Env {
+async fn start(local: bool) -> Env {
     steve_modules::net::forbid_in_this_process();
     let home = tempfile::tempdir().expect("tmp");
     let h = home.path().to_path_buf();
@@ -69,6 +73,10 @@ async fn start() -> Env {
     ] {
         vars.insert(k.into(), v);
     }
+    if local {
+        vars.remove("STEVE_NO_RESUME");
+        vars.insert("STEVE_LOCAL_NODE_PORT".into(), "0".into());
+    }
     let vars = Arc::new(vars);
     let get = {
         let vars = vars.clone();
@@ -82,11 +90,13 @@ async fn start() -> Env {
         Default::default(),
     )));
     let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
-    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
+    let local_node = local_node::attach(&w, &cfg, &vars).await;
+    let st = AppState::new(cfg.clone(), w.backend, w.domain, bus)
+        .with_nodes(w.nodes.clone())
+        .with_workspaces(Some(w.workspaces.clone()))
+        .with_modules(w.modules);
     steve_hub::app::boot(&st).await.expect("boot");
-    for job in w.jobs {
-        job.start(&st.jobs);
-    }
+    local_node::start_jobs(w.jobs, &st.jobs);
     let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
     tokio::spawn(async move {
         let _ = axum::serve(
@@ -115,6 +125,7 @@ async fn start() -> Env {
         .expect("session cookie");
     Env {
         _home: home,
+        _local_node: local_node,
         base,
         http,
         cookie,
@@ -124,7 +135,7 @@ async fn start() -> Env {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn workspaces_report_and_reclaim() {
-    let e = start().await;
+    let e = start(true).await;
     std::fs::create_dir_all(e.worktrees.join("OLD-1")).expect("orphan");
     std::fs::write(e.worktrees.join("OLD-1/f"), vec![0u8; 8192]).expect("orphan file");
     let (s, v) = e.call("GET", "/api/system/workspaces", None).await;
@@ -167,7 +178,7 @@ async fn workspaces_report_and_reclaim() {
 /// none), and no copy yet on a Hub that has just started.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_owner_reads_where_the_database_and_its_copies_are() {
-    let e = start().await;
+    let e = start(false).await;
     let (s, v) = e.call("GET", "/api/system/backup", None).await;
     assert_eq!(s, 200, "{v}");
     let (database, dir) = (v["database"].as_str().unwrap(), v["dir"].as_str().unwrap());

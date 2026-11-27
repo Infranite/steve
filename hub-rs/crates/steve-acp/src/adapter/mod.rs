@@ -16,10 +16,11 @@ pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod generic;
+pub mod history;
 pub mod kimi;
 pub mod pi;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -35,6 +36,9 @@ use crate::normalize::{Fact, ToolFact, bound, call_id};
 pub const SUBTASK_TITLE_MAX: usize = 200;
 /// Maximum characters kept for bounded subtask progress, summary, or error text.
 pub const SUBTASK_TEXT_MAX: usize = 1000;
+/// Consecutive classifier-unavailable denials of mutating/exec tool calls in one attempt before
+/// emitting an [`steve_node_api::AUTO_MODE_CLASSIFIER_UNAVAILABLE`] warning diagnostic.
+pub const CLASSIFIER_UNAVAILABLE_WARN_THRESHOLD: u32 = 3;
 
 /// Result of handing a `session/update` payload to a [`HarnessAdapter`].
 #[derive(Debug)]
@@ -98,6 +102,13 @@ pub trait HarnessAdapter: Send + Sync {
     /// the parent turn, when supported by this harness and subtask.
     fn cancel_subtask_request(&self, subtask: &SubtaskView) -> Option<(&'static str, Value)> {
         rfd_cancel_request(subtask)
+    }
+
+    /// Observe one raw trimmed stderr line emitted by the adapter process before generic stderr
+    /// logging truncates it. Return `true` when the adapter parsed and handled the line as a typed
+    /// signal (suppressing noisy raw info logs).
+    fn observe_stderr(&self, _tag: &str, _line: &str) -> bool {
+        false
     }
 
     /// Upgradeable components for this harness.
@@ -195,6 +206,16 @@ pub struct SubtaskState {
     pub(crate) tool_started_at: HashMap<String, Instant>,
     /// Settled duration in milliseconds per `toolCallId`.
     pub(crate) tool_duration_ms: HashMap<String, u64>,
+    /// Settled `toolCallId`s already evaluated for auto-mode classifier denials so duplicate
+    /// terminal `tool_call_update` frames never double-count.
+    pub(crate) classifier_evaluated_tools: HashSet<String>,
+    /// Consecutive no-verdict auto-mode classifier denials in this attempt (reset only when a
+    /// non-read-only tool call succeeds).
+    pub(crate) classifier_unavailable_streak: u32,
+    /// Whether a warning diagnostic was already emitted for the current unavailable streak.
+    pub(crate) classifier_warned: bool,
+    /// Whether a turn-stopping auto-mode-unavailable error diagnostic was already emitted.
+    pub(crate) classifier_stopped: bool,
 }
 
 impl SubtaskState {

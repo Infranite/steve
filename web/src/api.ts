@@ -6,6 +6,7 @@ import type {
   EffortMapping,
   EffortMode,
   FileAccessReport,
+  InstallNodeHarnessResponse,
   MissingCommandDiagnostic,
   NodeHarnessRefreshResponse,
   NodeHarnessReportView,
@@ -22,7 +23,7 @@ import type {
   UpgradeCapability,
   UsageAttribution,
 } from "./gen"
-import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked, MemberIdentity } from "./gen"
+import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked, MemberIdentity, ThreadLiveSnapshot } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { reasonText } from "./i18n/reason.ts"
@@ -124,6 +125,7 @@ export type AddHarnessInput = {
 /** a harness adapter as the Hub knows it: what its Node's probe said (modes are Steve's: plan, ask, accept_edits, auto, full_access) */
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
+  brand_mark?: string; model_strip_prefixes?: string[]
   adapter_version?: string | null; default_model?: string | null; efforts?: string[]; effort_mode?: EffortMode; effort_map?: EffortMapping[]; modes?: string[] | null
   /** its adapter declares where it reads skills, so a Bot's skills reach its sessions (absent: not said) */
   skills?: boolean
@@ -198,8 +200,9 @@ export type Shell = {
   notifySeen?: number
   dismissedAlerts?: string[]
 }
-export type Summary = { ws: string; workspace_name: string; thinking: boolean; hold: RHold | null }
+export type Summary = { ws: string; workspace_name: string; thinking: boolean; live?: ThreadLiveSnapshot | null; hold: RHold | null; local_node_updating?: RLocalNodeUpdating | null }
 export type RHold = { item: string; running: number; since: number }
+export type RLocalNodeUpdating = { running: number }
 export type RNotice = { id: string; kind: "release" | "archive" | "system"; level: "info" | "success" | "fail"; text: string; item_id: string | null; created: number; closed?: boolean }
 export type HubEvent = Envelope<BusEvent> | StreamControl
 
@@ -401,7 +404,7 @@ export const api = {
   /* the first meeting (the instance owner's): Steve's welcome opens it in the main conversation; skip ends it or says there is none */
   onboardStart: () => post<{ message: string }>("/onboard/start"), onboardSkip: () => post("/onboard/skip"),
   /* thread routing (§3.4–3.5, §7.2): offers, corrections, research runs */
-  offer: (msg: string, take: boolean) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/offer`, { take }),
+  offer: (msg: string, take: boolean, bot?: string) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/offer`, bot ? { take, bot } : { take }),
   /* an A2UI button in a reply (ST-46): the Hub keeps one submission per surface and says it in the conversation */
   a2ui: (msg: string, a: A2uiSubmit) => post<{ already: boolean; message_id?: string; action: A2uiRecord }>(`/thread/${msg}/a2ui`, a),
   reroute: (msg: string, to: string) => post<{ message_id: string; item?: { id: string } }>(`/thread/${msg}/reroute`, { to }),
@@ -487,6 +490,8 @@ export const api = {
   nodes: () => get<{ nodes: RNode[]; off?: boolean; hub_version?: string }>("/nodes"),
   nodeHarnesses: () => get<NodeHarnessesResponse>("/node-harnesses"),
   refreshNodeHarnesses: (id: string) => get<NodeHarnessRefreshResponse>(`/node-harnesses/${encodeURIComponent(id)}?fresh=1`),
+  installNodeHarness: (node: string, harness: string) =>
+    post<InstallNodeHarnessResponse>(`/node-harnesses/${encodeURIComponent(node)}/${encodeURIComponent(harness)}/install`, {}),
   createPairing: () => post<RPairing>("/nodes/pairings"),
   vitals: () => get<import("./gen/VitalsResponse").VitalsResponse>("/vitals"),
   nodeTags: () => get<{ tags: Record<string, string[]> }>("/node-tags"),

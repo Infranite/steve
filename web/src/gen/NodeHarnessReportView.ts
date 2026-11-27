@@ -6,4 +6,9 @@ import type { NodeHarnessView } from "./NodeHarnessView";
 /**
  * Read-only HTTP view of one Node's harness probe report.
  */
-export type NodeHarnessReportView = { state: NodeHarnessReportState, checked_at: number | null, attempted_at: number | null, stale: boolean, refreshing: boolean, error: string | null, harnesses: Array<NodeHarnessView>, };
+export type NodeHarnessReportView = { state: NodeHarnessReportState, checked_at: number | null, attempted_at: number | null, stale: boolean, refreshing: boolean, error: string | null, 
+/**
+ * Whether this Node's local execution policy (`policy.json` `"exec"`) permits remote commands
+ * and one-click adapter installs/upgrades. `None` before the Node has been probed.
+ */
+exec_allowed?: boolean, harnesses: Array<NodeHarnessView>, };

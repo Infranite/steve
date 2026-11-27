@@ -278,7 +278,7 @@ pub fn adapter_target(home: &Path, requested: Option<&str>) -> Result<(String, P
                     .all(|k| manifest[k] == record["build"][k])),
         "installed release manifest is missing, unsupported or differs from the Node registration"
     );
-    let binary = release.join(format!("bin/steve-{role}"));
+    let binary = release.join("bin/steve-node");
     crate::signing::owned_file(&binary)
         .context("installed release has no trusted adapter command")?;
     ensure!(
@@ -2459,18 +2459,21 @@ impl Service {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| self.home.join("data"));
-        let Some(pid) = fs::read_to_string(data.join("node/service.pid"))
-            .ok()
-            .and_then(|p| p.trim().parse::<u32>().ok())
-            .filter(|p| *p > 1)
-        else {
+        let Some(pid) = fs::read_to_string(
+            data.join("node")
+                .join(steve_types::devices::LOCAL_SERVICE_PID_FILE),
+        )
+        .ok()
+        .and_then(|p| steve_types::devices::LocalServicePid::parse(&p).map(|r| r.pid))
+        .filter(|p| *p > 1) else {
             return Ok(());
         };
         let pid = pid.to_string();
         let ours = |out: &Output| {
             let cmd = out.stdout.trim();
             out.code == 0
-                && cmd.ends_with("steve-hub --local-node")
+                && (cmd.ends_with("steve-node --local-node")
+                    || cmd.ends_with("steve-hub --local-node"))
                 && fs::canonicalize(&self.home).is_ok_and(|h| {
                     cmd.starts_with(&*h.to_string_lossy())
                         || cmd.starts_with(&*self.home.to_string_lossy())

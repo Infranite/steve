@@ -190,8 +190,9 @@ export function SubtaskList({
   const openEntry = selected ? entries.find((e) => e.subtask.id === selected && hasDetails(e)) : undefined
   const detailUsage = openEntry ? usageDetails(openEntry.subtask.usage, t) : []
 
+  const hasAnyAction = attempts.some((a) => a.action !== undefined)
   return (
-    <div className="my-1 flex min-w-0 flex-col gap-1.5" data-subtasks={entries.length}>
+    <div className={hasAnyAction ? "my-1 flex min-w-0 flex-col gap-1.5" : "my-1 flex min-w-0 flex-col gap-1.5 [--ui-pac-act-min:0px]"} data-subtasks={entries.length}>
       <ParallelAttempts
         pickable={false}
         header={null}

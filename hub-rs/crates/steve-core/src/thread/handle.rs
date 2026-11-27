@@ -34,11 +34,16 @@ const REROUTE_WINDOW: i64 = 10 * 60 * 1000;
 struct ThinkingGuard<'a> {
     core: &'a Core,
     ws: &'a str,
+    task_id: &'a str,
     active: bool,
+    is_main: bool,
 }
 
 impl Drop for ThinkingGuard<'_> {
     fn drop(&mut self) {
+        if self.is_main {
+            self.core.end_live_main(self.ws, self.task_id);
+        }
         if self.active {
             self.core
                 .store()
@@ -48,6 +53,8 @@ impl Drop for ThinkingGuard<'_> {
                         on: false,
                         ws: self.ws.to_owned().into(),
                         phase: None,
+                        started_at: None,
+                        at: Some(steve_types::Millis(now())),
                     },
                 ));
         }
@@ -65,6 +72,7 @@ pub(super) struct RouteInfo {
     pub fallback: bool,
     pub ms: i64,
     pub project: Option<String>,
+    pub tags: Vec<String>,
     pub offer: Option<Offer>,
     pub step_json: Option<Value>,
 }
@@ -81,6 +89,7 @@ impl Default for RouteInfo {
             fallback: false,
             ms: 0,
             project: None,
+            tags: vec![],
             offer: None,
             step_json: None,
         }
@@ -138,23 +147,30 @@ impl Core {
                 }
             }
         };
+        let t0 = now();
         let quiet = conv.guest();
+        let is_main = !quiet && space == super::MAIN;
+        if is_main {
+            self.begin_live_main(ws, &task.id, Some(&task.origin_message_id), t0);
+        }
         if !quiet {
             self.store().store().publish(steve_types::LiveEvent::from(
                 steve_types::WorkLiveEvent::SteveThinking {
                     on: true,
                     ws: ws.to_owned().into(),
                     phase: None,
+                    started_at: Some(steve_types::Millis(t0)),
+                    at: Some(steve_types::Millis(t0)),
                 },
             ));
         }
         let _thinking = ThinkingGuard {
             core: self,
             ws,
+            task_id: &task.id,
             active: !quiet,
+            is_main,
         };
-
-        let t0 = now();
         let steps = Mutex::new(Steps::default());
         if let Err(e) = self
             .execute_task_inner(task, lease, stop, &conv, &steps, t0)
@@ -382,11 +398,23 @@ impl Core {
                 .route_json
                 .as_deref()
                 .and_then(|s| serde_json::from_str(s).ok());
+            let tags = route_json
+                .as_ref()
+                .and_then(|v| v.get("tags"))
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(Value::as_str)
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default();
             let info = RouteInfo {
                 kind: forced.into(),
                 model_kind: forced.into(),
                 guard: Some("forced".into()),
                 project: task.project_id.clone(),
+                tags,
                 step_json: route_json,
                 ..Default::default()
             };
@@ -569,7 +597,7 @@ impl Core {
         if confirms(text)
             && let Some(offer_msg) = self.open_offer_before(ws, mid)?
         {
-            let h = self.offer_as(ws, &offer_msg.id, true, conv.start, user)?;
+            let h = self.offer_as(ws, &offer_msg.id, true, conv.start, None, user)?;
             let (outcome, dispatch) = match h.dispatch_ref_id.as_deref() {
                 Some(id) => ("handed_off", ReceiptDispatch::Dispatched(id)),
                 None => ("answered", ReceiptDispatch::NoDispatch),
@@ -801,6 +829,7 @@ impl Core {
             fallback: r.fallback,
             ms,
             project: r.project.clone(),
+            tags: r.tag_ids.clone(),
             offer: d.offer.clone(),
             step_json: Some(step),
         };
@@ -845,7 +874,9 @@ impl Core {
             }
             "supplement" => {
                 let id = r.item.clone().unwrap_or_default();
-                self.phase(ws, "supplement");
+                if !guest && task.space == super::MAIN {
+                    self.phase(ws, "supplement");
+                }
                 let i = Steps::begin(
                     steps,
                     "supplement",
@@ -1052,7 +1083,9 @@ impl Core {
         t0: i64,
     ) -> Result<()> {
         let ws = &task.workspace_id;
-        self.phase(ws, "config");
+        if task.space == super::MAIN {
+            self.phase(ws, "config");
+        }
         let i = Steps::begin(
             steps,
             "draft_config",

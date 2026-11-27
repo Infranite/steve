@@ -231,6 +231,20 @@ pub fn unbind_bot(store: &Store, id: &str) {
         .unwrap();
 }
 
+pub fn bot_workspace_created(store: &Store, ws: &str, bot: &str, created: i64) {
+    store
+        .write(|w| {
+            w.exec(
+                Query::update()
+                    .table("bot_workspaces")
+                    .value("created", created)
+                    .and_where(Expr::col("workspace_id").eq(ws))
+                    .and_where(Expr::col("bot_id").eq(bot)),
+            )
+        })
+        .unwrap();
+}
+
 pub fn reject_tool_receipts(store: &Store) {
     store.write_locked(|c| {
         c.execute_batch("CREATE TEMP TRIGGER receipt_failure BEFORE INSERT ON events WHEN NEW.kind='steve_tool_receipt' BEGIN SELECT RAISE(FAIL,'receipt write failed'); END")?;

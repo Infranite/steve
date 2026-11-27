@@ -1,6 +1,6 @@
 //! Adapter resolution and runner settings (the ACP part of config.ts).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -347,4 +347,202 @@ impl AcpConfig {
             (cmd.clone(), extra)
         })
     }
+
+    /// Harness state directories (`harness_id -> path`) derived from `builtins.toml` and this
+    /// config, keeping harness-specific environment variable mapping inside `steve-acp`.
+    pub fn discovery_state_dirs(&self) -> BTreeMap<String, PathBuf> {
+        let mut state_dirs = BTreeMap::new();
+        for b in steve_harness_spec::builtins() {
+            if let Some(state) = &b.properties.state {
+                let dir = match state.env.as_str() {
+                    "CLAUDE_CONFIG_DIR" => Some(
+                        self.claude_config_dir
+                            .clone()
+                            .unwrap_or_else(|| self.user_home.join(&state.default)),
+                    ),
+                    "CODEX_HOME" => Some(self.codex_home.clone()),
+                    _ => None,
+                };
+                if let Some(dir) = dir {
+                    state_dirs.insert(b.id.to_string(), dir);
+                }
+            }
+        }
+        state_dirs
+    }
+
+    /// Harness CLI binaries (`harness_id -> path`) derived from `builtins.toml`, this config, and
+    /// `path_env`, keeping harness-specific executable discovery inside `steve-acp`.
+    pub fn discovery_binaries(
+        &self,
+        env_var: impl Fn(&str) -> Option<std::ffi::OsString>,
+        path_env: Option<&std::ffi::OsStr>,
+    ) -> BTreeMap<String, PathBuf> {
+        let mut bins = BTreeMap::new();
+        for b in steve_harness_spec::builtins() {
+            if b.properties.executable_env.as_deref() == Some("CLAUDE_CODE_EXECUTABLE") {
+                if !self.claude_executable.as_os_str().is_empty() {
+                    bins.insert(b.id.to_string(), self.claude_executable.clone());
+                }
+            } else if b.properties.usage_fallback == steve_harness_spec::UsageFallback::CodexRollout
+            {
+                let detected = env_var("CODEX_EXECUTABLE")
+                    .filter(|v| !v.is_empty())
+                    .map(PathBuf::from)
+                    .or_else(|| {
+                        b.detect_bins
+                            .iter()
+                            .find_map(|name| which_in(name, path_env))
+                    });
+                if let Some(bin) = detected {
+                    bins.insert(b.id.to_string(), bin);
+                }
+            }
+        }
+        bins
+    }
+}
+
+fn resolve_program_in(
+    program: &str,
+    executable: bool,
+    path_env: Option<&std::ffi::OsStr>,
+) -> Option<PathBuf> {
+    let check = |p: &Path| {
+        if executable {
+            is_executable_file(p)
+        } else {
+            p.is_file()
+        }
+    };
+    let p = Path::new(program);
+    if p.components().count() > 1 {
+        check(p).then(|| p.to_path_buf())
+    } else {
+        env::split_paths(path_env?)
+            .map(|d| d.join(p))
+            .find(|candidate| check(candidate))
+    }
+}
+
+fn global_npm_root_from_node(node: &str, path_env: Option<&std::ffi::OsStr>) -> Option<PathBuf> {
+    let node_path = resolve_program_in(node, true, path_env)?;
+    let from_bin = |p: &Path| {
+        let bin = p.parent()?;
+        let prefix = bin.parent()?;
+        let lib = prefix.join("lib/node_modules");
+        if lib.is_dir() {
+            return Some(lib);
+        }
+        #[cfg(windows)]
+        {
+            let win = bin.join("node_modules");
+            if win.is_dir() {
+                return Some(win);
+            }
+        }
+        None
+    };
+    from_bin(&node_path).or_else(|| {
+        std::fs::canonicalize(&node_path)
+            .ok()
+            .and_then(|c| from_bin(&c))
+    })
+}
+
+/// Offline harness/adapter preflight owned by `steve-acp` (invoked via `steve-node harness-probe`
+/// during `steve-hub --check-config` and boot warnings): resolves every built-in and manifest
+/// adapter without spawning `npm` or any harness process.
+pub fn probe_harnesses(
+    steve_home: &Path,
+    manifest_path: &Path,
+    var: impl Fn(&str) -> Option<String>,
+) -> steve_node_api::HarnessPreflight {
+    #[derive(serde::Deserialize, Default)]
+    struct ManifestDoc {
+        #[serde(default)]
+        adapters: HashMap<String, steve_harness_spec::AdapterEntry>,
+        #[serde(default)]
+        node: Option<PathBuf>,
+    }
+
+    let manifest = std::fs::read_to_string(manifest_path)
+        .ok()
+        .and_then(|raw| serde_json::from_str::<ManifestDoc>(&raw).ok())
+        .unwrap_or_default();
+    let manifest_adapter_ids: std::collections::HashSet<String> =
+        manifest.adapters.keys().cloned().collect();
+    let (manifest_commands, declared_adapters) =
+        steve_harness_spec::split_entries(manifest.adapters);
+
+    let path_str = var("PATH").unwrap_or_default();
+    let path_os = std::ffi::OsStr::new(&path_str);
+    let node = var("STEVE_NODE")
+        .filter(|v| !v.trim().is_empty())
+        .or_else(|| {
+            manifest
+                .node
+                .as_ref()
+                .map(|p| p.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| "node".into());
+
+    let mut global_root: Option<PathBuf> = None;
+    let resolved = resolve_builtin_adapters(
+        steve_home,
+        &manifest_commands,
+        |k| var(k).filter(|v| !v.is_empty()).map(PathBuf::from),
+        Some(path_os),
+        || {
+            global_root
+                .get_or_insert_with(|| {
+                    global_npm_root_from_node(&node, Some(path_os))
+                        .unwrap_or_else(|| steve_home.join(".no-global-npm"))
+                })
+                .clone()
+        },
+    );
+    let sorted: BTreeMap<String, PathBuf> = resolved.into_iter().collect();
+
+    let path_only_bins: HashMap<&str, (&str, &str)> = steve_harness_spec::builtin_bins()
+        .zip(steve_harness_spec::builtin_command_vars())
+        .filter(|((id, ..), _)| !steve_harness_spec::is_npm_managed(id))
+        .map(|((id, bin, _), (_, v))| (id, (bin, v)))
+        .collect();
+
+    let mut out = steve_node_api::HarnessPreflight::default();
+    for (harness, adapter_path) in &sorted {
+        let adapter = adapter_path.to_string_lossy();
+        let resolved_for_script = resolve_program_in(&adapter, false, Some(path_os))
+            .unwrap_or_else(|| adapter_path.clone());
+        let js = is_node_script(&resolved_for_script);
+        let available = resolve_program_in(&adapter, !js, Some(path_os)).is_some();
+        if !available {
+            if crate::managed::home_of(adapter_path)
+                .is_some_and(|home| !crate::managed::wanted(&home, harness))
+            {
+                continue;
+            }
+            if let Some((bin, cmd_var)) = path_only_bins.get(harness.as_str())
+                && adapter.as_ref() == *bin
+                && var(cmd_var).is_none_or(|v| v.is_empty())
+                && !manifest_adapter_ids.contains(harness)
+                && !declared_adapters.contains_key(harness)
+            {
+                continue;
+            }
+            out.missing_adapters.push(steve_node_api::MissingAdapter {
+                harness: harness.clone(),
+                adapter: adapter.into_owned(),
+            });
+        } else if js && resolve_program_in(&node, true, Some(path_os)).is_none() {
+            out.missing_node.push(steve_node_api::MissingNode {
+                harness: harness.clone(),
+                node: node.clone(),
+            });
+        } else {
+            out.resolved_adapters.push(harness.clone());
+        }
+    }
+    out
 }

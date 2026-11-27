@@ -5,6 +5,7 @@ import type { Millis } from "./Millis";
 import type { RawJson } from "./RawJson";
 import type { Seq } from "./Seq";
 import type { SessionId } from "./SessionId";
+import type { ThreadProgressKind } from "./ThreadProgressKind";
 import type { WorkspaceId } from "./WorkspaceId";
 
-export type WorkLiveEvent = { "type": "event", session_id: SessionId, seq: Seq, kind: string, data: RawJson, ws: WorkspaceId, } | { "type": "steve.thinking", on: boolean, ws: WorkspaceId, phase?: string, } | { "type": "steve.draft", ws: WorkspaceId, mid: MessageId, thought: string, text: string, } | { "type": "steve.tool", ws: WorkspaceId, mid: MessageId, run: string, name: string, brief: string, ok: boolean, kind?: string, running?: boolean, call?: number, started_at?: Millis, at?: Millis, };
+export type WorkLiveEvent = { "type": "event", session_id: SessionId, seq: Seq, kind: string, data: RawJson, ws: WorkspaceId, } | { "type": "steve.thinking", on: boolean, ws: WorkspaceId, phase?: string, started_at?: Millis, at?: Millis, } | { "type": "steve.draft", ws: WorkspaceId, mid: MessageId, thought: string, text: string, } | { "type": "steve.tool", ws: WorkspaceId, mid: MessageId, run: string, name: string, brief: string, ok: boolean, kind?: string, running?: boolean, call?: number, started_at?: Millis, at?: Millis, description?: string, step_started_at?: Millis, ms?: number, excerpt?: string, error?: string, } | { "type": "steve.progress", ws: WorkspaceId, mid: MessageId, run: string, started_at?: Millis, at?: Millis, body: ThreadProgressKind, };

@@ -104,6 +104,8 @@ pub struct Spawn {
     pub clean_env: bool,
     /// The managed prefix whose code the process reads. A shared lease lasts with the handle.
     pub prefix: Option<PathBuf>,
+    /// Canonical harness id when known, so the per-harness adapter can parse typed stderr signals.
+    pub harness: Option<String>,
 }
 
 type Pending = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
@@ -268,9 +270,20 @@ impl Conn {
         });
 
         // what the adapter says on its own (timings, progress, its own warnings): kept, not a warning
-        // of Steve's. A request that fails says so where it is awaited.
+        // of Steve's. Typed harness stderr signals (such as permission_check_status) are parsed
+        // before truncation into structured logs and metrics.
         let tag = sp.log_tag.clone();
-        let mut stderr = tokio::spawn(stderr_lines(stderr, move |t| tracing::info!("{tag} {t}")));
+        let log_tag = tag.clone();
+        let adapter = sp.harness.as_deref().map(crate::adapter::for_harness);
+        let mut stderr = tokio::spawn(stderr_lines_observed(
+            stderr,
+            move |line| {
+                adapter
+                    .as_ref()
+                    .is_some_and(|a| a.observe_stderr(&tag, line))
+            },
+            move |t| tracing::info!("{log_tag} {t}"),
+        ));
 
         let weak = Arc::downgrade(&conn);
         let read_error = Arc::new(AtomicBool::new(false));
@@ -655,7 +668,18 @@ async fn read_adapter_stdout(
 const STDERR_LINE_MAX: u64 = 64 * 1024;
 
 /// Logs an adapter's stderr a line at a time, cut to 500 characters.
-async fn stderr_lines(stderr: impl tokio::io::AsyncRead + Unpin, mut log: impl FnMut(&str)) {
+#[cfg(test)]
+async fn stderr_lines(stderr: impl tokio::io::AsyncRead + Unpin, log: impl FnMut(&str)) {
+    stderr_lines_observed(stderr, |_| false, log).await;
+}
+
+/// Reads an adapter's stderr a line at a time, letting `observe` inspect the full bounded line
+/// before generic logging truncates unhandled lines to 500 characters.
+async fn stderr_lines_observed(
+    stderr: impl tokio::io::AsyncRead + Unpin,
+    mut observe: impl FnMut(&str) -> bool,
+    mut log: impl FnMut(&str),
+) {
     let mut r = BufReader::new(stderr);
     let mut line = Vec::new();
     // inside an overlong line whose head was already logged
@@ -677,7 +701,7 @@ async fn stderr_lines(stderr: impl tokio::io::AsyncRead + Unpin, mut log: impl F
         }
         let t = String::from_utf8_lossy(&line);
         let t = t.trim();
-        if !t.is_empty() {
+        if !t.is_empty() && !observe(t) {
             log(js_slice(t, 500));
         }
     }
@@ -718,6 +742,23 @@ mod stderr_tests {
         assert_eq!(got[0].len(), 500);
         assert_eq!(got[1], "after");
     }
+
+    #[tokio::test]
+    async fn stderr_observer_inspects_full_line_before_log_truncation() {
+        let long_agent = "a".repeat(520);
+        let handled = format!(
+            "Unexpected case: {{\"type\":\"system\",\"subtype\":\"permission_check_status\",\"tool_use_id\":\"toolu_1\",\"agent_id\":\"{long_agent}\",\"status\":\"checking\"}}\nplain stderr line\n"
+        );
+        let adapter = crate::adapter::for_harness("claude-code");
+        let mut logged = Vec::new();
+        stderr_lines_observed(
+            handled.as_bytes(),
+            |line| adapter.observe_stderr("[test]", line),
+            |t| logged.push(t.to_string()),
+        )
+        .await;
+        assert_eq!(logged, vec!["plain stderr line"]);
+    }
 }
 
 #[cfg(test)]
@@ -755,6 +796,7 @@ sys.stdin.readline()
                 log_tag: "retained-pipe-exit".into(),
                 clean_env: false,
                 prefix: None,
+                harness: None,
             },
             |_, _| {},
             || {},
@@ -815,6 +857,7 @@ sys.stdin.readline()
                 log_tag: "bounded-reader-exit".into(),
                 clean_env: false,
                 prefix: None,
+                harness: None,
             },
             1024,
             |_| true,
@@ -866,6 +909,7 @@ sys.stdin.readline()
                     log_tag: "exit-observation-test".into(),
                     clean_env: false,
                     prefix: None,
+                    harness: None,
                 },
                 1024,
                 |_| true,
@@ -903,6 +947,7 @@ sys.stdin.readline()
             log_tag: "test".into(),
             clean_env: false,
             prefix: None,
+            harness: None,
         };
         let conn = Conn::spawn(sp, |_, _| {}, || {}).unwrap();
         tokio::time::timeout(Duration::from_secs(2), conn.wait_exit())
@@ -933,6 +978,7 @@ sys.stdin.readline()
             log_tag: "test".into(),
             clean_env: false,
             prefix: None,
+            harness: None,
         };
         let conn = Conn::spawn(sp, |_, _| {}, || {}).unwrap();
         tokio::time::timeout(Duration::from_secs(2), conn.wait_exit())
@@ -963,6 +1009,7 @@ mod backpressure_tests {
             log_tag: "test".into(),
             clean_env: false,
             prefix: None,
+            harness: None,
         };
         let seen = Arc::new(AtomicU64::new(0));
         let room = Arc::new(tokio::sync::Semaphore::new(0));

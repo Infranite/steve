@@ -6,6 +6,12 @@ import assert from "node:assert/strict"
 import { mkdir } from "node:fs/promises"
 import {
   CLAUDE_CODE_MODELS,
+  DIAG_ALLOWED_HARNESS_REPORT,
+  DIAG_ALLOWED_HARNESS_UPDATES,
+  DIAG_ALLOWED_NODE_ID,
+  DIAG_DENIED_HARNESS_REPORT,
+  DIAG_DENIED_HARNESS_UPDATES,
+  DIAG_DENIED_NODE_ID,
   MACBOOK_HARNESS_REPORT,
   MACBOOK_HARNESS_UPDATES,
   MACBOOK_NODE_ID,
@@ -25,9 +31,9 @@ const errors = []
 page.on("pageerror", (e) => errors.push(e.stack || e.message))
 
 const GIB = 2 ** 30
-const node = {
-  node_id: MACBOOK_NODE_ID,
-  name: "MacBook Pro",
+const makeNode = (id, name) => ({
+  node_id: id,
+  name,
   fingerprint: "9e3f5a07c21b84d60f9a77e3b10c4d52",
   state: "active",
   linked: true,
@@ -38,30 +44,71 @@ const node = {
   last_seen: MACBOOK_NOW - 5_000,
   offline: null,
   link: { route: "lan", via: "direct", tls: false, since: MACBOOK_NOW - 3_600_000, latency_ms: 8, latency_at: MACBOOK_NOW - 5_000 },
-  host: { hostname: "macbook-pro.local", os: "macos", os_name: "macOS", os_version: "26.1", arch: "aarch64", cpus: 14, mem_total: 48 * GIB },
+  host: { hostname: `${id}.local`, os: "macos", os_name: "macOS", os_version: "26.1", arch: "aarch64", cpus: 14, mem_total: 48 * GIB },
   upgrade: { build: { version: "0.2.112", commit: "abc12345", target: "aarch64-apple-darwin" }, policy: "notify", own_policy: null, can: false, reason: "current", latest: null },
-}
+})
+const nodes = [
+  makeNode(MACBOOK_NODE_ID, "MacBook Pro"),
+  makeNode(DIAG_DENIED_NODE_ID, "MacBook Policy Denied"),
+  makeNode(DIAG_ALLOWED_NODE_ID, "MacBook Policy Allowed"),
+]
+let allowedReport = structuredClone(DIAG_ALLOWED_HARNESS_REPORT)
+const installPosts = []
 
 const json = (route, body, status = 200) =>
   route.fulfill({ status, contentType: "application/json", body: JSON.stringify(body) })
 
-await page.route("**/*", async (route) => {
-  const url = new URL(route.request().url()), p = url.pathname
+const routeApi = async (route) => {
+  const req = route.request(), url = new URL(req.url()), p = url.pathname
   if (url.origin !== base) return route.abort("blockedbyclient")
   if (!p.startsWith("/api/")) return route.continue()
-  if (p === "/api/nodes") return json(route, { nodes: [node] })
+  if (p === "/api/nodes") return json(route, { nodes })
   if (p === "/api/devices") return json(route, { devices: [], runtimes: [] })
   if (p === "/api/vitals") return json(route, { nodes: {} })
-  if (p === "/api/node-harnesses") return json(route, { nodes: { [MACBOOK_NODE_ID]: MACBOOK_HARNESS_REPORT } })
+  if (p === "/api/node-harnesses") {
+    return json(route, {
+      nodes: {
+        [MACBOOK_NODE_ID]: MACBOOK_HARNESS_REPORT,
+        [DIAG_DENIED_NODE_ID]: DIAG_DENIED_HARNESS_REPORT,
+        [DIAG_ALLOWED_NODE_ID]: allowedReport,
+      },
+    })
+  }
   if (p === `/api/node-harnesses/${MACBOOK_NODE_ID}`) {
     return json(route, { node_id: MACBOOK_NODE_ID, report: MACBOOK_HARNESS_REPORT })
   }
+  if (p === `/api/node-harnesses/${DIAG_DENIED_NODE_ID}`) {
+    return json(route, { node_id: DIAG_DENIED_NODE_ID, report: DIAG_DENIED_HARNESS_REPORT })
+  }
+  if (p === `/api/node-harnesses/${DIAG_ALLOWED_NODE_ID}`) {
+    return json(route, { node_id: DIAG_ALLOWED_NODE_ID, report: allowedReport })
+  }
+  if (p === `/api/node-harnesses/${DIAG_ALLOWED_NODE_ID}/pi/install` && req.method() === "POST") {
+    installPosts.push({ path: p, body: req.postDataJSON() })
+    allowedReport = {
+      ...allowedReport,
+      harnesses: allowedReport.harnesses.map((h) =>
+        h.id === "pi"
+          ? {
+              ...h,
+              degraded_reason: "installing",
+              setup: { ...h.setup, state: "installing", can_install: false },
+            }
+          : h,
+      ),
+    }
+    return json(route, { accepted: true, operation: "install_pi_fixture" })
+  }
   if (p === `/api/node-harness-updates/${MACBOOK_NODE_ID}`) return json(route, MACBOOK_HARNESS_UPDATES)
+  if (p === `/api/node-harness-updates/${DIAG_DENIED_NODE_ID}`) return json(route, DIAG_DENIED_HARNESS_UPDATES)
+  if (p === `/api/node-harness-updates/${DIAG_ALLOWED_NODE_ID}`) return json(route, DIAG_ALLOWED_HARNESS_UPDATES)
   if (p === "/api/nodes/upgrade-default") return json(route, { policy: "notify", hub: { version: "0.2.112", commit: "abc", target: "x" }, drain_secs: 1800, health_secs: 180 })
   if (p === "/api/node-context") return json(route, { owner_context: "off" })
   if (p === "/api/access") return json(route, { tokens: [], clients: [], current: null })
   return json(route, {}, 404)
-})
+}
+
+await page.route("**/*", routeApi)
 
 const shotsDir = process.env.STEVE_TEST_SHOTS || ""
 async function snap(filename) {
@@ -187,24 +234,63 @@ try {
   await root.locator('[data-harness-section-toggle="not_installed"]').click()
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), "390px expanded fits without horizontal overflow")
 
-  // 4. Verify English i18n renders cleanly without missing keys
+  // 4. Verify all 4 typed missing/broken diagnosis cards + exec_denied policy guidance + Access entry + remote install
+  await page.setViewportSize({ width: 1280, height: 960 })
+  await page.goto(`${base}/test/fixtures/devices.html?strict#/devices/nodes/${DIAG_DENIED_NODE_ID}/harness`)
+  const diagRoot = page.locator(`[data-node-harnesses="${DIAG_DENIED_NODE_ID}"]`)
+  await diagRoot.locator('[data-harness-section="attention"]').waitFor()
+  assert.equal(await diagRoot.locator('[data-harness-section-count="attention"]').innerText(), "3")
+  assert.equal(await diagRoot.locator('[data-harness-section-count="not_installed"]').innerText(), "1")
+
+  // Pi: CLI present on service PATH, ACP adapter package missing + exec_denied explanation (never "服务 PATH 缺失")
+  const piDiagCard = diagRoot.locator('[data-node-harness-id="pi"]')
+  await piDiagCard.locator('[data-node-harness-reason="adapter_package_missing"]').waitFor()
+  const piText = await piDiagCard.innerText()
+  assert.match(piText, /未安装 ACP 适配器/)
+  assert.match(piText, /未安装 Pi 的 ACP 适配器（@openma\/pi-acp）/)
+  assert.doesNotMatch(piText, /服务 PATH 缺失/)
+  assert.equal(await piDiagCard.locator("[data-missing-command-cli-path]").innerText(), "/usr/local/bin/pi")
+  assert.equal(await piDiagCard.locator("[data-missing-command-adapter-pkg]").innerText(), "@openma/pi-acp")
+  assert.equal(await piDiagCard.locator("[data-missing-command-install-cli]").innerText(), "steve adapters install pi node")
+  await piDiagCard.locator('[data-harness-attention-action="copy_adapter_install"][data-harness-install-copy="pi"]').waitFor()
+  // Single clear exec_denied explanation (not duplicated) with policy.json detail and clickable Access entry
+  assert.equal(await piDiagCard.locator('[data-harness-blocked-reason="exec_denied"]').count(), 1)
+  assert.match(await piDiagCard.locator('[data-harness-blocked-reason="exec_denied"]').innerText(), /policy\.json/)
+  assert.match(await piDiagCard.locator('[data-harness-blocked-reason="exec_denied"]').innerText(), /steve node restart/)
+
+  // Antigravity: command missing from service PATH -> refresh-env
+  await diagRoot.locator('[data-node-harness-id="antigravity"] [data-node-harness-reason="command_not_in_service_path"]').waitFor()
+  await diagRoot.locator('[data-node-harness-id="antigravity"] [data-harness-attention-action="copy_refresh_env"]').waitFor()
+
+  // Codex: adapter installed, startup failed -> initialize_failed (no missing_command block)
+  const codexDiagCard = diagRoot.locator('[data-node-harness-id="codex"]')
+  await codexDiagCard.locator('[data-node-harness-reason="initialize_failed"]').waitFor()
+  assert.match(await codexDiagCard.innerText(), /启动失败/)
+  assert.equal(await codexDiagCard.locator("[data-node-harness-missing-command]").count(), 0)
+
+  // Clicking the Access policy entry navigates directly to the Access tab's execution policy section
+  await piDiagCard.locator("[data-open-access-policy]").click()
+  await page.waitForFunction((id) => location.hash === `#/devices/nodes/${id}/access`, DIAG_DENIED_NODE_ID)
+  const policySection = page.locator('[data-node-execution-policy="denied"]')
+  await policySection.waitFor()
+  assert.match(await policySection.innerText(), /policy\.json/)
+  assert.match(await policySection.innerText(), /steve node restart/)
+
+  // Remote Node with exec allowed: Pi shows one-click Install ACP adapter button and posts to /api/node-harnesses/{id}/pi/install
+  await page.goto(`${base}/test/fixtures/devices.html?strict#/devices/nodes/${DIAG_ALLOWED_NODE_ID}/harness`)
+  const allowedRoot = page.locator(`[data-node-harnesses="${DIAG_ALLOWED_NODE_ID}"]`)
+  const piInstallBtn = allowedRoot.locator('[data-node-harness-id="pi"] [data-harness-attention-action="install"][data-harness-install="pi"]')
+  await piInstallBtn.waitFor()
+  assert.match(await piInstallBtn.innerText(), /安装 ACP 适配器/)
+  await piInstallBtn.click()
+  await allowedRoot.locator('[data-node-harness-id="pi"] [data-node-harness-reason="installing"]').waitFor()
+  assert.deepEqual(installPosts, [{ path: `/api/node-harnesses/${DIAG_ALLOWED_NODE_ID}/pi/install`, body: {} }])
+
+  // 5. Verify English i18n renders cleanly without missing keys across both layouts and new diagnosis cards
   const enPage = await browser.newPage({ locale: "en-US", viewport: { width: 1280, height: 960 } })
   enPage.setDefaultTimeout(12_000)
   enPage.on("pageerror", (e) => errors.push(e.stack || e.message))
-  await enPage.route("**/*", async (route) => {
-    const url = new URL(route.request().url()), p = url.pathname
-    if (url.origin !== base) return route.abort("blockedbyclient")
-    if (!p.startsWith("/api/")) return route.continue()
-    if (p === "/api/nodes") return json(route, { nodes: [node] })
-    if (p === "/api/devices") return json(route, { devices: [], runtimes: [] })
-    if (p === "/api/vitals") return json(route, { nodes: {} })
-    if (p === "/api/node-harnesses") return json(route, { nodes: { [MACBOOK_NODE_ID]: MACBOOK_HARNESS_REPORT } })
-    if (p === `/api/node-harness-updates/${MACBOOK_NODE_ID}`) return json(route, MACBOOK_HARNESS_UPDATES)
-    if (p === "/api/nodes/upgrade-default") return json(route, { policy: "notify", hub: { version: "0.2.112", commit: "abc", target: "x" }, drain_secs: 1800, health_secs: 180 })
-    if (p === "/api/node-context") return json(route, { owner_context: "off" })
-    if (p === "/api/access") return json(route, { tokens: [], clients: [], current: null })
-    return json(route, {}, 404)
-  })
+  await enPage.route("**/*", routeApi)
   await enPage.goto(`${base}/test/fixtures/devices.html?strict#/devices/nodes/${MACBOOK_NODE_ID}/harness`)
   const enRoot = enPage.locator(`[data-node-harnesses="${MACBOOK_NODE_ID}"]`)
   await enRoot.locator('[data-harness-section-toggle="available"]').getByText("Available").waitFor()
@@ -215,10 +301,16 @@ try {
   await enRoot.locator('[data-node-harness-id="antigravity"] [data-missing-command-refresh]').getByText("steve node refresh-env").waitFor()
   await enRoot.locator('[data-node-harness-id="pi"]').getByText("Version outdated").waitFor()
   await enRoot.locator('[data-node-harness-id="claude-code"] [data-harness-models-toggle]').getByText("All 66 models").waitFor()
+  await enPage.goto(`${base}/test/fixtures/devices.html?strict#/devices/nodes/${DIAG_DENIED_NODE_ID}/harness`)
+  const enDiag = enPage.locator(`[data-node-harnesses="${DIAG_DENIED_NODE_ID}"]`)
+  await enDiag.locator('[data-node-harness-id="pi"]').getByText("ACP adapter not installed").waitFor()
+  await enDiag.locator('[data-node-harness-id="pi"]').getByText("Pi's ACP adapter (@openma/pi-acp) is not installed", { exact: false }).waitFor()
+  await enDiag.locator('[data-node-harness-id="pi"] [data-open-access-policy]').getByText("View execution policy in Access").waitFor()
+  await enDiag.locator('[data-node-harness-id="codex"]').getByText("Startup failed").waitFor()
   await enPage.close()
 
   assert.deepEqual(errors, [])
-  process.stdout.write("Harness tab layout: 18 harnesses (4/4/10), 66-model structured browser, search, collapse, details, en/zh i18n, and 390px passed\n")
+  process.stdout.write("Harness tab layout: 18 harnesses (4/4/10), 4-way diagnosis cards, exec_denied Access flow, remote adapter install, en/zh i18n, and 390px passed\n")
 } finally {
   await browser.close()
 }

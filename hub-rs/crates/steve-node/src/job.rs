@@ -347,7 +347,7 @@ async fn acp_think(
         return failed(OneShotError::Failed("not a think job".into()));
     };
     let mut prompt = vec![json!({"type": "text", "text": message})];
-    prompt.extend(images.iter().map(Image::block));
+    prompt.extend(images.iter().map(steve_acp::oneshot::image_block));
     let properties = inner.cfg.acp.adapter_properties(&spec.run.choice.harness);
     if think.tools == ThinkToolMode::ReadAttached && !properties.read_attached {
         return failed(OneShotError::ToolRefused);
@@ -388,6 +388,7 @@ async fn acp_think(
         on_session: None,
         max_output_bytes: spec.run.limits.max_output_bytes,
         on_activity: None,
+        emit_thoughts: false,
     };
     match crate::acp_job::run_cancellable(req, spawned, &event, stop_execution.notified()).await {
         Ok(out) => Ran {

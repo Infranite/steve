@@ -30,94 +30,41 @@ use steve_node_api::{
 };
 use tokio::sync::mpsc;
 
-/// Why a one-shot call failed. The words a user sees are the caller's.
-#[derive(Debug, thiserror::Error)]
-pub enum OneShotError {
-    /// The accepted run's output/ingress budget was exhausted.
-    #[error("output limit")]
-    OutputLimit,
-    /// Still running after the timeout; the adapter is stopped.
-    #[error("timed out in {0}")]
-    Timeout(TimeoutPhase),
-    /// The adapter could not be started or opened.
-    #[error("{0}")]
-    Failed(String),
-    /// The model reached for a tool the call's policy does not allow (a call without tools, or
-    /// with a narrower set than it wanted): the request needs what this call cannot do, and the
-    /// caller decides where it goes instead.
-    #[error("read-only policy refused a tool")]
-    ToolRefused,
-    /// The adapter answered the prompt with an error (a JSON-RPC error: the provider, the model).
-    /// `transient`: it said the service was unavailable or overloaded, so another try may succeed.
-    #[error("{text}")]
-    Harness {
-        text: String,
-        code: Option<i64>,
-        transient: bool,
-    },
-    /// The adapter lacks what the call needs (`unsupported: images`).
-    #[error("unsupported: {0}")]
-    Unsupported(&'static str),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-}
+pub use steve_node_api::{Image, OneShotError};
 
-impl OneShotError {
-    /// Whether another try of the same call may succeed.
-    pub fn transient(&self) -> bool {
-        matches!(
-            self,
-            OneShotError::Harness {
-                transient: true,
-                ..
-            }
-        )
-    }
-
-    /// The adapter's error answer as a harness error: transient when its words say so.
-    pub fn harness(e: RpcError) -> Self {
-        let code = e
-            .data
-            .as_ref()
-            .and_then(|d| d.get("code"))
-            .and_then(Value::as_i64);
-        let detail = e
-            .data
-            .as_ref()
-            .and_then(|d| d.get("data"))
-            .map(|d| match d {
-                Value::String(s) => s.clone(),
-                d => d.to_string(),
-            })
-            .filter(|d| !d.is_empty() && !e.message.contains(d.as_str()));
-        let text = match detail {
-            Some(d) => format!("{}: {d}", e.message),
-            None => e.message,
-        };
-        let transient = crate::is_transient(&text);
-        OneShotError::Harness {
-            text,
-            code,
-            transient,
-        }
+/// The adapter's error answer as a harness error: transient when its words say so.
+pub fn harness_error(e: RpcError) -> OneShotError {
+    let code = e
+        .data
+        .as_ref()
+        .and_then(|d| d.get("code"))
+        .and_then(Value::as_i64);
+    let detail = e
+        .data
+        .as_ref()
+        .and_then(|d| d.get("data"))
+        .map(|d| match d {
+            Value::String(s) => s.clone(),
+            d => d.to_string(),
+        })
+        .filter(|d| !d.is_empty() && !e.message.contains(d.as_str()));
+    let text = match detail {
+        Some(d) => format!("{}: {d}", e.message),
+        None => e.message,
+    };
+    let transient = crate::is_transient(&text);
+    OneShotError::Harness {
+        text,
+        code,
+        transient,
     }
 }
 
-/// An image for the prompt.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Image {
-    /// `image/png`, `image/jpeg`…
-    pub mime: String,
-    pub bytes: Vec<u8>,
-}
-
-impl Image {
-    /// The ACP `image` content block.
-    pub fn block(&self) -> Value {
-        use base64::Engine;
-        json!({"type": "image", "mimeType": self.mime,
-            "data": base64::engine::general_purpose::STANDARD.encode(&self.bytes)})
-    }
+/// The ACP `image` content block for an [`Image`].
+pub fn image_block(image: &Image) -> Value {
+    use base64::Engine;
+    json!({"type": "image", "mimeType": image.mime,
+        "data": base64::engine::general_purpose::STANDARD.encode(&image.bytes)})
 }
 
 /// An adapter's program and arguments.
@@ -155,6 +102,8 @@ pub struct Request<'a> {
     pub max_output_bytes: u64,
     /// Activity without exposing private thought text to the caller's draft.
     pub on_activity: Option<&'a (dyn Fn() + Send + Sync)>,
+    /// Whether root `Role::Thought` updates are forwarded via `on_event` (off for internal jobs).
+    pub emit_thoughts: bool,
 }
 
 pub struct Outcome {
@@ -189,12 +138,19 @@ struct Output {
     session: Option<String>,
     message: Option<String>,
     assistant: std::collections::HashSet<String>,
+    thoughts: std::collections::HashSet<String>,
     text: String,
     usage: Vec<UsageReport>,
 }
 
 impl Output {
-    fn events(&mut self, facts: Vec<Fact>, on_event: &(dyn Fn(EventBody) + Send + Sync)) {
+    fn events(
+        &mut self,
+        facts: Vec<Fact>,
+        on_event: &(dyn Fn(EventBody) + Send + Sync),
+        is_root: bool,
+        emit_thoughts: bool,
+    ) {
         for fact in facts {
             let Fact::Event(event) = fact else { continue };
             match &event {
@@ -203,9 +159,22 @@ impl Output {
                     role: Role::Assistant,
                     ..
                 } => {
+                    if !is_root {
+                        continue;
+                    }
                     self.message = Some(message.clone());
                     self.assistant.insert(message.clone());
                     self.text.clear();
+                }
+                EventBody::MessageStarted {
+                    message,
+                    role: Role::Thought,
+                    ..
+                } => {
+                    if !is_root || !emit_thoughts {
+                        continue;
+                    }
+                    self.thoughts.insert(message.clone());
                 }
                 EventBody::MessageStarted { .. } => continue,
                 EventBody::TextDelta {
@@ -213,15 +182,21 @@ impl Output {
                     utf8_offset,
                     text,
                     ..
-                } if self.message.as_deref() == Some(message.as_str()) => {
+                } if is_root && self.message.as_deref() == Some(message.as_str()) => {
                     let at = *utf8_offset as usize;
                     if at <= self.text.len() && self.text.is_char_boundary(at) {
                         self.text.truncate(at);
                         self.text.push_str(text);
                     }
                 }
+                EventBody::TextDelta { message, .. }
+                    if is_root && emit_thoughts && self.thoughts.contains(message) => {}
                 EventBody::TextDelta { .. } => continue,
-                EventBody::MessageCompleted { message } if !self.assistant.contains(message) => {
+                EventBody::MessageCompleted { message }
+                    if !(is_root
+                        && (self.assistant.contains(message)
+                            || (emit_thoughts && self.thoughts.contains(message)))) =>
+                {
                     continue;
                 }
                 EventBody::Usage { report } => self.usage.push(report.clone()),
@@ -318,22 +293,21 @@ fn incoming(
     }
     match inc {
         Incoming::Notification { method, params } if method == "session/update" => {
-            if out
-                .session
-                .as_deref()
-                .is_some_and(|sid| params.get("sessionId").and_then(Value::as_str) != Some(sid))
-            {
+            let sid = params.get("sessionId").and_then(Value::as_str);
+            let is_root = out.session.as_deref().is_none_or(|root| sid == Some(root));
+            let is_child = !is_root && sid.is_some_and(|s| norm.is_child_session(s));
+            if !is_root && !is_child {
                 return Ok(());
             }
             if let Some(activity) = req.on_activity {
                 activity();
             }
             if let Some(update) = params.get("update") {
-                let facts = norm.update(update);
+                let facts = norm.update_for_session(sid, update);
                 if facts.iter().any(is_response) {
                     progress.advance(GatewayPhase::Responding, on_event);
                 }
-                out.events(facts, on_event);
+                out.events(facts, on_event, is_root, req.emit_thoughts);
             }
         }
         Incoming::Request { id, method, params } if method == "session/request_permission" => {
@@ -461,7 +435,7 @@ where
             _ = &mut cancel => return Err(failed("cancelled")),
             Some(inc) = rx.recv() => incoming(conn, inc, norm, out, req, on_event, progress)?,
             result = &mut prompting => break result,
-            _ = tick.tick() => out.events(sampler.poll().await, on_event),
+            _ = tick.tick() => out.events(sampler.poll().await, on_event, true, false),
         }
     };
     while let Ok(inc) = rx.try_recv() {
@@ -476,10 +450,10 @@ where
         // A local read/write error has no JSON-RPC response and is not evidence of one.
         progress.advance(GatewayPhase::Responding, on_event);
     }
-    out.events(norm.finish(), on_event);
+    out.events(norm.finish(), on_event, true, req.emit_thoughts);
     result.map_err(|e| {
         if e.data.is_some() {
-            OneShotError::harness(e)
+            harness_error(e)
         } else {
             failed(e)
         }
@@ -609,8 +583,13 @@ pub async fn run_cancellable(
             .ok()
             .map(|(_, end)| norm.prompt_response(end))
             .unwrap_or_default();
-        out.events(norm.finish(), on_event);
-        out.events(sampler.finish(native, SETTLE_WAIT).await, on_event);
+        out.events(norm.finish(), on_event, true, req.emit_thoughts);
+        out.events(
+            sampler.finish(native, SETTLE_WAIT).await,
+            on_event,
+            true,
+            false,
+        );
     }
     if let Some(owned) = &mut owned {
         stop_adapter(owned).await;
@@ -665,7 +644,7 @@ fn drain_tail(
                         _ => false,
                     })
                     .collect();
-                out.events(facts, on_event);
+                out.events(facts, on_event, true, false);
             }
             _ => {}
         }
@@ -704,6 +683,7 @@ fn spawn_job(
             log_tag: format!("[job {}]", req.prefix),
             clean_env: false,
             prefix: req.cfg.adapter_prefix(req.harness),
+            harness: Some(req.harness.to_string()),
         },
         1 << 20,
         move |n| {
@@ -885,6 +865,7 @@ for line in sys.stdin:
             on_session: None,
             max_output_bytes: 16 << 20,
             on_activity: None,
+            emit_thoughts: false,
         }
     }
 
@@ -1093,7 +1074,7 @@ for line in sys.stdin:
             bytes: vec![1, 2, 3],
         };
         let mut req = request(&cfg, temp.path());
-        req.prompt.push(image.block());
+        req.prompt.push(image_block(&image));
         let out = run(req, &|_| true, &|_| {}).await;
         assert!(matches!(out, Err(OneShotError::Unsupported("images"))));
     }
@@ -1212,6 +1193,7 @@ for line in sys.stdin:
                     log_tag: format!("[test {cap_mode}]"),
                     clean_env: false,
                     prefix: None,
+                    harness: None,
                 },
                 1 << 20,
                 |_| true,
@@ -1260,6 +1242,7 @@ for line in sys.stdin:
                 log_tag: "[test]".into(),
                 clean_env: false,
                 prefix: None,
+                harness: None,
             },
             1 << 20,
             |_| true,
@@ -1351,6 +1334,7 @@ for line in sys.stdin:
                 log_tag: "[test]".into(),
                 clean_env: false,
                 prefix: None,
+                harness: None,
             },
             1 << 20,
             |_| true,
@@ -1435,6 +1419,7 @@ for line in sys.stdin:
                 log_tag: "[test]".into(),
                 clean_env: false,
                 prefix: None,
+                harness: None,
             },
             1 << 20,
             |_| true,
@@ -1679,5 +1664,144 @@ for line in sys.stdin:
         );
         assert_eq!(*completed.lock().unwrap(), *started);
         assert_eq!(*costs.lock().unwrap(), vec!["0.02".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn emit_thoughts_streams_thoughts_only_when_opted_in_without_polluting_outcome_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = adapter(
+            temp.path(),
+            "        update({'sessionUpdate':'agent_thought_chunk','content':{'type':'text','text':'分析上下文'}})\n        chunk('最终结论')",
+            true,
+        );
+
+        let seen_off = Mutex::new(vec![]);
+        let req_off = request(&cfg, temp.path());
+        let out_off = run(req_off, &|_| true, &|ev| {
+            seen_off.lock().unwrap().push(ev);
+        })
+        .await
+        .unwrap();
+        assert_eq!(out_off.text, "最终结论");
+        assert!(
+            !seen_off.lock().unwrap().iter().any(|ev| matches!(
+                ev,
+                EventBody::MessageStarted {
+                    role: Role::Thought,
+                    ..
+                }
+            )),
+            "emit_thoughts=false must suppress thought messages"
+        );
+
+        let started = Mutex::new(vec![]);
+        let deltas = Mutex::new(vec![]);
+        let completed = Mutex::new(vec![]);
+        let mut req_on = request(&cfg, temp.path());
+        req_on.emit_thoughts = true;
+        let out_on = run(req_on, &|_| true, &|ev| match ev {
+            EventBody::MessageStarted { message, role, .. } => {
+                started.lock().unwrap().push((message, role));
+            }
+            EventBody::TextDelta { message, text, .. } => {
+                deltas.lock().unwrap().push((message, text));
+            }
+            EventBody::MessageCompleted { message } => {
+                completed.lock().unwrap().push(message);
+            }
+            _ => {}
+        })
+        .await
+        .unwrap();
+        assert_eq!(out_on.text, "最终结论");
+        let started = started.lock().unwrap();
+        assert_eq!(started.len(), 2);
+        assert_eq!(started[0].1, Role::Thought);
+        assert_eq!(started[1].1, Role::Assistant);
+        assert_eq!(
+            *deltas.lock().unwrap(),
+            vec![
+                (started[0].0.clone(), "分析上下文".to_string()),
+                (started[1].0.clone(), "最终结论".to_string()),
+            ]
+        );
+        assert_eq!(
+            *completed.lock().unwrap(),
+            vec![started[0].0.clone(), started[1].0.clone()]
+        );
+    }
+
+    #[tokio::test]
+    async fn oneshot_forwards_plan_and_isolates_child_session_text() {
+        let temp = tempfile::tempdir().unwrap();
+        let cfg = adapter(
+            temp.path(),
+            r#"        update({'sessionUpdate':'plan','entries':[{'content':'定位问题','status':'in_progress'},{'content':'补充测试','status':'pending'}]})
+        chunk('主会话回复')"#,
+            true,
+        );
+        let mut req = request(&cfg, temp.path());
+        req.emit_thoughts = true;
+        let plans = Mutex::new(vec![]);
+        let out = run(req, &|_| true, &|ev| {
+            if let EventBody::Plan { entries } = ev {
+                plans.lock().unwrap().push(entries);
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(out.text, "主会话回复");
+        let plans = plans.lock().unwrap();
+        assert_eq!(plans.len(), 1);
+        assert_eq!(plans[0].len(), 2);
+        assert_eq!(plans[0][0].content, "定位问题");
+        assert_eq!(plans[0][0].status, "in_progress");
+
+        // Non-root messages must never touch root assistant draft text or stream out as root deltas.
+        let mut output = Output::default();
+        let leaked = Mutex::new(vec![]);
+        output.events(
+            vec![
+                Fact::Event(EventBody::MessageStarted {
+                    message: "child-msg".into(),
+                    block: "b0".into(),
+                    role: Role::Assistant,
+                }),
+                Fact::Event(EventBody::TextDelta {
+                    message: "child-msg".into(),
+                    block: "b0".into(),
+                    utf8_offset: 0,
+                    text: "child-only-text".into(),
+                }),
+                Fact::Event(EventBody::MessageCompleted {
+                    message: "child-msg".into(),
+                }),
+                Fact::Event(EventBody::SubtaskChanged {
+                    subtask: steve_node_api::SubtaskView {
+                        id: steve_node_api::CallId::new("sub-1").unwrap(),
+                        parent: None,
+                        external_id: Some("child-sid".into()),
+                        origin: steve_node_api::SubtaskOrigin::Subagent,
+                        status: steve_node_api::SubtaskStatus::Running,
+                        title: "Explore module".into(),
+                        actor: Some("Explore".into()),
+                        model: None,
+                        progress: Some("Scanning files".into()),
+                        summary: None,
+                        error: None,
+                        can_cancel: false,
+                        duration_ms: None,
+                        usage: None,
+                    },
+                }),
+            ],
+            &|ev| leaked.lock().unwrap().push(ev),
+            false,
+            true,
+        );
+        assert!(output.text.is_empty());
+        let leaked = leaked.lock().unwrap();
+        assert_eq!(leaked.len(), 1);
+        assert!(matches!(leaked[0], EventBody::SubtaskChanged { .. }));
     }
 }

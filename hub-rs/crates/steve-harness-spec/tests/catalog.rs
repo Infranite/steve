@@ -29,6 +29,90 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
             "antigravity" => json!({"kind": "meta_append", "namespace": "antigravity"}),
             _ => Value::Null,
         };
+        if id == "claude-code" {
+            entry["properties"]["state"]["login"]["entries"] = json!([
+                "apiKeyHelper",
+                "awsAuthRefresh",
+                "awsCredentialExport",
+                "forceLoginMethod",
+                "forceLoginOrgUUID",
+                "env.ANTHROPIC_*",
+                "env.CLAUDE_CODE_USE_*",
+                "env.CLAUDE_CODE_AUTO_MODE_*",
+                "env.CLAUDE_CODE_BG_CLASSIFIER_MODEL",
+                "env.CLAUDE_CODE_DISABLE_EXPERIMENTAL_BETAS",
+                "env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC",
+                "env.CLAUDE_CODE_DISABLE_FEATURE_FLAGS",
+                "env.DISABLE_GROWTHBOOK",
+                "env.DISABLE_TELEMETRY",
+                "env.DO_NOT_TRACK",
+                "env.CLAUDE_CODE_GB_DISK_CACHE_WHEN_TELEMETRY_OFF",
+                "env.HTTP_PROXY",
+                "env.HTTPS_PROXY",
+                "env.ALL_PROXY",
+                "env.NO_PROXY",
+                "env.http_proxy",
+                "env.https_proxy",
+                "env.all_proxy",
+                "env.no_proxy",
+                "env.CLAUDE_CODE_HTTP_PROXY",
+                "env.CLAUDE_CODE_HTTPS_PROXY",
+                "env.CLAUDE_CODE_PROXY_*",
+                "env.SSL_CERT_FILE",
+                "env.SSL_CERT_DIR",
+                "env.NODE_EXTRA_CA_CERTS",
+                "env.CLAUDE_CODE_CERT_STORE",
+                "env.CLAUDE_CODE_CLIENT_CERT",
+                "env.CLAUDE_CODE_CLIENT_KEY",
+                "env.CLAUDE_CODE_CLIENT_KEY_PASSPHRASE",
+                "env.AWS_*",
+                "env.CLOUD_ML_REGION",
+                "env.VERTEX_REGION_*"
+            ]);
+        }
+        // #583 replaces hardcoded SessionMeta enum with declarative protected_deny, brand_mark,
+        // model_strip_prefixes and history_prefix metadata.
+        entry["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("session_meta");
+        entry["properties"]["protected_deny"] = if id == "claude-code" {
+            json!({
+                "wrapper": ["claudeCode", "options", "settings", "permissions", "deny"],
+                "tools": ["Read", "Edit"],
+                "abs_prefix": "/",
+                "dir_suffix": "/**",
+            })
+        } else {
+            Value::Null
+        };
+        entry["properties"]["brand_mark"] = json!(match id.as_str() {
+            "claude-code" => "anthropic",
+            "codex" => "openai",
+            "gemini" | "antigravity" => "google",
+            "github-copilot-cli" => "github",
+            "opencode" => "sst",
+            "qwen-code" => "alibaba",
+            "kimi-code" => "moonshot",
+            "codebuddy-code" => "tencent",
+            "cursor" => "anysphere",
+            "mistral-vibe" => "mistral",
+            _ => "other",
+        });
+        entry["properties"]["model_strip_prefixes"] = if id == "claude-code" {
+            json!(["claude-"])
+        } else {
+            json!([])
+        };
+        entry["properties"]["history_prefix"] = match id.as_str() {
+            "claude-code" => json!("cc"),
+            "codex" => json!("cx"),
+            _ => Value::Null,
+        };
+        entry["properties"]["state_settings"] = match id.as_str() {
+            "antigravity" => json!("antigravity_settings"),
+            _ => json!("none"),
+        };
         entry["env"]
             .as_array_mut()
             .unwrap()
@@ -80,7 +164,7 @@ fn known_keys(value: &toml::Value, keys: &[&str], location: &str) {
 #[test]
 fn every_builtin_catalog_key_is_known() {
     let catalog: toml::Value = toml::from_str(include_str!("../src/builtins.toml")).unwrap();
-    known_keys(&catalog, &["adapters"], "catalog");
+    known_keys(&catalog, &["adapters", "ui"], "catalog");
     for adapter in catalog["adapters"].as_array().unwrap() {
         let id = adapter["id"].as_str().unwrap();
         known_keys(
@@ -95,6 +179,8 @@ fn every_builtin_catalog_key_is_known() {
                 "local_transcript",
                 "primary",
                 "managed_by_default",
+                "brand_substrings",
+                "brand_words",
                 "components",
                 "name",
                 "args",
@@ -170,6 +256,50 @@ fn every_builtin_catalog_key_is_known() {
         }
         // env and protocol metadata payloads are intentionally open maps, not catalog fields.
     }
+    let ui = &catalog["ui"];
+    known_keys(ui, &["model_brands", "mcp_clients"], "catalog.ui");
+    for rule in ui["model_brands"].as_array().unwrap() {
+        known_keys(
+            rule,
+            &["mark", "substrings", "words"],
+            "catalog.ui.model_brands",
+        );
+    }
+    for client in ui["mcp_clients"].as_array().unwrap() {
+        known_keys(
+            client,
+            &[
+                "id",
+                "language",
+                "file",
+                "wrap",
+                "template",
+                "command_template",
+            ],
+            "catalog.ui.mcp_clients",
+        );
+    }
+}
+
+#[test]
+fn web_harness_meta_json_matches_builtin_catalog() {
+    let generated = ui_metadata_json();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../web/src/gen/harness-meta.json");
+    if std::env::var_os("STEVE_UPDATE_HARNESS_META").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &generated).unwrap();
+    }
+    let actual = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "missing {} ({e}); run STEVE_UPDATE_HARNESS_META=1 cargo test -p steve-harness-spec",
+            path.display()
+        )
+    });
+    assert_eq!(
+        actual, generated,
+        "web/src/gen/harness-meta.json is out of sync with builtins.toml; run STEVE_UPDATE_HARNESS_META=1 cargo test -p steve-harness-spec"
+    );
 }
 
 #[test]
@@ -209,12 +339,23 @@ fn only_declared_native_approval_modes_are_offered() {
         if let Some((_, id)) = want {
             use steve_node_api::PermissionMode;
             let offered = [id.to_string(), props.modes.full_access.clone()];
-            let choice = props
-                .modes
-                .choice_with(PermissionMode::Auto, false, None, None);
-            assert!(choice.resolve(Some(&offered)).is_ok(), "{id}");
+            assert_eq!(
+                props
+                    .modes
+                    .choice(PermissionMode::Auto)
+                    .resolve(Some(&offered)),
+                Ok(Some((*id).into())),
+                "{}",
+                builtin.id
+            );
+            assert!(
+                props
+                    .modes
+                    .choice(PermissionMode::Auto)
+                    .resolve(Some(&offered[1..]))
+                    .is_err()
+            );
             assert_eq!(props.modes.id(PermissionMode::Auto), *id);
-            assert!(choice.resolve(Some(&offered[1..])).is_err());
         }
     }
     for mode in ["", "default", "bypassPermissions", "custom-reviewed"] {
@@ -279,5 +420,36 @@ fn verified_append_system_context_declarations_match_contract() {
         Some(AppendSystemContext::CliFlag {
             flag: "--append-system-prompt".into(),
         })
+    );
+}
+
+#[test]
+fn antigravity_declares_nested_sandbox_native_auto_full_access_and_state_settings() {
+    let agy = builtin("antigravity").unwrap();
+    assert!(agy.properties.nested_sandbox);
+    assert_eq!(agy.properties.modes.auto, "auto");
+    assert_eq!(agy.properties.mode_args.get("auto"), None);
+    assert_eq!(
+        agy.properties.mode_args.get("full_access"),
+        Some(&vec!["--dangerously-skip-permissions".to_string()])
+    );
+    assert_eq!(
+        agy.properties.native_approval(),
+        Some(NativeApprovalFallback::AskOwner)
+    );
+    assert_eq!(
+        agy.properties.state_settings,
+        StateSettings::AntigravitySettings
+    );
+    let override_entry: AdapterEntry = serde_json::from_value(json!({
+        "command": "/fixture/adapter",
+        "name": "Own",
+        "properties": { "state_settings": "antigravity_settings" }
+    }))
+    .unwrap();
+    let (_, declared) = split_entries([("own".into(), override_entry)]);
+    assert_eq!(
+        spec("own", declared.get("own")).properties.state_settings,
+        StateSettings::AntigravitySettings
     );
 }

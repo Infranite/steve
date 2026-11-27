@@ -62,6 +62,10 @@ pub use event::{
 };
 pub use fact::{AlarmFired, AlarmLine, DurableFact, MailDelivery, PrSupplement};
 pub use id::*;
+pub use orchestration::{
+    STOP_REASON_STALL_NO_PROGRESS, STOP_REASON_STALL_REPEATED_FAILURE, StallBlocker,
+    StallBlockerKind, StallEvidence, StallReason, TURN_STALL,
+};
 pub use placement::*;
 pub use raw::RawJson;
 pub use stream::StreamControl;
@@ -87,5 +91,8 @@ pub use knowledge::KnowledgeEvent;
 pub use people::{AvatarRef, MemberIdentity, PeopleEvent};
 pub use stats::StatsEvent;
 pub use vault::{VaultEvent, VaultReason};
-pub use work::WorkEvent;
-pub use work::WorkLiveEvent;
+pub use work::{
+    ThreadLiveSnapshot, ThreadLiveThought, ThreadLiveTool, ThreadPlanEntry, ThreadPlanStatus,
+    ThreadProgressKind, ThreadResearchStage, ThreadSubtask, ThreadSubtaskOrigin,
+    ThreadSubtaskStatus, WorkEvent, WorkLiveEvent,
+};

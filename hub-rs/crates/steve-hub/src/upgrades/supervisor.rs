@@ -456,6 +456,64 @@ fn saved_snapshot(op: &Operation) -> Result<&crate::backup::SnapshotId> {
         .as_ref()
         .context("verified upgrade snapshot missing")
 }
+/// Timeout for verifying the candidate release's sibling `bin/steve-node --build-info`.
+const CANDIDATE_NODE_INFO_TIMEOUT: Duration = Duration::from_secs(15);
+
+/// Verifies that the candidate release bundle ships an executable `bin/steve-node` whose
+/// `--build-info` matches the staged release manifest (fail closed before commit so rollback runs).
+async fn verify_candidate_node(bundle: &Path, manifest: &Manifest) -> Result<()> {
+    let bin = bundle.join("bin/steve-node");
+    if !bin.is_file() {
+        bail!("candidate release is missing bin/steve-node");
+    }
+    let mut cmd = candidate_std_command(&bin, None);
+    cmd.arg("--build-info");
+    let out = run_bounded_async(
+        cmd,
+        "candidate node build_info",
+        BoundedOptions {
+            max_output_bytes: CANDIDATE_CHECK_MAX_OUTPUT_BYTES,
+            ..BoundedOptions::capture("node_build_info", CANDIDATE_NODE_INFO_TIMEOUT)
+        },
+    )
+    .await
+    .map_err(|err| match err {
+        CommandError::TimedOut { .. } => {
+            anyhow::anyhow!("candidate bin/steve-node --build-info timed out")
+        }
+        other => {
+            anyhow::Error::new(other).context("failed to run candidate bin/steve-node --build-info")
+        }
+    })?;
+    if !out.status.success() {
+        bail!(
+            "candidate bin/steve-node --build-info failed: {}",
+            out.status
+        );
+    }
+    let info: Value = serde_json::from_slice(&out.stdout)
+        .context("candidate bin/steve-node --build-info returned invalid JSON")?;
+    match (
+        option_env!("STEVE_BUILD_VERSION"),
+        option_env!("STEVE_BUILD_COMMIT"),
+    ) {
+        (Some(_), Some(_)) => {
+            if info["version"].as_str() != Some(manifest.version.as_str())
+                || info["commit"].as_str() != Some(manifest.commit.as_str())
+            {
+                bail!("candidate bin/steve-node identity does not match release manifest");
+            }
+        }
+        (None, None) if cfg!(debug_assertions) => {
+            if !info.is_object() {
+                bail!("candidate bin/steve-node --build-info must return a JSON object");
+            }
+        }
+        _ => bail!("candidate bin/steve-node identity cannot be verified"),
+    }
+    Ok(())
+}
+
 async fn healthy(cfg: &Config, client: &reqwest::Client, version: &str, id: Option<&str>) -> bool {
     let host = cfg.listen.local_host();
     let Ok(r) = client
@@ -475,7 +533,12 @@ async fn healthy(cfg: &Config, client: &reqwest::Client, version: &str, id: Opti
         Some(commit) => expected.as_ref().is_some_and(|m| m.commit == commit),
         None => cfg!(debug_assertions),
     };
+    let node_ok = match v.get("node").filter(|n| n["enabled"] == true) {
+        Some(node) => node.get("linked").and_then(Value::as_bool) != Some(false),
+        None => true,
+    };
     identity_ok
+        && node_ok
         && v["version"] == version
         && v["web_version"] == version
         && match id {
@@ -793,9 +856,10 @@ pub async fn startup_gate(cfg: &Config, listeners: &[tokio::net::TcpListener]) -
     if op.version != cfg.version || !matches!(op.phase.as_str(), "restarting" | "verifying") {
         bail!("invalid upgrade gate state")
     }
-    let manifest: Manifest =
-        read(&PathBuf::from(op.target.context("gate target missing")?).join("release.json"))?;
+    let target_dir = PathBuf::from(op.target.context("gate target missing")?);
+    let manifest: Manifest = read(&target_dir.join("release.json"))?;
     super::client::validate_manifest(&manifest, &cfg.version)?;
+    verify_candidate_node(&target_dir, &manifest).await?;
     match (
         option_env!("STEVE_BUILD_VERSION"),
         option_env!("STEVE_BUILD_COMMIT"),
@@ -1068,6 +1132,16 @@ server.serve_forever()
         };
         fs::write(dir.join("bin/steve-hub"), script).unwrap();
         fs::set_permissions(dir.join("bin/steve-hub"), fs::Permissions::from_mode(0o755)).unwrap();
+        let node_script = format!(
+            "#!/bin/sh\nprintf '%s\\n' '{{\"version\":\"{version}\",\"commit\":\"{}\"}}'\n",
+            "a".repeat(40)
+        );
+        fs::write(dir.join("bin/steve-node"), node_script).unwrap();
+        fs::set_permissions(
+            dir.join("bin/steve-node"),
+            fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
         dir
     }
     #[tokio::test]
@@ -1237,6 +1311,51 @@ server.serve_forever()
         }
     }
 
+    #[tokio::test]
+    async fn health_requires_local_node_linked_when_node_is_enabled() {
+        let home = tempfile::tempdir().unwrap();
+        let candidate = bundle(home.path(), "0.2.0", false);
+        switch(home.path(), &candidate).unwrap();
+        let client = local_client().unwrap();
+        for linked in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let cfg = Config::from_vars(|key| match key {
+                "STEVE_HOME" => Some(home.path().to_string_lossy().into()),
+                "STEVE_PORT" => Some(port.to_string()),
+                "STEVE_ADAPTER_CLAUDE" | "STEVE_ADAPTER_CODEX" => Some("unused".into()),
+                _ => None,
+            })
+            .unwrap();
+            let app = axum::Router::new().route(
+                "/healthz",
+                axum::routing::get(move || async move {
+                    axum::Json(json!({
+                        "ok": true,
+                        "maintenance": false,
+                        "version": "0.2.0",
+                        "web_version": "0.2.0",
+                        "build_commit": "a".repeat(40),
+                        "node": { "enabled": true, "linked": linked }
+                    }))
+                }),
+            );
+            let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+            let ok = healthy(&cfg, &client, "0.2.0", None).await;
+            server.abort();
+            assert_eq!(
+                ok, linked,
+                "post-switch health must require local Node linked when enabled"
+            );
+        }
+        // Missing bin/steve-node fails pre-commit verification.
+        fs::remove_file(candidate.join("bin/steve-node")).unwrap();
+        let manifest = fixture("0.2.0");
+        assert!(
+            verify_candidate_node(&candidate, &manifest).await.is_err(),
+            "missing bin/steve-node must fail startup gate verification"
+        );
+    }
     /// An upgrade between two fixture Hubs, on a port chosen before they bind it: another test
     /// can take it first, or between one child and the next. A fixture that finds it taken says so
     /// (`port-taken`), and the case runs again on another port, three times at most (#429).

@@ -13,7 +13,7 @@ use serde_json::json;
 
 use crate::error::Result;
 use crate::repo::NewDecision;
-use crate::turn_wait::stopped;
+use crate::turn_wait::StopCause;
 use crate::util::{js_head, now};
 use crate::{Core, Tx};
 
@@ -102,10 +102,11 @@ impl Tx<'_> {
                     continue;
                 }
                 /* the cause from state, never the session's last system line */
-                let (why, yours) = stopped(self.db().store().sessions().stop(&s.id)?.as_ref());
+                let cause = StopCause::classify(self.db().store().sessions().stop(&s.id)?.as_ref());
+                let why = steve_i18n::stored(|| cause.text());
                 let mut question = format!("它停下了：{}", js_head(&why, 200));
-                /* Steve looks first, unless it was you who stopped it */
-                if !yours {
+                /* Steve looks first, unless it was you who stopped it or the stall detector already held it */
+                if !cause.skips_takeover() {
                     let stop = crate::takeover::Stop::Idle {
                         why: question.clone(),
                     };

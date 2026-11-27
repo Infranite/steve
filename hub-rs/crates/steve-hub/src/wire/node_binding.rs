@@ -357,7 +357,7 @@ pub(crate) fn node_takes(
 /// boot and again whenever projects or knowledge sources change ([`super::workspaces`]), so a
 /// project added after boot binds without a restart and an archived one is refused (with the
 /// directories of its items and their sessions).
-pub(crate) fn roots(store: &Store, extra: &[PathBuf]) -> Result<Vec<steve_node::Root>, StoreError> {
+pub(crate) fn roots(store: &Store, extra: &[PathBuf]) -> Result<Vec<HostRoot>, StoreError> {
     let (rw, ro) = store.read(|r| steve_store::node_sessions::placements::roots(r))?;
     let mut rw: Vec<PathBuf> = rw.into_iter().map(PathBuf::from).collect();
     rw.extend(extra.iter().cloned());
@@ -368,7 +368,7 @@ pub(crate) fn roots(store: &Store, extra: &[PathBuf]) -> Result<Vec<steve_node::
     ro.dedup();
     ro.retain(|p| rw.binary_search(p).is_err());
     let root = |path: PathBuf, access: RootAccess| {
-        Some(steve_node::Root {
+        Some(HostRoot {
             id: root_id(&path)?,
             display: if access == RootAccess::ReadOnly {
                 "knowledge folder".into()
@@ -627,8 +627,9 @@ mod bot_tests {
 
 #[cfg(test)]
 mod host_tests {
+    use super::super::node_runtime::Sink;
+    use super::super::node_tools;
     use super::super::node_tools::tests::Ends;
-    use super::super::{Vars, node_tools};
     use super::*;
     use std::sync::Arc;
     struct NoTools;
@@ -649,7 +650,7 @@ mod host_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn diagnostic_and_real_local_host_with_fake_adapter() {
         let dir = tempfile::tempdir().unwrap();
-        let mut cfg = crate::config::Config::from_vars(|k| match k {
+        let cfg = crate::config::Config::from_vars(|k| match k {
             "STEVE_HOME" => Some(dir.path().join("steve").to_string_lossy().into()),
             "STEVE_REPO" => Some(dir.path().join("unused").to_string_lossy().into()),
             _ => None,
@@ -658,55 +659,77 @@ mod host_tests {
         let store =
             Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher).unwrap();
         store.ensure_workspace().unwrap();
-        let mut jobs = vec![];
-        let unset: Vars = Arc::new(|_| None);
-        cfg.mode = crate::config::RuntimeMode::Diagnostic;
+        let local_vars: super::super::Vars =
+            Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
+        let local_err = super::super::node_mode(&local_vars, false).unwrap_err();
         assert!(
-            super::super::node_runtime(
-                &cfg,
-                &store,
-                Arc::new(Ends),
-                &unset,
-                &super::super::node_secrets::NodeSecrets::new(),
-                &mut jobs
-            )
-            .unwrap()
-            .is_none()
+            local_err.message.contains("STEVE_NODE_MODE=local"),
+            "{local_err}"
         );
-        cfg.mode = crate::config::RuntimeMode::Normal;
-        assert!(jobs.is_empty());
         assert!(!cfg.data_dir.join("node").exists());
-        let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
+
         let fake = Path::new(env!("CARGO_MANIFEST_DIR")).join("../steve-acp/tests/fake-acp.js");
-        cfg.adapters = std::collections::BTreeMap::from([(
-            "claude-code".into(),
-            fake.to_string_lossy().into(),
-        )]);
-        cfg.claude_executable = "/usr/bin/false".into();
         steve_store::testkit::hub::node_fixtures::seed_items_and_sessions_for_turn_ended(&store)
             .unwrap();
-        let super::super::NodeHost {
-            runtime: rt,
-            tools,
-            node,
-            ..
-        } = super::super::node_runtime(
-            &cfg,
-            &store,
+        let roots: Vec<steve_node::Root> =
+            roots(&store, &[cfg.scratch.clone(), cfg.worktrees.clone()])
+                .unwrap()
+                .into_iter()
+                .map(|r| steve_node::Root {
+                    id: r.id,
+                    display: r.display,
+                    path: r.path,
+                    access: r.access,
+                })
+                .collect();
+        let node = Arc::new(
+            steve_node::LocalNode::open(steve_node::NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
+                node: NodeId::new("local").unwrap(),
+                home: cfg.data_dir.join("node"),
+                acp: steve_acp::AcpConfig {
+                    declared: Default::default(),
+                    adapters: std::collections::HashMap::from([("claude-code".into(), fake)]),
+                    node: "node".into(),
+                    claude_executable: "/usr/bin/false".into(),
+                    claude_config_dir: None,
+                    steve_home: cfg.home.clone(),
+                    codex_home: cfg.home.join("codex"),
+                    user_home: dir.path().to_path_buf(),
+                    version: cfg.version.clone(),
+                },
+                roots,
+                capacity: steve_node_api::Capacity {
+                    sessions: steve_node_api::Capacity::SESSIONS_DEFAULT,
+                    jobs: 8,
+                    execs: 8,
+                },
+                storage: steve_node::Storage::default(),
+            })
+            .unwrap(),
+        );
+        let rt = super::super::node_runtime::NodeRuntime::new(
+            store.clone(),
+            node.clone(),
             Arc::new(Ends),
-            &on,
-            &super::super::node_secrets::NodeSecrets::new(),
-            &mut jobs,
+        );
+        node.connect(Arc::new(Sink(Arc::downgrade(&rt))), None);
+        let tools = node_tools::NodeTools::open(
+            store.clone(),
+            NodeId::new("local").unwrap(),
+            &cfg.data_dir,
         )
-        .unwrap()
         .unwrap();
         tools.install(Arc::new(NoTools)).unwrap();
-        for job in jobs {
-            job.spawn().await;
+        node.connect_tools(tools).await.unwrap();
+        rt.start();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !rt.is_reconciled() {
+            assert!(std::time::Instant::now() < deadline, "reconcile stuck");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         let b = binding_for(&store, "s1", None, &|p| node.allows(p)).unwrap();
         rt.bind(&b).unwrap();
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         loop {
             let phase =
                 steve_store::testkit::hub::node_checks::binding_phase_by_session(&store, "s1")
@@ -726,7 +749,7 @@ mod host_tests {
             assert!(std::time::Instant::now() < deadline, "no transcript");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
-        // the Hub's shutdown stops the local Node, and its adapter's process group with it
+        // shutting down the Node stops its adapter's process group with it
         let pgid = steve_store::testkit::hub::node_journal::process_group(
             &cfg.data_dir.join("node/node.sqlite3"),
             "s1",
@@ -734,7 +757,6 @@ mod host_tests {
         .unwrap();
         let alive = || unsafe { libc::kill(-pgid, 0) } == 0;
         assert!(alive());
-        // what CoreDomain::shutdown awaits for it
         tokio::time::timeout(std::time::Duration::from_secs(10), node.shutdown())
             .await
             .expect("the Node stops within its deadline");
@@ -745,7 +767,7 @@ mod host_tests {
         if !gone {
             unsafe { libc::kill(-pgid, libc::SIGKILL) };
         }
-        assert!(gone, "the adapter outlived the Hub's shutdown");
+        assert!(gone, "the adapter outlived the Node's shutdown");
     }
 
     /// A new session the local Node cannot run is refused, said why, instead of becoming a dead
@@ -777,26 +799,64 @@ mod host_tests {
                 steve_store::WS,
             )
             .unwrap();
-        let on: Vars = Arc::new(|k| (k == "STEVE_NODE_MODE").then(|| "local".into()));
-        let mut jobs = vec![];
-        let super::super::NodeHost {
-            runtime: rt,
-            tools,
-            node,
-            ..
-        } = super::super::node_runtime(
-            &cfg,
-            &store,
+        std::fs::create_dir_all(&cfg.scratch).unwrap();
+        std::fs::create_dir_all(&cfg.worktrees).unwrap();
+        let roots: Vec<steve_node::Root> =
+            roots(&store, &[cfg.scratch.clone(), cfg.worktrees.clone()])
+                .unwrap()
+                .into_iter()
+                .map(|r| steve_node::Root {
+                    id: r.id,
+                    display: r.display,
+                    path: r.path,
+                    access: r.access,
+                })
+                .collect();
+        let node = Arc::new(
+            steve_node::LocalNode::open(steve_node::NodeConfig {
+                ceiling: steve_node::PolicyCeiling::unlimited(),
+                node: NodeId::new("local").unwrap(),
+                home: cfg.data_dir.join("node"),
+                acp: steve_acp::AcpConfig {
+                    declared: Default::default(),
+                    adapters: Default::default(),
+                    node: "node".into(),
+                    claude_executable: "/usr/bin/false".into(),
+                    claude_config_dir: None,
+                    steve_home: cfg.home.clone(),
+                    codex_home: cfg.home.join("codex"),
+                    user_home: dir.path().to_path_buf(),
+                    version: cfg.version.clone(),
+                },
+                roots,
+                capacity: steve_node_api::Capacity {
+                    sessions: steve_node_api::Capacity::SESSIONS_DEFAULT,
+                    jobs: 8,
+                    execs: 8,
+                },
+                storage: steve_node::Storage::default(),
+            })
+            .unwrap(),
+        );
+        let rt = super::super::node_runtime::NodeRuntime::new(
+            store.clone(),
+            node.clone(),
             Arc::new(Ends),
-            &on,
-            &super::super::node_secrets::NodeSecrets::new(),
-            &mut jobs,
+        );
+        node.connect(Arc::new(Sink(Arc::downgrade(&rt))), None);
+        let tools = node_tools::NodeTools::open(
+            store.clone(),
+            NodeId::new("local").unwrap(),
+            &cfg.data_dir,
         )
-        .unwrap()
         .unwrap();
         tools.install(Arc::new(NoTools)).unwrap();
-        for job in jobs {
-            job.spawn().await;
+        node.connect_tools(tools).await.unwrap();
+        rt.start();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !rt.is_reconciled() {
+            assert!(std::time::Instant::now() < deadline, "reconcile stuck");
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         let host = Arc::new(super::super::core::HubHost {
             store: store.clone(),

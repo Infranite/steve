@@ -323,7 +323,7 @@ impl Runtimes {
         result.map(|_| ())
     }
 
-    fn invalidate(&self) {
+    pub(crate) fn invalidate(&self) {
         self.reports.invalidate_local();
     }
     pub async fn get(&self, fresh: bool) -> Value {
@@ -406,12 +406,18 @@ fn shown(mut list: Value) -> Value {
 
 fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -> Vec<Value> {
     use steve_node_api::AdapterStatus;
-    cfg.adapters
-        .iter()
-        .map(|(id, path)| {
+    cfg.harness_ids()
+        .into_iter()
+        .map(|id| {
+            let id = id.as_str();
             let declared = cfg.declared_adapters.get(id);
             let spec = crate::harnesses::adapter_spec(id, declared);
-            let reported = harnesses.and_then(|hs| hs.iter().find(|h| &h.name == id));
+            let reported = harnesses.and_then(|hs| hs.iter().find(|h| h.name == id));
+            let path = reported
+                .and_then(|h| h.setup.as_ref())
+                .and_then(|s| s.components.first())
+                .and_then(|c| c.path.as_deref())
+                .unwrap_or_default();
             let adapter = reported.and_then(|h| h.adapter.as_ref());
             let session = adapter.and_then(|a| a.session.as_ref()).filter(|_| {
                 reported.and_then(|h| h.setup.as_ref()).is_none_or(|s| s.state == steve_node_api::SetupState::Ready)
@@ -449,6 +455,7 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                         id: c.id.into(), name: c.name.into(), package: c.package.into(), version: None, path: None, status: steve_node_api::ComponentStatus::Unknown, detected: None,
                     }).collect(),
                     can_install: false,
+                    blocked_reason: None,
                     reason: Some("The Node is disconnected, has not probed yet, or is too old to report component setup".into()),
                     help: Some("Connect or update the local Node and refresh discovery; separate Nodes are installed by their operator".into()), error: None,
                 })
@@ -460,6 +467,8 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                 "name": name,
                 "builtin": spec.builtin,
                 "custom": !spec.builtin,
+                "brand_mark": spec.properties.brand_mark,
+                "model_strip_prefixes": spec.properties.model_strip_prefixes,
                 "path": path,
                 "version": reported.map(|h| version_of(&h.version)).unwrap_or_default(),
                 "adapter_version": adapter.and_then(|a| a.version.clone()),
@@ -507,7 +516,17 @@ fn version_of(said: &str) -> String {
 
 // ── local harness history ──
 
-pub use steve_node::history::LocalSession;
+/// A local harness session entry surfaced by the Hub import API.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LocalSession {
+    pub key: String,
+    pub harness: String,
+    pub title: String,
+    pub cwd: String,
+    pub when: f64,
+    pub size: u64,
+}
+
 use steve_node_api::{
     Code, Command, Discovery, GrantId, HistoryEntry, HistoryImport, NodeEvent, Observed,
     OperationId, OperationResult, PageRequest, Timestamp,
@@ -771,7 +790,12 @@ mod tests {
 
     use super::*;
     use regex::Regex;
-    use steve_node::history::{claude_rows as claude_events, codex_rows as codex_events};
+    fn claude_events(text: &str) -> Vec<(String, Value)> {
+        steve_node::history::parse_rows("claude-code", text)
+    }
+    fn codex_events(text: &str) -> Vec<(String, Value)> {
+        steve_node::history::parse_rows("codex", text)
+    }
 
     mod setup_node {
         include!(concat!(

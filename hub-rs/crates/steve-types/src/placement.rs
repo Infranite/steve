@@ -60,6 +60,23 @@ pub enum PlacementReason {
     HandoffOwnerRequest,
 }
 
+impl PlacementReason {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Explicit => "explicit",
+            Self::Specialty => "specialty",
+            Self::Description => "description",
+            Self::ProjectPreference => "project_preference",
+            Self::StableOrder => "stable_order",
+            Self::CoordinatorDeferred => "coordinator_deferred",
+            Self::ExistingAssignment => "existing_assignment",
+            Self::HandoffQuotaExhausted => "handoff_quota_exhausted",
+            Self::HandoffProviderError => "handoff_provider_error",
+            Self::HandoffOwnerRequest => "handoff_owner_request",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 #[cfg_attr(test, derive(ts_rs::TS))]

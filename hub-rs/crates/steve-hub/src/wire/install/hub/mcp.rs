@@ -1,6 +1,6 @@
 use super::*;
 
-install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node, node_host, nodes, workspaces] => [built, core, db, jobs, local_node, local_runtime, mcp, nodes, tool_service, workspaces] {
+install! { install(reg, cx) [built, core, db, fleet, mut jobs, node_host, nodes, workspaces] => [built, core, db, jobs, local_runtime, mcp, nodes, tool_service, workspaces] {
     let HubEnv { cfg, vars, .. } = *cx;
     let extra = mcp_extra::Extra {
         cfg: cfg.clone(),
@@ -19,7 +19,7 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
         jobs.push(Job::task("library.sweep", move || {
             steve_runtime::every("library.sweep", clock, std::time::Duration::from_secs(60), steve_runtime::FirstRun::Immediate, move || {
                 let library = library.clone();
-                async move { let _ = tokio::task::spawn_blocking(move || library.sweep()).await; }
+                async move { library.sweep().await; }
             })
         }));
     }
@@ -46,13 +46,11 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
             crate::nodes::handover::task(svc, core, mins)
         }));
     }
-    let local_node = model_node.as_ref().map(|h| h.node.clone());
+    let local_node = node_host.as_ref().map(|h| h.node.node());
     // how each machine is doing, for the devices page (B3)
     {
         let db = db.clone();
-        let local_for_vitals = local_node
-            .clone()
-            .map(|n| n as Arc<dyn steve_node_api::Node>);
+        let local_for_vitals = local_node.clone();
         let nodes = nodes.clone();
         let low = cfg.disk.low;
         jobs.push(Job::task("nodes.vitals", move || {
@@ -61,26 +59,15 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, mode, model_node,
     }
     {
         let db = db.clone();
-        let local_for_upgrades = local_node
-            .clone()
-            .map(|n| n as Arc<dyn steve_node_api::Node>);
+        let local_for_upgrades = local_node;
         let nodes = nodes.clone();
         let bus = cx.bus.clone();
         jobs.push(Job::task("nodes.harness_auto_upgrade", move || {
             crate::api::harness_updates::auto_upgrade_task(db, local_for_upgrades, nodes, bus)
         }));
     }
-    // Health's Node rollout switch describes agent-session routing, including its rollback.
-    // The model-job host still participates in domain shutdown regardless of that switch.
     let local_runtime = node_host.as_ref().map(|h| h.runtime.clone());
-    if let Some(h) = &model_node {
-        h.tools
-            .install(tool_service.clone())
-            .map_err(|e| BackendError::msg(e.to_string()))?;
-    }
-    if mode == Some(NodeMode::Service)
-        && let Some(h) = &node_host
-    {
+    if let Some(h) = &node_host {
         h.tools
             .install(tool_service.clone())
             .map_err(|e| BackendError::msg(e.to_string()))?;

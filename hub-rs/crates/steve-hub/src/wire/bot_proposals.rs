@@ -250,31 +250,6 @@ mod tests {
         }
     }
 
-    struct InProcess(Arc<ServiceNode>);
-    impl HostNode for InProcess {
-        fn id(&self) -> &NodeId {
-            self.0.id()
-        }
-        fn node(&self) -> Arc<dyn steve_node_api::Node> {
-            self.0.node()
-        }
-        fn set_roots(&self, roots: Vec<steve_node::Root>) {
-            self.0.set_roots(roots)
-        }
-        fn allows(&self, at: &steve_node_api::RootPath) -> bool {
-            self.0.allows(at)
-        }
-        fn holds(&self, w: &steve_node_api::WorkspaceRef, path: &Path, adopted: bool) -> bool {
-            self.0.holds(w, path, adopted)
-        }
-        fn local_dir(&self, view: &steve_node_api::WorkspaceView) -> Option<steve_node::LocalDir> {
-            self.0.local_dir(view)
-        }
-        fn in_process(&self) -> bool {
-            true
-        }
-    }
-
     struct Fixture {
         core: Core,
         routed: Arc<RoutedRuntime>,
@@ -310,11 +285,8 @@ mod tests {
                 approval: Default::default(),
                 local_node: Default::default(),
             });
-            let local: Arc<dyn HostNode> = Arc::new(InProcess(ServiceNode::new(
-                NodeId::new("local").unwrap(),
-                node.clone(),
-                dir,
-            )));
+            let local: Arc<dyn HostNode> =
+                ServiceNode::new(NodeId::new("local").unwrap(), node.clone(), dir);
             assert!(host.local_node.set(local.clone()).is_ok());
             let runtime = NodeRuntime::new(store.clone(), node.clone(), host.clone());
             node.connect(Arc::new(Sink(Arc::downgrade(&runtime))));

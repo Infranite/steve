@@ -34,6 +34,7 @@ import {
   type ModelSource,
 } from "@/harness-model-list"
 import {
+  adapterInstallCliCommand,
   attentionActionFor,
   effectiveDegradedReason,
   formatInstallCommand,
@@ -46,6 +47,7 @@ import { setRuntimes, st, toast, useRuntimesQuery, useStore } from "@/store"
 import { go, openSheet } from "@/ui"
 import {
   DEFAULT_AUTO_POLICY,
+  ExecDeniedNotice,
   HarnessUpgradeBanner,
   HarnessUpgradeDetails,
   NodeAutoUpgradeBar,
@@ -146,7 +148,31 @@ function buildUnifiedReport(
   messages: Record<string, string>,
   restarts: readonly string[],
 ): RNodeHarnessReport | undefined {
-  if (!v.local || !runtimes) return report
+  if (!v.local || !runtimes) {
+    if (!report || (pending.length === 0 && Object.values(messages).every((m) => !m))) return report
+    return {
+      ...report,
+      harnesses: report.harnesses.map((h) => {
+        const isPending = pending.includes(h.id)
+        const msg = messages[h.id]
+        if (!isPending && !msg) return h
+        const active = isPending || h.setup?.state === "installing"
+        return {
+          ...h,
+          available: active ? false : h.available,
+          degraded_reason: active ? "installing" : msg ? "install_failed" : h.degraded_reason,
+          setup: h.setup
+            ? {
+                ...h.setup,
+                state: active ? "installing" : h.setup.state,
+                can_install: active ? false : h.setup.can_install,
+                error: msg || h.setup.error,
+              }
+            : null,
+        }
+      }),
+    }
+  }
   const byId = new Map(runtimes.map((rt) => [rt.id, rt]))
   if (report?.state === "reported" && report.harnesses.length > 0) {
     const merged: RNodeHarness[] = report.harnesses.map((h) => {
@@ -294,37 +320,52 @@ export function NodeHarnesses({
     try { await refreshHarnesses(v.id) } catch (e) { setOwnError((e as Error).message) } finally { setOwnBusy(false) }
   }, [v.local, v.id, actions, refreshHarnesses, reloadLocalRuntimes])
 
-  const localPolling =
-    v.local && (pending.length > 0 || (localRuntimes ?? EMPTY_RUNTIMES).some((rt) => rt.setup?.state === "installing"))
+  const installPolling =
+    pending.length > 0 ||
+    (v.local
+      ? (localRuntimes ?? EMPTY_RUNTIMES).some((rt) => rt.setup?.state === "installing")
+      : (rawReport?.harnesses ?? []).some((h) => h.setup?.state === "installing"))
 
   useEffect(() => {
-    if (!localPolling) return
+    if (!installPolling) return
     let live = true
     let timer: ReturnType<typeof setTimeout>
     const poll = async () => {
       if (!live) return
       if (!document.hidden) {
-        try { await reloadLocalRuntimes() } catch { /* surfaced inline; keep polling while installing */ }
+        try {
+          if (v.local) await reloadLocalRuntimes()
+          else await refreshHarnesses(v.id)
+        } catch {
+          /* surfaced inline; keep polling while installing */
+        }
       }
       if (live) timer = setTimeout(() => void poll(), LOCAL_INSTALL_POLL_MS)
     }
     timer = setTimeout(() => void poll(), LOCAL_INSTALL_POLL_MS)
     return () => { live = false; clearTimeout(timer) }
-  }, [localPolling, reloadLocalRuntimes])
+  }, [installPolling, v.local, v.id, reloadLocalRuntimes, refreshHarnesses])
 
-  const canManageLocal = v.local && (st.owner || !!v.device?.can_configure)
+  const canManageInstall = v.local
+    ? st.owner || !!v.device?.can_configure
+    : st.owner && v.linked && v.state === "active"
 
-  const installLocal = async (id: string) => {
-    if (!canManageLocal || installingRef.current.has(id)) return
-    const rt = localRuntimeById.get(id)
-    if (rt && (!canInstallRuntime(rt, installMessages[id]) || rt.setup?.state === "installing")) return
+  const installAdapter = async (id: string) => {
+    if (!canManageInstall || installingRef.current.has(id)) return
+    if (v.local) {
+      const rt = localRuntimeById.get(id)
+      if (rt && (!canInstallRuntime(rt, installMessages[id]) || rt.setup?.state === "installing")) return
+    } else {
+      const probe = rawReport?.harnesses.find((h) => h.id === id)
+      if (probe?.setup && (!probe.setup.can_install || probe.setup.state === "installing")) return
+    }
     installEpoch.current++
     installingRef.current.add(id)
     setPending((ids) => [...new Set([...ids, id])])
     setInstallMessages((ms) => ({ ...ms, [id]: "" }))
     try {
-      const res = await api.installHarness(id)
-      if (res.restart) setRestarts((ids) => [...new Set([...ids, id])])
+      const res = v.local ? await api.installHarness(id) : await api.installNodeHarness(v.id, id)
+      if ("restart" in res && res.restart) setRestarts((ids) => [...new Set([...ids, id])])
       if (!res.accepted) {
         const msg = t("shell:runtimeSetup.notAccepted")
         setInstallMessages((ms) => ({ ...ms, [id]: msg }))
@@ -334,8 +375,13 @@ export function NodeHarnesses({
       setInstallMessages((ms) => ({ ...ms, [id]: (e as Error).message }))
     } finally {
       installingRef.current.delete(id)
-      try { await readingLocal.current } catch { /* fresh probe below recovers */ }
+      if (v.local) {
+        try { await readingLocal.current } catch { /* fresh probe below recovers */ }
+      }
       try { await refresh() } catch { /* keep operation and refresh errors visible */ }
+      if (!v.local) {
+        setPending((ids) => ids.filter((item) => item !== id))
+      }
     }
   }
 
@@ -544,6 +590,7 @@ export function NodeHarnesses({
                   localRuntime={localRuntimeById.get(item.id)}
                   updates={showUpdatesChrome ? updates : undefined}
                   policy={policy}
+                  onOpenTab={onOpenTab}
                 />
               ))}
             </div>
@@ -567,15 +614,17 @@ export function NodeHarnesses({
                   item={item}
                   stale={stale}
                   busy={busy}
-                  canManageLocal={canManageLocal}
+                  canManageInstall={canManageInstall}
+                  execAllowed={r?.exec_allowed}
                   installing={pending.includes(item.id) || item.probe?.setup?.state === "installing"}
                   pendingInstall={pending.includes(item.id)}
                   restart={restarts.includes(item.id)}
                   localRuntime={localRuntimeById.get(item.id)}
                   updates={showUpdatesChrome ? updates : undefined}
                   policy={policy}
+                  onOpenTab={onOpenTab}
                   onRefresh={() => void refresh()}
-                  onInstall={() => void installLocal(item.id)}
+                  onInstall={() => void installAdapter(item.id)}
                 />
               ))}
             </div>
@@ -597,10 +646,10 @@ export function NodeHarnesses({
                   <NotInstalledHarnessRow
                     key={item.id}
                     item={item}
-                    canManageLocal={canManageLocal}
+                    canManageInstall={canManageInstall}
                     installing={pending.includes(item.id)}
                     localRuntime={localRuntimeById.get(item.id)}
-                    onInstall={() => void installLocal(item.id)}
+                    onInstall={() => void installAdapter(item.id)}
                   />
                 ))}
               </div>
@@ -677,6 +726,7 @@ function AvailableHarnessCard({
   localRuntime,
   updates,
   policy,
+  onOpenTab,
 }: {
   v: NodeView
   item: MergedNodeHarness
@@ -684,6 +734,7 @@ function AvailableHarnessCard({
   localRuntime?: RRuntime
   updates?: NodeHarnessUpdatesState
   policy: typeof DEFAULT_AUTO_POLICY
+  onOpenTab?: (tab: NodeTab) => void
 }) {
   const t = useT()
   const { probe, update, receipt } = item
@@ -779,6 +830,8 @@ function AvailableHarnessCard({
           requesting={updates.requesting === item.id || updates.requesting === "__all__"}
           disabled={upgradeDisabled}
           retry={!!updates.data?.retryable_unknown?.includes(item.id)}
+          local={v.local}
+          onOpenTab={onOpenTab}
           upgrade={(retry) => void updates.upgrade(update, retry)}
         />
       )}
@@ -801,13 +854,15 @@ function AttentionHarnessCard({
   item,
   stale,
   busy,
-  canManageLocal,
+  canManageInstall,
+  execAllowed,
   installing,
   pendingInstall,
   restart,
   localRuntime,
   updates,
   policy,
+  onOpenTab,
   onRefresh,
   onInstall,
 }: {
@@ -815,13 +870,15 @@ function AttentionHarnessCard({
   item: MergedNodeHarness
   stale: boolean
   busy: boolean
-  canManageLocal: boolean
+  canManageInstall: boolean
+  execAllowed?: boolean
   installing: boolean
   pendingInstall: boolean
   restart: boolean
   localRuntime?: RRuntime
   updates?: NodeHarnessUpdatesState
   policy: typeof DEFAULT_AUTO_POLICY
+  onOpenTab?: (tab: NodeTab) => void
   onRefresh: () => void
   onInstall: () => void
 }) {
@@ -831,8 +888,13 @@ function AttentionHarnessCard({
   const reason = effectiveDegradedReason(item) ?? "probe_unknown"
   const uStatus = receiptStatus(receipt)
   const hasUpdate = update ? Object.keys(updateTargets(update)).length > 0 : false
+  const missingDiag = probe?.missing_command ?? null
 
-  const canInstallLocal = canManageLocal && !!probe?.setup?.can_install && !installing
+  const canInstall = canManageInstall && !!probe?.setup?.can_install && !installing
+  const execDenied =
+    probe?.setup?.blocked_reason === "exec_denied" ||
+    update?.blocked_reason === "exec_denied" ||
+    execAllowed === false
   const upgradeDisabled =
     !updates ||
     !st.owner ||
@@ -842,12 +904,18 @@ function AttentionHarnessCard({
     !!updates.requesting
   const canUpgradeNow = !!update && !!updates && !upgradeDisabled && update.can_upgrade
 
-  const primaryAction = attentionActionFor(item, reason, {
-    canInstallLocal,
-    canUpgrade: canUpgradeNow,
-  })
+  const adapterCliCmd = adapterInstallCliCommand(item, v.local)
   const installCmd = formatInstallCommand(probe?.install_hint)
-  const refreshEnvCmd = probe?.missing_command?.refresh_command?.trim() || null
+  const refreshEnvCmd = missingDiag?.refresh_command?.trim() || null
+
+  const primaryAction = attentionActionFor(item, reason, {
+    canInstall,
+    canUpgrade: canUpgradeNow,
+    hasAdapterInstallCommand: !!adapterCliCmd,
+  })
+
+  const showInstallExecDenied =
+    reason === "adapter_package_missing" && !installing && !canInstall && execDenied && probe?.setup != null
 
   const copyCommand = async (cmd: string | null, kind: "install" | "refresh") => {
     if (!cmd) return
@@ -881,8 +949,30 @@ function AttentionHarnessCard({
     if (installed?.installed) metaParts.push(`${installed.name} ${installed.installed}`)
   }
 
+  const degradedCopy =
+    reason === "adapter_package_missing"
+      ? missingDiag?.adapter_package
+        ? t("devices:harness.degraded.adapter_package_missing_pkg", {
+            name: item.name,
+            pkg: missingDiag.adapter_package,
+          })
+        : missingDiag?.command
+          ? t("devices:harness.degraded.adapter_package_missing_cmd", {
+              name: item.name,
+              cmd: missingDiag.command,
+            })
+          : t("devices:harness.degraded.adapter_package_missing", { name: item.name })
+      : t(`devices:harness.degraded.${reason}`)
+
+  // Avoid showing a duplicate "execution policy disables upgrades" banner directly beneath an
+  // adapter-install card that already explains `exec_denied` and has no pending upgrade/receipt.
+  const suppressDuplicateExecDeniedBanner =
+    showInstallExecDenied && !receipt && !hasUpdate && update?.blocked_reason === "exec_denied"
   const showSeparateUpgradeBanner =
-    !!update && !!updates && (primaryAction !== "upgrade" || !!receipt || !!update.blocked_reason)
+    !!update &&
+    !!updates &&
+    !suppressDuplicateExecDeniedBanner &&
+    (primaryAction !== "upgrade" || !!receipt || !!update.blocked_reason)
 
   return (
     <IntegrationSettings
@@ -921,9 +1011,7 @@ function AttentionHarnessCard({
       <IntegrationSection>
         <div className="flex flex-col gap-2.5">
           <div className="flex flex-col gap-2" data-node-harness-degraded={reason}>
-            <p className="type-footnote text-foreground/90">
-              {t(`devices:harness.degraded.${reason}`)}
-            </p>
+            <p className="type-footnote text-foreground/90">{degradedCopy}</p>
             {installing && (
               <p className="type-footnote text-muted-foreground" role="status" data-harness-installing-status>
                 {t(pendingInstall && localRuntime?.setup?.state !== "installing" ? "shell:runtimeSetup.requesting" : "shell:runtimeSetup.polling")}
@@ -934,24 +1022,78 @@ function AttentionHarnessCard({
                 {t("shell:runtimeSetup.restart")}
               </p>
             )}
-            {probe?.missing_command && (
+            {missingDiag && missingDiag.kind === "adapter_package_missing" && (
               <div
                 className="flex flex-col gap-1.5 rounded-md border border-border/70 bg-muted/40 px-3 py-2 type-footnote"
                 data-node-harness-missing-command
+                data-missing-command-kind={missingDiag.kind}
+              >
+                {missingDiag.cli_service_path ? (
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-muted-foreground">
+                      {t("devices:harness.missingCommand.cliFoundInServicePath")}
+                    </span>
+                    <code className="break-all font-mono text-foreground" data-missing-command-cli-path>
+                      {missingDiag.cli_service_path}
+                    </code>
+                  </div>
+                ) : missingDiag.login_shell_path ? (
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-muted-foreground">
+                      {missingDiag.login_shell
+                        ? t("devices:harness.missingCommand.cliFoundInLoginShellWithShell", {
+                            shell: missingDiag.login_shell,
+                          })
+                        : t("devices:harness.missingCommand.cliFoundInLoginShell")}
+                    </span>
+                    <code className="break-all font-mono text-foreground" data-missing-command-login-path>
+                      {missingDiag.login_shell_path}
+                    </code>
+                  </div>
+                ) : null}
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-muted-foreground">
+                    {t(
+                      missingDiag.adapter_package
+                        ? "devices:harness.missingCommand.missingAdapterPackage"
+                        : "devices:harness.missingCommand.missingAdapterCommand",
+                    )}
+                  </span>
+                  <code className="break-all font-mono text-foreground" data-missing-command-adapter-pkg>
+                    {missingDiag.adapter_package ?? missingDiag.command}
+                  </code>
+                </div>
+                {!canInstall && adapterCliCmd && (
+                  <div className="flex flex-col gap-0.5">
+                    <span className="text-muted-foreground">
+                      {t("devices:harness.missingCommand.installAdapterHint")}
+                    </span>
+                    <code className="break-all font-mono text-foreground" data-missing-command-install-cli>
+                      {adapterCliCmd}
+                    </code>
+                  </div>
+                )}
+              </div>
+            )}
+            {missingDiag && missingDiag.kind === "command_not_in_service_path" && (
+              <div
+                className="flex flex-col gap-1.5 rounded-md border border-border/70 bg-muted/40 px-3 py-2 type-footnote"
+                data-node-harness-missing-command
+                data-missing-command-kind={missingDiag.kind}
               >
                 <div className="flex flex-col gap-0.5">
                   <span className="text-muted-foreground">
-                    {probe.missing_command.login_shell_path
-                      ? probe.missing_command.login_shell
+                    {missingDiag.login_shell_path
+                      ? missingDiag.login_shell
                         ? t("devices:harness.missingCommand.loginShellFoundWithShell", {
-                            shell: probe.missing_command.login_shell,
+                            shell: missingDiag.login_shell,
                           })
                         : t("devices:harness.missingCommand.loginShellFound")
                       : t("devices:harness.missingCommand.loginShellMissing")}
                   </span>
-                  {probe.missing_command.login_shell_path && (
+                  {missingDiag.login_shell_path && (
                     <code className="break-all font-mono text-foreground" data-missing-command-login-path>
-                      {probe.missing_command.login_shell_path}
+                      {missingDiag.login_shell_path}
                     </code>
                   )}
                 </div>
@@ -960,7 +1102,7 @@ function AttentionHarnessCard({
                     {t("devices:harness.missingCommand.servicePath")}
                   </span>
                   <code className="break-all font-mono text-foreground/90" data-missing-command-service-path>
-                    {probe.missing_command.service_path || t("devices:harness.missingCommand.emptyPath")}
+                    {missingDiag.service_path || t("devices:harness.missingCommand.emptyPath")}
                   </code>
                 </div>
                 <div className="flex flex-col gap-0.5">
@@ -968,10 +1110,32 @@ function AttentionHarnessCard({
                     {t("devices:harness.missingCommand.refreshHint")}
                   </span>
                   <code className="break-all font-mono text-foreground" data-missing-command-refresh>
-                    {probe.missing_command.refresh_command}
+                    {missingDiag.refresh_command}
                   </code>
                 </div>
               </div>
+            )}
+            {missingDiag && missingDiag.kind === "both_missing" && (
+              <div
+                className="flex flex-col gap-1.5 rounded-md border border-border/70 bg-muted/40 px-3 py-2 type-footnote"
+                data-node-harness-missing-command
+                data-missing-command-kind={missingDiag.kind}
+              >
+                <span className="text-muted-foreground">
+                  {t("devices:harness.missingCommand.loginShellMissing")}
+                </span>
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-muted-foreground">
+                    {t("devices:harness.missingCommand.servicePath")}
+                  </span>
+                  <code className="break-all font-mono text-foreground/90" data-missing-command-service-path>
+                    {missingDiag.service_path || t("devices:harness.missingCommand.emptyPath")}
+                  </code>
+                </div>
+              </div>
+            )}
+            {showInstallExecDenied && (
+              <ExecDeniedNotice local={v.local} context="install" onOpenTab={onOpenTab} />
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -985,6 +1149,28 @@ function AttentionHarnessCard({
                 >
                   {copiedKey === "refresh" ? <CheckIcon /> : <CopyIcon />}
                   {t(copiedKey === "refresh" ? "devices:harness.action.copiedRefreshEnv" : "devices:harness.action.copyRefreshEnv")}
+                </Button>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={busy || !v.linked || v.state === "pending" || v.state === "revoked"}
+                  onClick={onRefresh}
+                  data-harness-attention-action="refresh"
+                >
+                  {busy ? <Spinner /> : <RefreshCwIcon />}
+                  {t("devices:harness.refresh")}
+                </Button>
+              </>
+            ) : primaryAction === "copy_adapter_install" && adapterCliCmd ? (
+              <>
+                <Button
+                  size="sm"
+                  onClick={() => void copyCommand(adapterCliCmd, "install")}
+                  data-harness-attention-action="copy_adapter_install"
+                  data-harness-install-copy={item.id}
+                >
+                  {copiedKey === "install" ? <CheckIcon /> : <CopyIcon />}
+                  {t(copiedKey === "install" ? "devices:harness.action.copiedInstall" : "devices:harness.action.copyInstall")}
                 </Button>
                 <Button
                   size="sm"
@@ -1018,23 +1204,39 @@ function AttentionHarnessCard({
                 <Spinner />
                 {t("devices:harness.action.installing")}
               </Button>
-            ) : primaryAction === "install" || primaryAction === "retry_install" || (reason === "probe_unknown" && canInstallLocal) ? (
-              <Button
-                size="sm"
-                disabled={installing || !canInstallLocal}
-                onClick={onInstall}
-                data-harness-attention-action={primaryAction === "retry_install" ? "retry_install" : "install"}
-                data-harness-install={item.id}
-              >
-                {installing ? <Spinner /> : <DownloadIcon />}
-                {t(
-                  installing
-                    ? "devices:harness.action.installing"
-                    : primaryAction === "retry_install"
-                      ? "devices:harness.action.retryInstall"
-                      : "devices:harness.action.install",
+            ) : primaryAction === "install" || primaryAction === "retry_install" || (reason === "probe_unknown" && canInstall) ? (
+              <>
+                <Button
+                  size="sm"
+                  disabled={installing || !canInstall}
+                  onClick={onInstall}
+                  data-harness-attention-action={primaryAction === "retry_install" ? "retry_install" : "install"}
+                  data-harness-install={item.id}
+                >
+                  {installing ? <Spinner /> : <DownloadIcon />}
+                  {t(
+                    installing
+                      ? "devices:harness.action.installing"
+                      : primaryAction === "retry_install"
+                        ? "devices:harness.action.retryInstall"
+                        : reason === "adapter_package_missing"
+                          ? "devices:harness.action.installAdapter"
+                          : "devices:harness.action.install",
+                  )}
+                </Button>
+                {reason === "adapter_package_missing" && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={busy || !v.linked || v.state === "pending" || v.state === "revoked"}
+                    onClick={onRefresh}
+                    data-harness-attention-action="refresh"
+                  >
+                    {busy ? <Spinner /> : <RefreshCwIcon />}
+                    {t("devices:harness.refresh")}
+                  </Button>
                 )}
-              </Button>
+              </>
             ) : (
               <Button
                 size="sm"
@@ -1077,6 +1279,8 @@ function AttentionHarnessCard({
           disabled={upgradeDisabled}
           retry={!!updates.data?.retryable_unknown?.includes(item.id)}
           showButton={primaryAction !== "upgrade"}
+          local={v.local}
+          onOpenTab={onOpenTab}
           upgrade={(retry) => void updates.upgrade(update, retry)}
         />
       )}
@@ -1096,13 +1300,13 @@ function AttentionHarnessCard({
 
 function NotInstalledHarnessRow({
   item,
-  canManageLocal,
+  canManageInstall,
   installing,
   localRuntime,
   onInstall,
 }: {
   item: MergedNodeHarness
-  canManageLocal: boolean
+  canManageInstall: boolean
   installing: boolean
   localRuntime?: RRuntime
   onInstall: () => void
@@ -1110,7 +1314,7 @@ function NotInstalledHarnessRow({
   const t = useT()
   const [copied, setCopied] = useState(false)
   const { probe } = item
-  const canInstallLocal = canManageLocal && !!probe?.setup?.can_install
+  const canInstall = canManageInstall && !!probe?.setup?.can_install
   const installCmd = formatInstallCommand(probe?.install_hint)
   const probeDetails = probe
     ? [...new Set([probe.setup?.reason, probe.setup?.error, probe.error, probe.setup?.help].filter(Boolean))]
@@ -1148,7 +1352,7 @@ function NotInstalledHarnessRow({
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1.5">
-          {canInstallLocal ? (
+          {canInstall ? (
             <Button
               size="xs"
               variant="outline"

@@ -34,8 +34,6 @@ src/api/misc.rs	"正常"	1
 src/api/misc.rs	"类型"	1
 src/api/misc.rs	"项目"	1
 src/api/misc.rs	"领域"	1
-src/api/outputs.rs	"分支"	1
-src/api/outputs.rs	"提交"	1
 src/api/outputs/node.rs	"分支"	1
 src/api/outputs/node.rs	"提交"	1
 src/api/sessions.rs	"关联了一个已有会话"	1
