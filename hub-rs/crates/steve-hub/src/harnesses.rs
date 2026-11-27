@@ -276,8 +276,34 @@ impl HubHarnesses {
             linked.extend(svc.registry.linked());
         }
         self.reports.retain_nodes(&linked);
+        let local_id = local.map(|node| node.id().as_str());
         if let Some(node) = local {
-            self.refresh(node, fresh).await;
+            let id = node.id().as_str();
+            if let Some(svc) = svc.filter(|svc| {
+                svc.registry
+                    .linked()
+                    .iter()
+                    .any(|linked_id| linked_id == id)
+            }) {
+                self.reports.bind_model_node(id);
+                let remote = steve_node_api::NodeId::new(id.to_owned())
+                    .ok()
+                    .map(|nid| svc.fleet.remote(&nid));
+                let generation = remote.as_ref().and_then(|r| r.generation());
+                if generation.is_none() {
+                    self.reports.invalidate(id);
+                } else {
+                    let _ = self
+                        .reports
+                        .load(id, Some(node), generation, fresh, true)
+                        .await;
+                    if remote.as_ref().and_then(|r| r.generation()) != generation {
+                        self.reports.invalidate(id);
+                    }
+                }
+            } else {
+                self.refresh(node, fresh).await;
+            }
         } else if let Some(node) = self.reports.model_node() {
             self.reports.invalidate(node);
         }
@@ -286,6 +312,7 @@ impl HubHarnesses {
                 .registry
                 .linked()
                 .into_iter()
+                .filter(|id| Some(id.as_str()) != local_id)
                 .filter_map(|id| {
                     steve_node_api::NodeId::new(id.clone())
                         .ok()

@@ -173,6 +173,7 @@ pub struct OpCx<'a> {
     vars: &'a RefCell<BTreeMap<String, Value>>,
     kept: &'a RefCell<Vec<String>>,
     extra: &'a RefCell<Map<String, Value>>,
+    prepared: &'a RefCell<Value>,
 }
 
 impl OpCx<'_> {
@@ -189,6 +190,11 @@ impl OpCx<'_> {
     /// Adds an extra top-level field to the `apply` response JSON (e.g. `bot` for a newly created bot).
     pub fn set_result(&self, key: &str, value: Value) {
         self.extra.borrow_mut().insert(key.into(), value);
+    }
+
+    /// The pre-transaction payload returned by [`ChangeOp::prepare`] for the current operation.
+    pub fn prepared(&self) -> Value {
+        self.prepared.borrow().clone()
     }
 }
 
@@ -215,6 +221,12 @@ pub fn still_ours(
 
 /// One operation kind (`party.patch`, `org.create`, …).
 pub trait ChangeOp: Send + Sync {
+    /// Performs external I/O or RPC validation *before* opening the SQLite write transaction.
+    /// The returned value is exposed to [`Self::validate`] and [`Self::apply`] via [`OpCx::prepared`].
+    fn prepare(&self, op: &Value) -> ApiResult<Value> {
+        let _ = op;
+        Ok(Value::Null)
+    }
     /// Checks the parameters against the data as it is now (references still exist and are visible).
     fn validate(&self, c: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<()> {
         let _ = (c, cx, op);
@@ -495,6 +507,11 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> ApiResult<Value> {
     if cs.workspace_id != caller.ws || cs.status != "draft" {
         return Err(ApiError::conflict(stale()));
     }
+    let mut prepared_ops = Vec::with_capacity(cs.ops.len());
+    for raw in &cs.ops {
+        let h = op_of(m, raw)?;
+        prepared_ops.push(h.prepare(raw)?);
+    }
     let outcome = m.store.write(|tx| {
         let cs = ChangeSets(tx)
             .get(id)?
@@ -516,6 +533,7 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> ApiResult<Value> {
         let vars = RefCell::new(BTreeMap::new());
         let kept = RefCell::new(Vec::new());
         let extra = RefCell::new(Map::new());
+        let prepared = RefCell::new(Value::Null);
         let cx = OpCx {
             ws: &cs.workspace_id,
             actor: &caller.me,
@@ -523,11 +541,13 @@ pub fn apply(m: &Modules, caller: &Caller, id: &str) -> ApiResult<Value> {
             vars: &vars,
             kept: &kept,
             extra: &extra,
+            prepared: &prepared,
         };
         let mut before = Vec::with_capacity(cs.ops.len());
-        for raw in &cs.ops {
+        for (idx, raw) in cs.ops.iter().enumerate() {
             let op = substitute(raw, &vars.borrow());
             let h = op_of(m, &op)?;
+            *prepared.borrow_mut() = prepared_ops.get(idx).cloned().unwrap_or(Value::Null);
             h.validate(tx, &cx, &op)?;
             let b = h.apply(tx, &cx, &op)?;
             before.push(json!({ "op": op, "before": b }));
@@ -581,6 +601,7 @@ pub fn undo_at(m: &Modules, caller: &Caller, id: &str, at: i64) -> ApiResult<Val
         let vars = RefCell::new(BTreeMap::new());
         let kept = RefCell::new(Vec::new());
         let extra = RefCell::new(Map::new());
+        let prepared = RefCell::new(Value::Null);
         let cx = OpCx {
             ws: &cs.workspace_id,
             actor: &caller.me,
@@ -588,6 +609,7 @@ pub fn undo_at(m: &Modules, caller: &Caller, id: &str, at: i64) -> ApiResult<Val
             vars: &vars,
             kept: &kept,
             extra: &extra,
+            prepared: &prepared,
         };
         for entry in cs.before.iter().flatten().rev() {
             let op = entry.get("op").cloned().unwrap_or(Value::Null);

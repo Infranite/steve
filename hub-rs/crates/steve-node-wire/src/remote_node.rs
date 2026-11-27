@@ -27,6 +27,8 @@ struct Slot {
     /// The Node restarted and the Hub has not caught up yet. A property of the Node, not of one
     /// link: it survives a reconnect until a catch-up on the current link clears it.
     reconciling: bool,
+    /// Capabilities observed from `harness.probe` for the current link generation.
+    capabilities: Option<(u64, Capabilities)>,
 }
 
 pub struct RemoteNode {
@@ -72,6 +74,7 @@ impl RemoteNode {
             return false;
         }
         slot.reconciling |= restarted;
+        slot.capabilities = None;
         let upgrade_only = conn.is_upgrade();
         let old = slot.link.replace(Link {
             conn,
@@ -105,6 +108,7 @@ impl RemoteNode {
         let mut slot = self.slot.lock().unwrap();
         if slot.link.as_ref().map(|l| l.conn.generation()) == Some(generation) {
             let old = slot.link.take();
+            slot.capabilities = None;
             drop(slot);
             if let Some(old) = old {
                 self.link_ended(old);
@@ -221,6 +225,55 @@ impl RemoteNode {
             .as_ref()
             .is_some_and(|l| l.conn.is_upgrade())
     }
+
+    /// Capabilities last observed on the live link generation, if already probed.
+    pub fn cached_capabilities(&self) -> Option<Capabilities> {
+        let slot = self.slot.lock().unwrap();
+        let generation = slot
+            .link
+            .as_ref()
+            .filter(|l| !l.conn.is_closed() && !l.conn.is_upgrade())?
+            .conn
+            .generation();
+        slot.capabilities
+            .as_ref()
+            .filter(|(g, _)| *g == generation)
+            .map(|(_, c)| c.clone())
+    }
+
+    async fn ensure_capabilities(&self) -> ApiResult<Capabilities> {
+        if self.is_colocated() && self.is_upgrade() {
+            return Err(Error::from(NodeReason::local_node_updating(
+                "local service node is in upgrade-only mode",
+            )));
+        }
+        let generation = self.conn(false)?.generation();
+        {
+            let slot = self.slot.lock().unwrap();
+            if let Some((g, c)) = &slot.capabilities
+                && *g == generation
+            {
+                return Ok(c.clone());
+            }
+        }
+        self.probe(false).await
+    }
+
+    fn capability_unavailable(&self, what: &str) -> Error {
+        metrics::counter!(
+            "steve_node_capability_refusals_total",
+            "node" => self.id.to_string(),
+            "capability" => what.to_owned()
+        )
+        .increment(1);
+        if self.is_colocated() {
+            Error::from(NodeReason::local_node_updating(format!(
+                "local service node is updating ({what} unavailable)"
+            )))
+        } else {
+            Error::new(Code::Unsupported, format!("node does not support {what}"))
+        }
+    }
 }
 
 #[async_trait]
@@ -249,12 +302,24 @@ impl SessionExecutor for RemoteNode {
 impl JobExecutor for RemoteNode {
     /// N2: a remote Node runs no jobs (their sandboxing is local-only so far). Refused here,
     /// nothing sent, so the caller may route it elsewhere.
+    /// On a colocated Node, verify negotiated job/research capability before sending so an older
+    /// `jobs: 0` service Node finishing a turn fails fast instead of hanging or rejecting late.
     async fn start_job(&self, c: Command<JobSpec>) -> ApiResult<Receipt> {
         if !self.is_colocated() {
             return Err(Error::new(
                 Code::Unsupported,
                 "jobs do not run on a remote node yet",
             ));
+        }
+        let caps = self.ensure_capabilities().await?;
+        match &c.body.work {
+            JobWork::Think(_) if !caps.supports_jobs() => {
+                return Err(self.capability_unavailable("jobs"));
+            }
+            JobWork::Research(_) if !caps.supports_research() => {
+                return Err(self.capability_unavailable("research jobs"));
+            }
+            _ => {}
         }
         self.cmd(JOB_START, &c, true).await
     }
@@ -364,6 +429,145 @@ impl WorkspaceExecutor for RemoteNode {
         };
         self.go(SCAN_PAGE, &a, None, false).await
     }
+    async fn browse_dir(&self, q: BrowseDirRequest) -> ApiResult<BrowseDirResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host directory browsing is limited to the colocated node",
+            ));
+        }
+        if !self.ensure_capabilities().await?.supports_colocated_host() {
+            return Err(self.capability_unavailable("host.browse_dir"));
+        }
+        self.go(HOST_BROWSE_DIR, &q, None, false).await
+    }
+    async fn describe_dir(&self, q: DescribeDirRequest) -> ApiResult<DescribeDirResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host directory inspection is limited to the colocated node",
+            ));
+        }
+        if !self.ensure_capabilities().await?.supports_colocated_host() {
+            return Err(self.capability_unavailable("host.describe_dir"));
+        }
+        self.go(HOST_DESCRIBE_DIR, &q, None, false).await
+    }
+    async fn path_check(&self, q: PathCheckRequest) -> ApiResult<PathCheckResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host path checks are limited to the colocated node",
+            ));
+        }
+        if !self.ensure_capabilities().await?.supports_colocated_host() {
+            return Err(self.capability_unavailable("host.path_check"));
+        }
+        self.go(HOST_PATH_CHECK, &q, None, false).await
+    }
+    async fn project_setup_preview(
+        &self,
+        q: ProjectSetupPreviewRequest,
+    ) -> ApiResult<ProjectSetupPreview> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host project setup is limited to the colocated node",
+            ));
+        }
+        if !self.ensure_capabilities().await?.supports_colocated_host() {
+            return Err(self.capability_unavailable("host.project_setup_preview"));
+        }
+        self.go(HOST_PROJECT_SETUP_PREVIEW, &q, None, false).await
+    }
+    async fn project_setup_start(
+        &self,
+        c: Command<ProjectSetupRequest>,
+    ) -> ApiResult<ProjectSetupStatus> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host project setup is limited to the colocated node",
+            ));
+        }
+        if !self.ensure_capabilities().await?.supports_colocated_host() {
+            return Err(self.capability_unavailable("host.project_setup_start"));
+        }
+        let op = c.id.clone();
+        self.go(HOST_PROJECT_SETUP_START, &c, Some(&op), true).await
+    }
+    async fn project_setup_status(&self, op: OperationId) -> ApiResult<ProjectSetupStatus> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "host project setup is limited to the colocated node",
+            ));
+        }
+        if !self.ensure_capabilities().await?.supports_colocated_host() {
+            return Err(self.capability_unavailable("host.project_setup_status"));
+        }
+        self.go(HOST_PROJECT_SETUP_STATUS, &op, None, false).await
+    }
+    async fn disk_inspect(&self, q: DiskInspectRequest) -> ApiResult<DiskInspectResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "workspace disk inspection is limited to the colocated node",
+            ));
+        }
+        if !self.ensure_capabilities().await?.supports_colocated_host() {
+            return Err(self.capability_unavailable("workspace.disk_inspect"));
+        }
+        self.go(WORKSPACE_DISK_INSPECT, &q, None, false).await
+    }
+    async fn disk_reclaim(&self, q: DiskReclaimRequest) -> ApiResult<DiskReclaimResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "workspace disk reclamation is limited to the colocated node",
+            ));
+        }
+        if !self.ensure_capabilities().await?.supports_colocated_host() {
+            return Err(self.capability_unavailable("workspace.disk_reclaim"));
+        }
+        self.go(WORKSPACE_DISK_RECLAIM, &q, None, false).await
+    }
+    async fn mcp_stdio_list(&self, server: McpStdioServer) -> ApiResult<Vec<McpStdioTool>> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "stdio MCP hosting is limited to the colocated node",
+            ));
+        }
+        if !self.ensure_capabilities().await?.supports_colocated_host() {
+            return Err(self.capability_unavailable("mcp.stdio_list"));
+        }
+        self.go(MCP_STDIO_LIST, &server, None, false).await
+    }
+    async fn mcp_stdio_call(&self, req: McpStdioCallRequest) -> ApiResult<McpStdioCallResponse> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "stdio MCP hosting is limited to the colocated node",
+            ));
+        }
+        if !self.ensure_capabilities().await?.supports_colocated_host() {
+            return Err(self.capability_unavailable("mcp.stdio_call"));
+        }
+        self.go(MCP_STDIO_CALL, &req, None, false).await
+    }
+    async fn mcp_stdio_sweep(&self, req: McpStdioSweepRequest) -> ApiResult<()> {
+        if !self.is_colocated() {
+            return Err(Error::new(
+                Code::Forbidden,
+                "stdio MCP hosting is limited to the colocated node",
+            ));
+        }
+        if !self.ensure_capabilities().await?.supports_colocated_host() {
+            return Err(self.capability_unavailable("mcp.stdio_sweep"));
+        }
+        self.go(MCP_STDIO_SWEEP, &req, None, false).await
+    }
 }
 
 #[async_trait]
@@ -374,6 +578,10 @@ impl Discovery for RemoteNode {
 
     fn is_upgrade_only(&self) -> bool {
         self.is_upgrade()
+    }
+
+    fn cached_capabilities(&self) -> Option<Capabilities> {
+        RemoteNode::cached_capabilities(self)
     }
 
     async fn set_session_capacity(&self, sessions: u32) -> ApiResult<()> {
@@ -448,14 +656,25 @@ impl Discovery for RemoteNode {
     /// A remote Node runs no jobs and no execs in N2 (their sandboxing is local-only so far): its
     /// capacity for them is reported as zero whatever it says.
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {
-        let mut c: Capabilities = self
-            .go(HARNESS_PROBE, &ProbeArgs { fresh }, None, false)
+        let conn = self.conn(false)?;
+        let generation = conn.generation();
+        let v = conn
+            .call(HARNESS_PROBE, to_value(&ProbeArgs { fresh })?, None)
             .await?;
+        let mut c: Capabilities = answer_of(HARNESS_PROBE, v, None)?;
         if !self.is_colocated() {
             // jobs stay with the Hub; commands as the Node's own policy allows (B4)
             c.capacity.jobs = 0;
-            // secrets are never written to a remote Node's disk
-            c.features.retain(|f| f != FEATURE_SECRET_FILE);
+            // secrets and colocated host/research features are never accepted from a remote Node
+            c.features.retain(|f| {
+                f != FEATURE_SECRET_FILE
+                    && f != FEATURE_COLOCATED_HOST
+                    && f != FEATURE_RESEARCH_JOBS
+            });
+        }
+        let mut slot = self.slot.lock().unwrap();
+        if slot.link.as_ref().map(|l| l.conn.generation()) == Some(generation) {
+            slot.capabilities = Some((generation, c.clone()));
         }
         Ok(c)
     }
@@ -474,6 +693,12 @@ impl Discovery for RemoteNode {
     }
     async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation> {
         self.go(HISTORY_LOCATE, &source, None, false).await
+    }
+    async fn resume_probe(&self, req: ResumeProbeRequest) -> ApiResult<ResumeProbeResponse> {
+        if !self.ensure_capabilities().await?.supports_resume_probe() {
+            return Err(self.capability_unavailable("history.resume_probe"));
+        }
+        self.go(HISTORY_RESUME_PROBE, &req, None, false).await
     }
     async fn vitals(&self) -> ApiResult<NodeVitals> {
         self.go(NODE_VITALS, &serde_json::json!({}), None, false)

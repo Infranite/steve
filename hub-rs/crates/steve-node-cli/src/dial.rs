@@ -309,7 +309,7 @@ pub async fn serve_until_stopped(
     let status = LinkStatus(home.map(|h| h.join(LINK_STATUS)));
     run_until(
         &node,
-        serve_with(node.clone(), None, status, p, id, trust),
+        serve_with(node.clone(), None, status, p, id, trust, true),
         async {
             tokio::select! {
                 r = signal => r,
@@ -400,19 +400,15 @@ pub async fn serve_at(
     trust: &Trust,
 ) -> Result<()> {
     let status = LinkStatus(home.as_ref().map(|h| h.0.join(LINK_STATUS)));
-    serve_with(node, home, status, p, id, trust).await
+    serve_with(node, home, status, p, id, trust, false).await
 }
 
-/// The file in a Node's home that says why its last link to the Hub failed,
-/// `{"at": <ms>, "error": "…"}`; gone once it links. Its Hub reads its own Node's; a remote Node
-/// tells its Hub a fault in a handshake report instead (`tell_hub`).
-pub const LINK_STATUS: &str = "link-status.json";
+pub use steve_node_wire::LINK_STATUS;
 
 /// Why the Node in `home` could not link last, and when (ms): `None` once it linked.
 pub fn link_status(home: &Path) -> Option<(i64, String)> {
-    let v: serde_json::Value =
-        serde_json::from_slice(&std::fs::read(home.join(LINK_STATUS)).ok()?).ok()?;
-    Some((v["at"].as_i64()?, v["error"].as_str()?.to_string()))
+    let bytes = std::fs::read(home.join(LINK_STATUS)).ok()?;
+    steve_node_wire::parse_link_status(&bytes)
 }
 
 /// Where the dial loop notes how linking went ([`LINK_STATUS`]); `None`: nowhere.
@@ -449,6 +445,7 @@ async fn serve_with(
     p: &Pairing,
     id: &Identity,
     trust: &Trust,
+    colocated: bool,
 ) -> Result<()> {
     let known = std::sync::Mutex::new(p.hub_key.as_deref().and_then(key_of));
     // what the next link trusts: a pinned Hub may announce new pins (L4)
@@ -470,7 +467,11 @@ async fn serve_with(
         Some(_) => None,
     };
     let node_id = NodeId::new(p.node_id.clone()).map_err(|_| anyhow!("bad node id"))?;
-    let server = NodeServer::new(Arc::new(node.clone()));
+    let server = if colocated {
+        NodeServer::colocated(Arc::new(node.clone()))
+    } else {
+        NodeServer::new(Arc::new(node.clone()))
+    };
     let mut backoff = Duration::from_millis(200);
     // the fault last told to the Hub, and when
     let mut told: Option<(String, std::time::Instant)> = None;

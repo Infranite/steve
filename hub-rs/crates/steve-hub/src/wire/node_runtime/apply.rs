@@ -38,6 +38,8 @@ type Kept = KeptFacts<HashMap<String, ToolFact>>;
 struct ToolFact {
     name: String,
     category: ToolCategory,
+    #[serde(default)]
+    origin: Option<ToolOrigin>,
     phase: ToolPhase,
 }
 
@@ -54,15 +56,17 @@ impl From<Kept> for AttemptFacts {
             if t.phase == ToolPhase::Failed {
                 f.tool_errors += 1;
             }
-            let bucket = match t.name.strip_prefix("mcp__steve__") {
-                Some(n) => format!("mcp:{n}"),
-                None => serde_json::to_value(t.category)
+            let is_steve = t.origin == Some(ToolOrigin::Steve) || t.category == ToolCategory::Steve;
+            let bucket = if is_steve {
+                format!("mcp:{}", t.name)
+            } else {
+                serde_json::to_value(t.category)
                     .ok()
                     .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_else(|| "other".into()),
+                    .unwrap_or_else(|| "other".into())
             };
             *f.tool_kinds.entry(bucket).or_default() += 1;
-            if !t.name.is_empty() && !t.name.starts_with("mcp__steve__") {
+            if !t.name.is_empty() && !is_steve {
                 *f.tool_kinds.entry(format!("tool:{}", t.name)).or_default() += 1;
             }
         }
@@ -300,6 +304,7 @@ impl NodeRuntime {
                         ToolFact {
                             name: tool.name.clone(),
                             category: tool.category,
+                            origin: Some(tool.origin),
                             phase: tool.phase,
                         },
                     );

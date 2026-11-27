@@ -243,11 +243,11 @@ pub async fn shell(
     let modules = st.optional_modules;
     let harness_names = st
         .cfg
-        .adapters
-        .keys()
+        .harness_ids()
+        .into_iter()
         .map(|id| {
-            let spec = crate::harnesses::adapter_spec(id, st.cfg.declared_adapters.get(id));
-            (id.clone(), spec.name)
+            let spec = crate::harnesses::adapter_spec(&id, st.cfg.declared_adapters.get(&id));
+            (id, spec.name)
         })
         .collect();
     st.read(move |r| {
@@ -313,6 +313,7 @@ struct Summary {
     update: Option<UpdateNotice>,
     thinking: bool,
     hold: Value,
+    local_node_updating: Option<steve_types::devices::LocalNodeUpdating>,
     sessions_running: usize,
     decisions_open: usize,
     devices_online: usize,
@@ -367,6 +368,7 @@ pub async fn summary(
             update: update(&st, owner),
             thinking,
             hold: hold?,
+            local_node_updating: st.nodes.as_ref().and_then(|s| s.local_status.get()),
             sessions_running,
             decisions_open,
             devices_online: facts.devices_online,
@@ -1334,7 +1336,7 @@ pub async fn system_harness_install(
             "installation takes no package, command or destination parameters",
         ));
     }
-    if steve_harness_spec::components(&id).is_empty() || !st.cfg.adapters.contains_key(&id) {
+    if steve_harness_spec::components(&id).is_empty() || !st.cfg.knows_harness(&id) {
         return Err(ApiError::bad_request(
             "only registered built-in harness components can be installed",
         ));

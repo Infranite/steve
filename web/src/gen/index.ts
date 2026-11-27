@@ -76,6 +76,7 @@ export type { KbDocId } from "./KbDocId";
 export type { KbSourceId } from "./KbSourceId";
 export type { KnowledgeEvent } from "./KnowledgeEvent";
 export type { LiveEvent } from "./LiveEvent";
+export type { LocalNodeUpdating } from "./LocalNodeUpdating";
 export type { MailDelivery } from "./MailDelivery";
 export type { MailThreadId } from "./MailThreadId";
 export type { MemberIdentity } from "./MemberIdentity";

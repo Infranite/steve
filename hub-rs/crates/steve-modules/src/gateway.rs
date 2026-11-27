@@ -56,6 +56,8 @@ pub enum GatewayError {
     ToolDenied,
     #[error("网关在 {0} 阶段超时")]
     Timeout(TimeoutPhase),
+    #[error("本机 Node 正在更新，当前回合结束后将自动恢复")]
+    LocalNodeUpdating,
     #[error("模型请求无法启动：{0}")]
     Startup(String),
     #[error("{0}")]

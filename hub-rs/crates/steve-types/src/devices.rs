@@ -13,6 +13,8 @@ reasons! {
         ToolRefused = tool_refused [Internal] (),
         InvalidHarnessUpdateState = invalid_harness_update_state [Conflict] (),
         UpgradeRequired = upgrade_required [Conflict] (),
+        LocalNodeUpdating = local_node_updating [Unavailable] (),
+        DirectoryMissing = directory_missing [NotFound] (),
     }
     retired { }
 }
@@ -560,12 +562,77 @@ impl FileAccessReport {
     }
 }
 
+/// Default worktree disk floor (10 GiB), shared by the Hub's disk policy and the colocated Node.
+pub const DEFAULT_DISK_FLOOR_BYTES: u64 = 10 << 30;
+/// Filename inside `<data>/node/` storing the loopback link config written by `steve-hub`.
+pub const LOCAL_SERVICE_LINK_FILE: &str = "service.json";
+/// Filename inside `<data>/node/` storing the running `steve-node --local-node` PID and version.
+pub const LOCAL_SERVICE_PID_FILE: &str = "service.pid";
+
+fn default_disk_floor_bytes() -> u64 {
+    DEFAULT_DISK_FLOOR_BYTES
+}
+
+/// Typed loopback link configuration written by `steve-hub` (`<data>/node/service.json`)
+/// and read by `steve-node --local-node`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+pub struct LocalServiceLink {
+    pub hub_url: String,
+    pub hub_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hub_key: Option<String>,
+    #[serde(default = "default_disk_floor_bytes")]
+    pub disk_floor: u64,
+}
+
+/// Typed PID and build version record written by `steve-node --local-node`
+/// (`<data>/node/service.pid`).
+///
+/// Format: line 1 is the decimal PID (> 0), optional line 2 is the binary version.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LocalServicePid {
+    pub pid: u32,
+    pub version: Option<String>,
+}
+
+impl LocalServicePid {
+    pub fn parse(text: &str) -> Option<Self> {
+        let mut lines = text.lines();
+        let pid = lines
+            .next()
+            .and_then(|l| l.trim().parse::<u32>().ok())
+            .filter(|p| *p > 0)?;
+        let version = lines
+            .next()
+            .map(|l| l.trim().to_owned())
+            .filter(|v| !v.is_empty());
+        Some(Self { pid, version })
+    }
+
+    pub fn format(&self) -> String {
+        match self.version.as_deref().filter(|v| !v.is_empty()) {
+            Some(version) => format!("{}\n{version}\n", self.pid),
+            None => format!("{}\n", self.pid),
+        }
+    }
+}
+
+/// Status of the colocated local service Node while waiting to replace an older build.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct LocalNodeUpdating {
+    /// Active turns currently finishing on the older local Node before it is replaced.
+    pub running: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, strum::EnumCount)]
 #[serde(tag = "type")]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum DevicesEvent {
     #[serde(rename = "release.hold")]
     ReleaseHold { hold: Option<RawJson> },
+    #[serde(rename = "local_node.updating")]
+    LocalNodeUpdating { updating: Option<LocalNodeUpdating> },
     #[serde(rename = "device")]
     Device { id: DeviceId },
     #[serde(rename = "node")]
@@ -586,6 +653,7 @@ impl DevicesEvent {
     pub fn wire_type(&self) -> &'static str {
         match self {
             Self::ReleaseHold { .. } => "release.hold",
+            Self::LocalNodeUpdating { .. } => "local_node.updating",
             Self::Device { .. } => "device",
             Self::Node { .. } => "node",
             Self::Client { .. } => "client",
@@ -596,7 +664,7 @@ impl DevicesEvent {
 impl DevicesEvent {
     pub fn entity_id(&self) -> Option<&str> {
         match self {
-            Self::ReleaseHold { .. } => None,
+            Self::ReleaseHold { .. } | Self::LocalNodeUpdating { .. } => None,
             Self::Device { id, .. } => Some(id.as_str()),
             Self::Node { id, .. } => Some(id.as_str()),
             Self::Client { id, .. } => Some(id.as_str()),
@@ -1074,5 +1142,44 @@ mod login_shell_path_tests {
         assert!(!shell_supports_interactive_login(Path::new(
             "/opt/homebrew/bin/fish"
         )));
+    }
+
+    #[test]
+    fn local_service_link_and_pid_round_trip() {
+        let link = LocalServiceLink {
+            hub_url: "http://127.0.0.1:18703".into(),
+            hub_id: "hub_test".into(),
+            hub_key: Some("deadbeef".into()),
+            disk_floor: DEFAULT_DISK_FLOOR_BYTES,
+        };
+        let raw = serde_json::to_string(&link).unwrap();
+        assert_eq!(
+            serde_json::from_str::<LocalServiceLink>(&raw).unwrap(),
+            link
+        );
+
+        // Older link file without disk_floor falls back to DEFAULT_DISK_FLOOR_BYTES.
+        let minimal: LocalServiceLink =
+            serde_json::from_str(r#"{"hub_url":"http://127.0.0.1:8443","hub_id":"h1"}"#).unwrap();
+        assert_eq!(minimal.disk_floor, DEFAULT_DISK_FLOOR_BYTES);
+        assert_eq!(minimal.hub_key, None);
+
+        let pid_with_ver = LocalServicePid {
+            pid: 4242,
+            version: Some("0.14.0".into()),
+        };
+        assert_eq!(
+            LocalServicePid::parse(&pid_with_ver.format()),
+            Some(pid_with_ver)
+        );
+        assert_eq!(
+            LocalServicePid::parse("4242\n"),
+            Some(LocalServicePid {
+                pid: 4242,
+                version: None,
+            })
+        );
+        assert_eq!(LocalServicePid::parse("0\n0.14.0\n"), None);
+        assert_eq!(LocalServicePid::parse(""), None);
     }
 }

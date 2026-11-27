@@ -283,6 +283,32 @@ pub struct BuildIdentity {
     pub target: String,
 }
 
+/// One harness whose adapter command could not be found during offline Node preflight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissingAdapter {
+    pub harness: String,
+    pub adapter: String,
+}
+
+/// One JS-based harness whose adapter was found while the Node.js runtime was missing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MissingNode {
+    pub harness: String,
+    pub node: String,
+}
+
+/// Typed harness and Node.js preflight summary produced by `steve-node harness-probe`
+/// (backed by `steve-acp`) and consumed by `steve-hub --check-config`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HarnessPreflight {
+    #[serde(default)]
+    pub missing_adapters: Vec<MissingAdapter>,
+    #[serde(default)]
+    pub missing_node: Vec<MissingNode>,
+    #[serde(default)]
+    pub resolved_adapters: Vec<String>,
+}
+
 /// Maximum number of per-session vitals snapshots reported in a single [`NodeVitals`] payload.
 /// Sessions are sorted descending by `disk_written_bytes + resident_bytes` before truncation.
 pub const MAX_REPORTED_SESSION_VITALS: usize = 64;
@@ -418,9 +444,39 @@ pub struct RootVitals {
     pub inodes_free: Option<u64>,
 }
 
+impl Capabilities {
+    pub fn has_feature(&self, feature: &str) -> bool {
+        self.features.iter().any(|f| f == feature)
+    }
+
+    pub fn supports_jobs(&self) -> bool {
+        self.capacity.jobs > 0
+    }
+
+    pub fn supports_research(&self) -> bool {
+        self.capacity.jobs > 0 && self.has_feature(FEATURE_RESEARCH_JOBS)
+    }
+
+    pub fn supports_colocated_host(&self) -> bool {
+        self.has_feature(FEATURE_COLOCATED_HOST)
+    }
+
+    pub fn supports_resume_probe(&self) -> bool {
+        self.has_feature(FEATURE_RESUME_PROBE)
+    }
+}
+
 /// The Node writes a secret to a temporary file for a command ([`crate::SecretDelivery::File`]).
 /// Only the Hub's own machine offers it; a remote Node's claim is dropped.
 pub const FEATURE_SECRET_FILE: &str = "secret-file";
+/// The Node explicitly opted in to colocated host operations (`host.*`, `workspace.disk_*`,
+/// `mcp.stdio_*`). Only `steve-node --local-node` sets this; remote Nodes never advertise or
+/// serve these methods.
+pub const FEATURE_COLOCATED_HOST: &str = "colocated-host-v1";
+/// The Node implements `history.resume_probe`.
+pub const FEATURE_RESUME_PROBE: &str = "resume-probe-v1";
+/// The Node has research job execution enabled (`JobKind::Research` on `job.start`).
+pub const FEATURE_RESEARCH_JOBS: &str = "research-jobs-v1";
 /// Stage a release on the Node (H→N upgrade-v1 `upgrade_stage`), under `operation`: the Node pulls the archive
 /// `artifact` from the Hub over its link (`blob.fetch`, [`crate::FileAccess::Operation`]), checks
 /// its size and SHA256 and the build identity of what it unpacks, and keeps it next to its current
@@ -584,6 +640,31 @@ pub struct ImportedPage {
     pub events: Vec<NodeEvent>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub next: Option<Cursor>,
+}
+
+/// Ask the Node where a session's working directory and harness transcript stand, plus any
+/// non-default state environment variables needed to resume it in the harness CLI.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeProbeRequest {
+    pub harness: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    pub cwd: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_state_dir: Option<String>,
+    #[serde(default)]
+    pub check_transcript: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResumeProbeResponse {
+    pub cwd_exists: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transcript: Option<HistoryLocation>,
+    /// Explicit `KEY=VALUE` pairs to prepend to the CLI resume/fork command (only when isolated or
+    /// overriding the harness's default state directory).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub state_env: Vec<(String, String)>,
 }
 
 #[cfg(test)]

@@ -352,6 +352,7 @@
   "hub.models.invalid_selection": "Invalid model selection.",
   "hub.node.workspace_conflict": "The workspace preparation changed. The previous directory and history are retained. Choose Continue to create a new session in the current project.",
   "hub.node.workspace_conflict_question": "Could not start the session: The workspace preparation changed. The previous directory and history are retained. Choose Continue to create a new session in the current project.",
+  "hub.node.local_updating": "The local Node is updating and will switch automatically once active turns finish. Please try again shortly.",
   "hub.preflight.harness_not_ready": "%{harness} is not installed, not ready or not signed in on any device, so it cannot run now. Install it or sign it in on the device itself (Steve uses the harness's own sign-in there), then check the Devices page.",
   "hub.handoff.no_eligible_session": "This item has no session eligible for handoff yet",
   "hub.handoff.readonly_session": "Read-only or externally imported sessions cannot be handed off",

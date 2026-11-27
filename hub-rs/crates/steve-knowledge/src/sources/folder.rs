@@ -1,13 +1,13 @@
-//! Folder sources: a Markdown / text folder on the Hub (a wiki, an Obsidian
+//! Folder sources: a Markdown / text folder on a Node (a wiki, an Obsidian
 //! vault), scanned every 10 minutes and on demand, read only, never written back.
 //!
-//! - [`check_path`]: the whitelist-style path check, `400 这个目录不能加入知识库：<原因>`;
+//! - [`check_path_probe`] / [`check_path_probe_for_role`]: the single Node-probed whitelist path
+//!   check, `400 这个目录不能加入知识库：<原因>`;
 //! - [`sync`]: one scan: walk ([`crate::scan`]), reconcile the documents by `(mtime, size)`, index
 //!   the changed ones through [`index::run_batch`] (which compares `sha256` after reading);
 //! - [`FolderLoader`]: reads one file for the index, re-checking that it is still inside the root;
 //! - [`spawn_scans`]: the `kb.folder_scan` job, started by the integrator;
-//! - through a Node when the Hub wires one ([`super::folder_node`]): the Node walks and reads, the
-//!   rest stays here;
+//! - through a Node ([`super::folder_node`]): the Node probes, walks and reads, the rest stays here;
 //! - the source writes (`POST/PATCH/DELETE /kb/sources`, `POST /kb/sources/:id/sync`).
 
 use std::collections::{HashMap, HashSet};
@@ -24,7 +24,7 @@ use steve_store::{Result, StoreError, W, uid};
 
 use crate::extract_text::{self, ExtractError, Format, FrontMatter};
 use crate::index::{self, BATCH, BoxFuture, DocLoader, Loaded};
-use crate::scan::{self, MAX_FILE_BYTES, Rules};
+use crate::scan;
 use crate::service;
 use crate::sources::folder_node::{self, NodeFolders, NodeRead};
 use crate::sources::{is_builtin, source_json};
@@ -90,19 +90,22 @@ impl FolderPolicy {
     }
 }
 
-/// The path rules for a knowledge folder. Returns the canonical directory, or the reason it is
-/// refused (in the request's language: zh-CN in the background scan, which stores it).
-/// Overlap with existing folder sources is [`overlap`].
-pub fn check_path(policy: &FolderPolicy, raw: &str) -> std::result::Result<PathBuf, String> {
-    check_path_for_role(policy, raw, SourceRole::Knowledge)
-}
-
-/// Path rules parameterized by [`SourceRole`]: `$STEVE_HOME/context` (and its per-workspace
-/// directory) is permitted ONLY for `SourceRole::Memory` sources, while `$STEVE_HOME` itself and
-/// every other internal subdirectory remain strictly refused.
-pub fn check_path_for_role(
+/// Policy check on a Node-supplied [`steve_node_api::PathCheckResponse`] without touching local disk.
+pub fn check_path_probe(
     policy: &FolderPolicy,
     raw: &str,
+    probe: &steve_node_api::PathCheckResponse,
+) -> std::result::Result<PathBuf, String> {
+    check_path_probe_for_role(policy, raw, probe, SourceRole::Knowledge)
+}
+
+/// Node-probe path rules parameterized by [`SourceRole`]: `$STEVE_HOME/context` (and its
+/// per-workspace directory) is permitted ONLY for `SourceRole::Memory` sources, while
+/// `$STEVE_HOME` itself and every other internal subdirectory remain strictly refused.
+pub fn check_path_probe_for_role(
+    policy: &FolderPolicy,
+    raw: &str,
+    probe: &steve_node_api::PathCheckResponse,
     role: SourceRole,
 ) -> std::result::Result<PathBuf, String> {
     let p = Path::new(raw.trim());
@@ -112,14 +115,25 @@ pub fn check_path_for_role(
     if p.components().any(|c| matches!(c, Component::ParentDir)) {
         return Err(steve_i18n::t!("knowledge.folder.parent_dir"));
     }
-    let meta = match std::fs::metadata(p) {
-        Ok(m) => m,
-        Err(_) => return Err(steve_i18n::t!("knowledge.folder.missing")),
-    };
-    if !meta.is_dir() {
+    if !probe.exists {
+        return Err(steve_i18n::t!("knowledge.folder.missing"));
+    }
+    if !probe.is_dir {
         return Err(steve_i18n::t!("knowledge.folder.not_dir"));
     }
-    let c = std::fs::canonicalize(p).map_err(|_| steve_i18n::t!("knowledge.folder.missing"))?;
+    let c = probe
+        .canonical
+        .as_deref()
+        .map(PathBuf::from)
+        .ok_or_else(|| steve_i18n::t!("knowledge.folder.missing"))?;
+    check_canonical_policy(policy, c, role)
+}
+
+fn check_canonical_policy(
+    policy: &FolderPolicy,
+    c: PathBuf,
+    role: SourceRole,
+) -> std::result::Result<PathBuf, String> {
     if c.parent().is_none() {
         return Err(steve_i18n::t!("knowledge.folder.root"));
     }
@@ -149,6 +163,104 @@ pub fn check_path_for_role(
         return Err(outside_home());
     }
     Ok(c)
+}
+
+/// Probes `raw` asynchronously via the wired [`folder_node::FolderPlaces`] Node boundary without
+/// touching Hub local disk or blocking a SQLite transaction.
+pub(crate) async fn probe_path(
+    kb: &Knowledge,
+    raw: &str,
+) -> ApiResult<steve_node_api::PathCheckResponse> {
+    let places = kb
+        .folder_nodes()
+        .places()
+        .ok_or_else(|| ApiError::rule(folder_node::OFFLINE))?
+        .clone();
+    places
+        .check_path(raw)
+        .await
+        .map_err(|u| ApiError::rule(folder_node::unplaced(&u)))?
+        .ok_or_else(|| ApiError::rule(folder_node::OFFLINE))
+}
+
+/// Probes `raw` via the wired [`folder_node::FolderPlaces`] Node boundary without touching Hub
+/// local disk. Callers must invoke this *before* opening a SQLite write transaction.
+pub(crate) fn probe_path_sync(
+    kb: &Knowledge,
+    raw: &str,
+) -> ApiResult<steve_node_api::PathCheckResponse> {
+    let kb = kb.clone();
+    let path = raw.to_string();
+    let fut = async move { probe_path(&kb, &path).await };
+    match tokio::runtime::Handle::try_current() {
+        Ok(h) if h.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| h.block_on(fut))
+        }
+        Ok(_) => std::thread::spawn(move || {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("probe runtime")
+                .block_on(fut)
+        })
+        .join()
+        .map_err(|_| ApiError::Internal("path probe thread panicked".into()))?,
+        Err(_) => tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| ApiError::Internal(e.to_string()))?
+            .block_on(fut),
+    }
+}
+
+fn check_raw_syntax(raw: &str) -> std::result::Result<&str, String> {
+    let trimmed = raw.trim();
+    let p = Path::new(trimmed);
+    if trimmed.is_empty() || !p.is_absolute() {
+        return Err(steve_i18n::t!("knowledge.folder.need_absolute"));
+    }
+    if p.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(steve_i18n::t!("knowledge.folder.parent_dir"));
+    }
+    Ok(trimmed)
+}
+
+/// Validates `raw` asynchronously for `role` through the single Node-probed path policy.
+pub(crate) async fn check_path_via_node_async(
+    kb: &Knowledge,
+    raw: &str,
+    role: SourceRole,
+) -> ApiResult<std::result::Result<PathBuf, String>> {
+    let trimmed = match check_raw_syntax(raw) {
+        Ok(t) => t,
+        Err(why) => return Ok(Err(why)),
+    };
+    let probe = probe_path(kb, trimmed).await?;
+    Ok(check_path_probe_for_role(
+        kb.folder_policy(),
+        trimmed,
+        &probe,
+        role,
+    ))
+}
+
+/// Validates `raw` for `role` through the single Node-probed path policy (must run outside write tx).
+pub(crate) fn check_path_via_node(
+    kb: &Knowledge,
+    raw: &str,
+    role: SourceRole,
+) -> ApiResult<std::result::Result<PathBuf, String>> {
+    let trimmed = match check_raw_syntax(raw) {
+        Ok(t) => t,
+        Err(why) => return Ok(Err(why)),
+    };
+    let probe = probe_path_sync(kb, trimmed)?;
+    Ok(check_path_probe_for_role(
+        kb.folder_policy(),
+        trimmed,
+        &probe,
+        role,
+    ))
 }
 
 /// The cloud-drive folders of `~/Library` (iCloud Drive, Dropbox, OneDrive, Google Drive …): a
@@ -315,45 +427,7 @@ pub async fn load_bytes(format: Format, bytes: Vec<u8>) -> Loaded {
     }
 }
 
-enum Read {
-    Bytes(Vec<u8>),
-    Gone,
-    TooBig,
-    Refused(&'static str),
-}
-
-/// Reads `root/rel` only if it still resolves inside `root`.
-fn read_inside(root: &Path, rel: &str) -> Read {
-    let rp = Path::new(rel);
-    if rp.is_absolute() || rp.components().any(|c| !matches!(c, Component::Normal(_))) {
-        return Read::Refused(OUTSIDE);
-    }
-    let Ok(root) = std::fs::canonicalize(root) else {
-        return Read::Refused("找不到这个文件夹");
-    };
-    let target = match std::fs::canonicalize(root.join(rp)) {
-        Ok(t) => t,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Read::Gone,
-        Err(_) => return Read::Refused("文件读不出来"),
-    };
-    if !target.starts_with(&root) {
-        return Read::Refused(OUTSIDE);
-    }
-    match std::fs::metadata(&target) {
-        Ok(m) if !m.is_file() => return Read::Gone,
-        Ok(m) if m.len() > MAX_FILE_BYTES => return Read::TooBig,
-        Ok(_) => {}
-        Err(_) => return Read::Gone,
-    }
-    match std::fs::read(&target) {
-        Ok(b) if b.len() as u64 > MAX_FILE_BYTES => Read::TooBig,
-        Ok(b) => Read::Bytes(b),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Read::Gone,
-        Err(_) => Read::Refused("文件读不出来"),
-    }
-}
-
-/// Reads folder files for the index queue (through the folder's Node when one is wired).
+/// Reads folder files for the index queue through the folder's Node.
 pub struct FolderLoader {
     pub(crate) nodes: Arc<NodeFolders>,
 }
@@ -368,32 +442,16 @@ impl DocLoader for FolderLoader {
         doc: &'a DocRow,
         source: &'a SourceRow,
     ) -> BoxFuture<'a, Loaded> {
-        let root = folder_root(source);
         let rel = doc.r#ref.clone();
         let mime = doc.mime.clone();
         Box::pin(async move {
             match self.nodes.load(&source.id, &doc.id, &rel).await {
-                NodeRead::Hub => {}
-                NodeRead::Bytes(b) => return load_bytes(format_of(&mime, &rel, &b), b).await,
-                NodeRead::Gone => return Loaded::Gone,
-                NodeRead::TooBig => return Loaded::Skipped(TOO_BIG.into()),
-                NodeRead::Refused(why) => return Loaded::Failed(why.into()),
-                NodeRead::Changed => return Loaded::Retry { now: true },
-                NodeRead::Offline | NodeRead::Unsettled => return Loaded::Retry { now: false },
-            }
-            let Some(root) = root else {
-                return Loaded::Failed("这个来源没有设置文件夹".into());
-            };
-            let r2 = rel.clone();
-            let read = match tokio::task::spawn_blocking(move || read_inside(&root, &r2)).await {
-                Ok(r) => r,
-                Err(_) => return Loaded::Failed("文件读不出来".into()),
-            };
-            match read {
-                Read::Bytes(b) => load_bytes(format_of(&mime, &rel, &b), b).await,
-                Read::Gone => Loaded::Gone,
-                Read::TooBig => Loaded::Skipped(TOO_BIG.into()),
-                Read::Refused(why) => Loaded::Failed(why.into()),
+                NodeRead::Bytes(b) => load_bytes(format_of(&mime, &rel, &b), b).await,
+                NodeRead::Gone => Loaded::Gone,
+                NodeRead::TooBig => Loaded::Skipped(TOO_BIG.into()),
+                NodeRead::Refused(why) => Loaded::Failed(why.into()),
+                NodeRead::Changed => Loaded::Retry { now: true },
+                NodeRead::Offline | NodeRead::Unsettled => Loaded::Retry { now: false },
             }
         })
     }
@@ -583,42 +641,33 @@ async fn run(
 ) -> std::result::Result<(SyncReport, Value), String> {
     let root = folder_root(src).ok_or("这个来源没有设置文件夹")?;
     let include = scan_include(kb.folder_policy(), &root, str_list(&src.config, "include"));
-    let rules = Rules::new(include.clone(), str_list(&src.config, "exclude"));
-    let place = match kb.folder_nodes().places() {
-        Some(p) => p
-            .place(&src.id, true)
-            .await
-            .map_err(|u| folder_node::unplaced(&u))?,
-        None => None,
-    };
+    let places = kb
+        .folder_nodes()
+        .places()
+        .ok_or_else(|| folder_node::OFFLINE.to_string())?;
+    let place = places
+        .place(&src.id, true)
+        .await
+        .map_err(|u| folder_node::unplaced(&u))?
+        .ok_or_else(|| folder_node::OFFLINE.to_string())?;
     let policy = kb.folder_policy().clone();
     let role = src.role;
-    let walk_here = place.is_none();
-    let walked = tokio::task::spawn_blocking(move || {
-        // The stored path was canonical and allowed; it must still be both (a link may have moved).
-        let c =
-            check_path_for_role(&policy, &root.to_string_lossy(), role).map_err(|r| refusal(&r))?;
-        if c != root {
-            return Err("文件夹的位置变了（路径经过的链接指向了别处），请重新添加".to_string());
+    let root_str = root.to_string_lossy().into_owned();
+    let canonical = match places
+        .check_path(&root_str)
+        .await
+        .map_err(|u| folder_node::unplaced(&u))?
+    {
+        Some(probe) => {
+            check_path_probe_for_role(&policy, &root_str, &probe, role).map_err(|r| refusal(&r))?
         }
-        if !walk_here {
-            return Ok(None);
-        }
-        scan::walk(&root, &rules)
-            .map(Some)
-            .map_err(|e| format!("文件夹读不出来：{e}"))
-    })
-    .await
-    .map_err(|_| "扫描文件夹时出错".to_string())??;
-    // through the Node: every page read, or nothing is touched
-    let (walked, versions) = match (walked, place) {
-        (Some(w), _) => (w, None),
-        (None, Some(place)) => {
-            let s = folder_node::scan(&place, include, str_list(&src.config, "exclude")).await?;
-            (s.walk, Some(s.versions))
-        }
-        (None, None) => return Err("扫描文件夹时出错".to_string()),
+        None => return Err(folder_node::OFFLINE.to_string()),
     };
+    if canonical != root {
+        return Err("文件夹的位置变了（路径经过的链接指向了别处），请重新添加".to_string());
+    }
+    let scanned = folder_node::scan(&place, include, str_list(&src.config, "exclude")).await?;
+    let (walked, versions) = (scanned.walk, Some(scanned.versions));
 
     let now = m.clock.now();
     let mut rep = SyncReport {
@@ -889,7 +938,7 @@ pub struct SourceBody {
 
 /// A folder source that passed the request and path checks, ready to insert. Shared by
 /// `POST /kb/sources` and the `kb.source.create` draft operation.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, Deserialize)]
 pub struct NewFolder {
     pub name: String,
     /// Canonical.
@@ -902,9 +951,7 @@ pub struct NewFolder {
     pub write_mode: WriteMode,
 }
 
-/// Checks a `POST /kb/sources` body: fields (`400 参数不对`) and the path rules
-/// (`400 这个目录不能加入知识库：<原因>`). Overlap and scopes are checked by [`insert_folder`].
-pub fn check_new(policy: &FolderPolicy, b: &SourceBody) -> ApiResult<NewFolder> {
+fn validate_new_fields(b: &SourceBody) -> ApiResult<(SourceRole, WriteMode)> {
     let mut ck = Check::new();
     ck.one_of("kind", &b.kind, &["folder"])
         .len("name", b.name.trim(), 1, 40)
@@ -912,14 +959,24 @@ pub fn check_new(policy: &FolderPolicy, b: &SourceBody) -> ApiResult<NewFolder> 
     check_patterns(&mut ck, "include", b.include.as_ref(), 20);
     check_patterns(&mut ck, "exclude", b.exclude.as_ref(), 50);
     ck.done()?;
-    let role = b.role.unwrap_or(SourceRole::Knowledge);
-    let write_mode = b.write_mode.unwrap_or(WriteMode::ReadOnly);
-    let path = check_path_for_role(policy, &b.path, role).map_err(|r| refused(&r))?;
+    Ok((
+        b.role.unwrap_or(SourceRole::Knowledge),
+        b.write_mode.unwrap_or(WriteMode::ReadOnly),
+    ))
+}
+
+fn finish_new(
+    kb: &Knowledge,
+    b: &SourceBody,
+    path: PathBuf,
+    role: SourceRole,
+    write_mode: WriteMode,
+) -> ApiResult<NewFolder> {
     let include = match &b.include {
         Some(i) if !i.is_empty() => i.clone(),
         _ => default_include(),
     };
-    check_cloud_include(policy, &path, &include)?;
+    check_cloud_include(kb.folder_policy(), &path, &include)?;
     Ok(NewFolder {
         name: b.name.trim().to_string(),
         path,
@@ -930,6 +987,25 @@ pub fn check_new(policy: &FolderPolicy, b: &SourceBody) -> ApiResult<NewFolder> 
         role,
         write_mode,
     })
+}
+
+/// Async counterpart of [`check_new`] for HTTP handlers so Node RPC runs before any blocking pool
+/// thread or SQLite transaction is entered.
+pub async fn check_new_async(kb: &Knowledge, b: &SourceBody) -> ApiResult<NewFolder> {
+    let (role, write_mode) = validate_new_fields(b)?;
+    let path = check_path_via_node_async(kb, &b.path, role)
+        .await?
+        .map_err(|r| refused(&r))?;
+    finish_new(kb, b, path, role, write_mode)
+}
+
+/// Checks a `POST /kb/sources` body: fields (`400 参数不对`) and the single Node-probed path rules
+/// (`400 这个目录不能加入知识库：<原因>`). Overlap and scopes are checked by [`insert_folder`].
+/// Must be called outside any SQLite write transaction.
+pub fn check_new(kb: &Knowledge, b: &SourceBody) -> ApiResult<NewFolder> {
+    let (role, write_mode) = validate_new_fields(b)?;
+    let path = check_path_via_node(kb, &b.path, role)?.map_err(|r| refused(&r))?;
+    finish_new(kb, b, path, role, write_mode)
 }
 
 fn default_include() -> Vec<String> {
@@ -992,16 +1068,21 @@ pub fn insert_folder(
         .ok_or_else(|| ApiError::not_found(NOUN_SOURCE))
 }
 
-/// Creates a folder source after the checks. The caller then starts its first scan.
-pub fn create(m: &Modules, kb: &Knowledge, who: &Caller, b: SourceBody) -> ApiResult<SourceRow> {
-    let f = check_new(kb.folder_policy(), &b)?;
+/// Inserts an already Node-probed [`NewFolder`] in a single write transaction.
+pub fn create_checked(m: &Modules, who: &Caller, f: &NewFolder) -> ApiResult<SourceRow> {
     service::prepare(m, who)?;
     let now = m.clock.now();
     m.store.write(|tx| {
-        let s = insert_folder(tx, &who.ws, &who.me, &f, now)?;
+        let s = insert_folder(tx, &who.ws, &who.me, f, now)?;
         crate::state::emit_change(tx, &who.ws, &s.id);
         Ok(s)
     })
+}
+
+/// Creates a folder source after the checks. The caller then starts its first scan.
+pub fn create(m: &Modules, kb: &Knowledge, who: &Caller, b: SourceBody) -> ApiResult<SourceRow> {
+    let f = check_new(kb, &b)?;
+    create_checked(m, who, &f)
 }
 
 /// `403` for a visibility or level change of a built-in source by anyone but the owner.
@@ -1278,11 +1359,17 @@ mod tests {
             PathBuf::from("/srv/demo"),
             PathBuf::from("/srv/demo/.steve"),
         );
-        let zh = check_path(&p, "relative").map_err(|r| refusal(&r));
+        let missing = steve_node_api::PathCheckResponse {
+            exists: false,
+            is_dir: false,
+            writable: false,
+            canonical: None,
+        };
+        let zh = check_path_probe(&p, "relative", &missing).map_err(|r| refusal(&r));
         assert_eq!(zh, Err("这个目录不能加入知识库：需要绝对路径".into()));
         let en = steve_i18n::scope(steve_i18n::EN, async {
             (
-                check_path(&p, "relative").map_err(|r| refusal(&r)),
+                check_path_probe(&p, "relative", &missing).map_err(|r| refusal(&r)),
                 refusal(&outside_home()),
                 owner_only(),
             )
@@ -1300,5 +1387,33 @@ mod tests {
             "You can only add folders in your home folder or on an external disk"
         );
         assert_eq!(en.2, "Only the workspace owner can change built-in sources");
+    }
+
+    #[test]
+    fn check_path_probe_for_role_permits_context_only_for_memory() {
+        let p = FolderPolicy::new(
+            PathBuf::from("/srv/demo"),
+            PathBuf::from("/srv/demo/.steve"),
+        );
+        let ctx = "/srv/demo/.steve/context";
+        let probe = steve_node_api::PathCheckResponse {
+            exists: true,
+            is_dir: true,
+            writable: true,
+            canonical: Some(ctx.into()),
+        };
+        assert_eq!(
+            check_path_probe_for_role(&p, ctx, &probe, SourceRole::Memory),
+            Ok(PathBuf::from(ctx))
+        );
+        assert!(check_path_probe_for_role(&p, ctx, &probe, SourceRole::Knowledge).is_err());
+        let data = "/srv/demo/.steve/data";
+        let data_probe = steve_node_api::PathCheckResponse {
+            exists: true,
+            is_dir: true,
+            writable: true,
+            canonical: Some(data.into()),
+        };
+        assert!(check_path_probe_for_role(&p, data, &data_probe, SourceRole::Memory).is_err());
     }
 }

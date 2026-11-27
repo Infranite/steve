@@ -46,6 +46,8 @@ use steve_store::knowledge::{
 use steve_store::testkit::knowledge as fixture;
 use steve_store::{DecisionRows, ModelUsage, StoreError, Tokens};
 
+mod support;
+
 struct Env {
     env: TestEnv,
     kb: Knowledge,
@@ -62,6 +64,7 @@ fn setup() -> Env {
     let steve_home = home.join("steve_home");
     let kb = Knowledge::new(|_| {});
     kb.set_folder_policy(FolderPolicy::new(&home, &steve_home));
+    assert!(kb.set_folder_places(support::TestDiskRouter::new(env.store().clone())));
     fixture::seed_delivery(env.store()).expect("seed");
     Env {
         env,

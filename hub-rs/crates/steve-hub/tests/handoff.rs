@@ -203,8 +203,12 @@ for raw in sys.stdin:
         send({"id": mid, "result": {}})
 "#;
 
+#[path = "support/local_node.rs"]
+mod local_node;
+
 struct HubEnv {
     _home: tempfile::TempDir,
+    _local_node: Option<local_node::AttachedLocalNode>,
     ctrl: PathBuf,
     app: Router,
     cookie: String,
@@ -294,7 +298,7 @@ impl HubEnv {
             ("STEVE_REPO", "/nonexistent".into()),
             ("STEVE_VAULT_KEYSTORE", "file".into()),
             ("STEVE_FORBID_REAL_HOSTS", "1".into()),
-            ("STEVE_NODE_MODE", "local".into()),
+            ("STEVE_LOCAL_NODE_PORT", "0".into()),
             ("CLAUDE_CODE_EXECUTABLE", "/usr/bin/false".into()),
             ("STEVE_ADAPTER_CLAUDE", "/usr/bin/false".into()),
             ("STEVE_ADAPTER_CODEX", "/usr/bin/false".into()),
@@ -319,11 +323,10 @@ impl HubEnv {
             Default::default(),
         )));
         let w = steve_hub::wire::wire_with(&cfg, &bus, Arc::new(get.clone())).expect("wire");
+        let local_node = local_node::attach(&w, &cfg, &vars).await;
         let st = AppState::new(cfg.clone(), w.backend, w.domain, bus).with_modules(w.modules);
         steve_hub::app::boot(&st).await.expect("boot");
-        for job in w.jobs {
-            job.start(&st.jobs);
-        }
+        local_node::start_jobs(w.jobs, &st.jobs);
         let app = steve_hub::app::app(st, w.auth, w.mcp, w.module_routes, w.root_routes);
 
         let peer = SocketAddr::from(([127, 0, 0, 1], port));
@@ -351,6 +354,7 @@ impl HubEnv {
         let store = Store::open(&db, NoPublisher).expect("open store");
         HubEnv {
             _home: home,
+            _local_node: local_node,
             ctrl,
             app,
             cookie,

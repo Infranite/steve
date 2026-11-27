@@ -103,7 +103,7 @@ pub use crate::harnesses::{Harness, HarnessModel, HarnessSource};
 /// The display name of a harness id as declared or built in (`claude-code` → `Claude Code`);
 /// unknown ids as they are. [`Models::harness_name`] knows the adapters the Hub declares too.
 pub fn harness_name(h: &str) -> String {
-    steve_acp::adapters::spec(h, None).name
+    steve_harness_spec::spec(h, None).name
 }
 
 /// The Chinese label of a canonical [`ReasoningEffort`] (used in model-facing config prompts).

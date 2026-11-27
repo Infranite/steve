@@ -700,6 +700,10 @@ impl Core {
         let (reply_text, failed) = match r {
             Ok(t) if !t.trim().is_empty() => (t, false),
             Ok(_) => (format!("（没能生成回答。{FIX_MODEL}）"), true),
+            Err(steve_modules::gateway::GatewayError::LocalNodeUpdating) => (
+                steve_i18n::stored(|| steve_i18n::t!("core.node.local_updating")),
+                true,
+            ),
             Err(e) if e.can_handoff() => (handoff::NEEDS_TOOLS_HERE.to_string(), true),
             Err(e) => (
                 format!(

@@ -261,6 +261,22 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
     fixtures.insert("release.hold-full.json".to_owned());
     devicesevent.insert("release.hold");
     check(
+        DevicesEvent::LocalNodeUpdating { updating: None },
+        "local_node.updating",
+        Scope::Hub,
+    );
+    fixtures.insert("local_node.updating.json".to_owned());
+    devicesevent.insert("local_node.updating");
+    check(
+        DevicesEvent::LocalNodeUpdating {
+            updating: Some(devices::LocalNodeUpdating { running: 2 }),
+        },
+        "local_node.updating-full",
+        Scope::Hub,
+    );
+    fixtures.insert("local_node.updating-full.json".to_owned());
+    devicesevent.insert("local_node.updating");
+    check(
         ConfigEvent::Bot {
             id: "entity-1".into(),
             ws: "workspace-a".into(),

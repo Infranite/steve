@@ -62,6 +62,14 @@ pub trait NodeGit: Send + Sync {
     fn on_node(&self, item: &str) -> bool;
     /// The facts `q` asks for in the item's workspace; `offline` when its Node is not there.
     async fn facts(&self, item: &str, q: Ask) -> na::ApiResult<na::GitFacts>;
+    /// The facts `q` asks for in a project's repository on its Node (used when an item's
+    /// dedicated worktree has been tidied or when verifying commits in a shared repository).
+    async fn project_facts(&self, _project_id: &str, _q: Ask) -> na::ApiResult<na::GitFacts> {
+        Err(na::Error::new(
+            na::Code::Invalid,
+            "project git facts unavailable",
+        ))
+    }
     /// Applies `action` in the item's workspace on the facts `on`, through the Hub's ledger as
     /// `operation` for `subject`, and waits for its end.
     async fn apply(
@@ -77,6 +85,10 @@ pub trait NodeGit: Send + Sync {
 /// What the core asks about an item's worktree in one gathering.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct Want {
+    /// The item's workspace path (`items.cwd`), so facts gathered before `cwd` changed (including
+    /// `Ok(None)` when the previous path was not a git checkout) are never reused for a different
+    /// checkout.
+    pub cwd: Option<String>,
     /// The frozen fingerprint a change is described against.
     pub frozen: Option<String>,
     /// The item's branch, for whether there is anything to release.
@@ -106,7 +118,9 @@ pub(crate) type Gathered = std::result::Result<Option<Seen>, String>;
 /// The git facts of one item.
 #[derive(Debug, Default)]
 pub(crate) struct Slot {
-    last: Option<Gathered>,
+    /// The target (`Want`) alongside its gathered result so even `Ok(None)` ("no git checkout")
+    /// or `Err(_)` is invalidated whenever `cwd`, `branch`, or the frozen fingerprint changes.
+    last: Option<(Want, Gathered)>,
     /// Not yet decided on.
     fresh: bool,
     /// The critical section that took them (it may read them again).
@@ -374,40 +388,55 @@ impl Core {
             let want = t.git_want(&i);
             let s = t.st.git.entry(item.into()).or_default();
             s.asked += 1;
+            s.running = Some((s.asked, now(), want.clone()));
             (s.asked, want)
         };
         let Some(got) = block_on(async {
-            tokio::time::timeout(GATHER_DEADLINE, gather(&*port, item, want))
+            tokio::time::timeout(GATHER_DEADLINE, gather(&*port, item, want.clone()))
                 .await
                 .unwrap_or_else(|_| Err("timed out".into()))
         }) else {
+            let mut t = self.tx();
+            if let Some(s) = t.st.git.get_mut(item)
+                && s.running.as_ref().is_some_and(|(a, _, _)| *a == ask)
+            {
+                s.running = None;
+            }
             return;
         };
         let mut t = self.tx();
         let s = t.st.git.entry(item.into()).or_default();
+        if s.running.as_ref().is_some_and(|(a, _, _)| *a == ask) {
+            s.running = None;
+        }
         /* only the newest ask makes them fresh; a gathering of an older one still running stays */
         if s.asked == ask {
-            s.last = Some(got);
+            s.last = Some((want, got));
             s.fresh = true;
         }
     }
 
     /// A gathering came back: kept, and the closing it was for is checked again (with the
     /// release reports that waited for it). One asked for meanwhile runs now.
-    pub(crate) fn git_arrived(&self, item: &str, ask: u64, got: Gathered) {
+    pub(crate) fn git_arrived(&self, item: &str, ask: u64, want: Want, got: Gathered) {
         let mut t = self.tx();
         let s = t.st.git.entry(item.into()).or_default();
+        if s.running.as_ref().is_some_and(|(a, _, _)| *a != ask) {
+            return;
+        }
         s.running = None;
         if s.asked > ask {
-            /* asked again while it ran: what it found may be older than that ask */
-            s.last = Some(got);
+            /* asked again (or invalidated) while it ran: what it found may be older than that ask */
+            s.last = Some((want, got));
             let Ok(Some(i)) = t.db().item(item) else {
                 return;
             };
-            t.git_gather(&i);
+            if i.phase == CLOSING {
+                t.git_gather(&i);
+            }
             return;
         }
-        s.last = Some(got);
+        s.last = Some((want, got));
         s.fresh = true;
         match t.db().item(item) {
             Ok(Some(i)) if i.phase == CLOSING => {
@@ -426,8 +455,8 @@ impl Tx<'_> {
         self.c.node_git().is_some_and(|g| g.on_node(item))
     }
 
-    /// What a gathering for `i` asks now: the frozen fingerprint, its branch, and whether each
-    /// release of this cycle (and each report waiting) contains the frozen `HEAD`.
+    /// What a gathering for `i` asks now: the item's worktree path, the frozen fingerprint, and
+    /// its branch.
     pub(crate) fn git_want(&self, i: &Item) -> Want {
         let frozen = i
             .closing
@@ -435,8 +464,20 @@ impl Tx<'_> {
             .filter(|c| i.phase == CLOSING && c.kind == CloseKind::Complete)
             .and_then(|c| c.fingerprint);
         Want {
+            cwd: i.cwd.clone().filter(|c| !c.is_empty()),
             frozen,
             branch: i.branch.clone().filter(|b| !b.is_empty()),
+        }
+    }
+
+    /// Marks any previously gathered (or in-flight) git facts for `item` stale when its closing
+    /// is invalidated so a subsequent delivery gathers fresh facts.
+    pub(crate) fn git_invalidate(&mut self, item: &str) {
+        if let Some(s) = self.st.git.get_mut(item) {
+            s.fresh = false;
+            if s.running.is_some() {
+                s.asked += 1;
+            }
         }
     }
 
@@ -464,33 +505,48 @@ impl Tx<'_> {
         let ask = s.asked;
         s.running = Some((ask, t, want.clone()));
         let (core, item) = (self.c.clone(), i.id.clone());
-        detach(move || {
-            let got = block_on(async {
-                tokio::time::timeout(GATHER_DEADLINE, gather(&*port, &item, want))
-                    .await
-                    .unwrap_or_else(|_| Err("timed out".into()))
-            })
-            .unwrap_or_else(|| Err("no runtime".into()));
-            core.git_arrived(&item, ask, got);
-        });
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn(async move {
+                    let got =
+                        tokio::time::timeout(GATHER_DEADLINE, gather(&*port, &item, want.clone()))
+                            .await
+                            .unwrap_or_else(|_| Err("timed out".into()));
+                    let _ = tokio::task::spawn_blocking(move || {
+                        core.git_arrived(&item, ask, want, got)
+                    })
+                    .await;
+                });
+            }
+            Err(_) => {
+                detach(move || {
+                    let got = block_on(async {
+                        tokio::time::timeout(GATHER_DEADLINE, gather(&*port, &item, want.clone()))
+                            .await
+                            .unwrap_or_else(|_| Err("timed out".into()))
+                    })
+                    .unwrap_or_else(|| Err("no runtime".into()));
+                    core.git_arrived(&item, ask, want, got);
+                });
+            }
+        }
     }
 
     /// The facts gathered for `i` to decide on in this critical section: fresh ones (taken now,
     /// and again by the same section), else a gathering starts and `None`. Facts gathered for
-    /// another closing than the one there is now are not fresh.
+    /// another closing, branch, or worktree than the one there is now are not fresh.
     pub(crate) fn git_take(&mut self, i: &Item) -> Option<Gathered> {
         let seq = self.st.tx_seq;
         let want = self.git_want(i);
         let s = self.st.git.entry(i.id.clone()).or_default();
         let usable = match &s.last {
-            Some(Ok(Some(seen))) => seen.want == want,
-            Some(_) => true,
+            Some((last_want, _)) => *last_want == want,
             None => false,
         };
         if usable && (s.fresh || s.taken_in == seq) {
             s.fresh = false;
             s.taken_in = seq;
-            return s.last.clone();
+            return s.last.as_ref().map(|(_, got)| got.clone());
         }
         self.git_gather(i);
         None
@@ -499,7 +555,7 @@ impl Tx<'_> {
     /// The last facts gathered for `item`, fresh or not (what a projection may show).
     #[cfg(test)]
     pub(crate) fn git_seen(&self, item: &str) -> Option<&Seen> {
-        match self.st.git.get(item)?.last.as_ref()? {
+        match &self.st.git.get(item)?.last.as_ref()?.1 {
             Ok(Some(s)) => Some(s),
             _ => None,
         }
@@ -520,15 +576,7 @@ impl Tx<'_> {
         );
         /* one rebase per approval: the ledger takes the same operation once */
         let operation = format!("rebase-{decision}");
-        detach(move || {
-            let outcome = block_on(async {
-                tokio::time::timeout(GATHER_DEADLINE, rebase(&*port, &item, &operation))
-                    .await
-                    .unwrap_or_else(|_| {
-                        crate::git::Rebase::Error("结果未知（超时），不会自动重试".into())
-                    })
-            })
-            .unwrap_or_else(|| crate::git::Rebase::Error("no runtime".into()));
+        let finish_rebase = move |outcome| {
             let mut t = core.tx();
             match t.rebased(&item, &branch, &to, outcome) {
                 Ok(true) => {
@@ -539,7 +587,39 @@ impl Tx<'_> {
                 Ok(false) => {}
                 Err(e) => tracing::error!(item, "rebase before the release: {e}"),
             }
-        });
+        };
+        let item_for_run = item_id.to_string();
+        match tokio::runtime::Handle::try_current() {
+            Ok(rt) => {
+                rt.spawn(async move {
+                    let outcome = tokio::time::timeout(
+                        GATHER_DEADLINE,
+                        rebase(&*port, &item_for_run, &operation),
+                    )
+                    .await
+                    .unwrap_or_else(|_| {
+                        crate::git::Rebase::Error("结果未知（超时），不会自动重试".into())
+                    });
+                    let _ = tokio::task::spawn_blocking(move || finish_rebase(outcome)).await;
+                });
+            }
+            Err(_) => {
+                detach(move || {
+                    let outcome = block_on(async {
+                        tokio::time::timeout(
+                            GATHER_DEADLINE,
+                            rebase(&*port, &item_for_run, &operation),
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            crate::git::Rebase::Error("结果未知（超时），不会自动重试".into())
+                        })
+                    })
+                    .unwrap_or_else(|| crate::git::Rebase::Error("no runtime".into()));
+                    finish_rebase(outcome);
+                });
+            }
+        }
     }
 }
 

@@ -149,5 +149,8 @@ fn work_tidy_retries_while_a_session_is_busy() {
     k.rt.st().turning.remove(&s);
     let p = k.pump_outbox_at(steve_store::now() + 60_000);
     assert_eq!(p.done, 1);
-    assert!(!wt.exists(), "given back once the session is idle");
+    steve_runtime::testkit::eventually_blocking(
+        "The worktree is reclaimed once the session is idle.",
+        || !wt.exists(),
+    );
 }

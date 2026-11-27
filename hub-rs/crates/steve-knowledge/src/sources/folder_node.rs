@@ -1,8 +1,8 @@
 //! A folder source read through a Node (N0e-E4): the Node scans and reads, the Hub keeps the
 //! configuration, the schedule, the reconciliation, the index and who sees what.
 //!
-//! The Hub wires a [`FolderPlaces`] only when its local Node is on (`STEVE_NODE_MODE=local`);
-//! without one, or when it answers `Ok(None)`, the folder is walked and read on the Hub as before.
+//! Every folder scan and document read goes through the wired [`FolderPlaces`] Node boundary;
+//! the Hub never walks or reads folder sources directly on disk.
 //!
 //! The rule of [`super::folder`] holds here too: only a scan that ends complete deletes. A scan the
 //! Node cut short, a Node gone offline before the last page, a page that does not belong to the
@@ -68,9 +68,16 @@ impl Unplaced {
 /// documents through the knowledge store only.
 #[async_trait]
 pub trait FolderPlaces: Send + Sync {
-    /// The place of folder source `source`. `Ok(None)`: no Node holds it here (read on the Hub).
+    /// The place of folder source `source`. `Ok(None)`: no Node holds it here (refused/offline).
     /// `scanning`: a scan follows, so the Node must already allow the folder (a source just added).
     async fn place(&self, source: &str, scanning: bool) -> Result<Option<FolderPlace>, Unplaced>;
+    /// Optional colocated path probe (`WorkspaceExecutor::path_check`).
+    async fn check_path(
+        &self,
+        _path: &str,
+    ) -> Result<Option<steve_node_api::PathCheckResponse>, Unplaced> {
+        Ok(None)
+    }
 }
 
 /// The Node side of the folder sources, shared by the scan and [`super::folder::FolderLoader`].
@@ -113,11 +120,11 @@ impl NodeFolders {
     /// Reads one document's file through its Node.
     pub(crate) async fn load(&self, source: &str, doc: &str, rel: &str) -> NodeRead {
         let Some(places) = self.places() else {
-            return NodeRead::Hub;
+            return NodeRead::Offline;
         };
         let place = match places.place(source, false).await {
             Ok(Some(p)) => p,
-            Ok(None) => return NodeRead::Hub,
+            Ok(None) => return NodeRead::Offline,
             Err(Unplaced::Nowhere) => return NodeRead::Refused(NO_FOLDER),
             Err(_) => return NodeRead::Offline,
         };
@@ -151,8 +158,6 @@ pub(crate) enum NodeRead {
     Unsettled,
     /// Its device could not be reached: leave it for the next scan.
     Offline,
-    /// No Node holds it here after all: read it on the Hub.
-    Hub,
 }
 
 /// `place.root` joined with `rel` (a document's `ref`).

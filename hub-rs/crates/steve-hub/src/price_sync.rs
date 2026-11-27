@@ -5,16 +5,24 @@
 //! `STEVE_PRICE_CATALOG_URL` points it elsewhere (a mirror, a test server); `off` turns it off. Under
 //! `STEVE_FORBID_REAL_HOSTS=1` (tests) only a loopback URL is fetched.
 
+use std::sync::Arc;
 use std::time::Duration;
 
+use steve_runtime::{
+    Clock, SystemClock,
+    due::{DueError, DueSource, due_loop},
+    policy::{Backoff, Jitter},
+};
 use steve_stats::catalog;
 use steve_store::statistics::Catalog;
 use steve_store::{Store, StoreError, Workspaces, now};
+use tokio::sync::Notify;
 
 const DAY: i64 = 24 * 3600 * 1000;
 const RETRY: i64 = 3600 * 1000;
-const TICK: Duration = Duration::from_secs(600);
 const FIRST: Duration = Duration::from_secs(20);
+const LOOP_RETRY_BASE: Duration = Duration::from_secs(30);
+const LOOP_RETRY_MAX: Duration = Duration::from_secs(600);
 /// api.json is ~6 MB; anything far larger is not the catalog.
 const MAX_BYTES: usize = 64 << 20;
 
@@ -149,6 +157,17 @@ async fn record_err(store: &Store, e: String) -> String {
     e
 }
 
+/// Earliest timestamp (ms) when the next sync try is due: a day after the last sync, and at least
+/// an hour after the last failed try.
+pub fn next_due_at(s: &catalog::SyncState) -> i64 {
+    let base = s.synced.map_or(0, |t| t.saturating_add(DAY));
+    if s.error.is_some() {
+        base.max(s.tried.map_or(0, |t| t.saturating_add(RETRY)))
+    } else {
+        base
+    }
+}
+
 /// Whether a try is due at `t`: a day after the last sync, an hour after the last failed try.
 pub fn due(s: &catalog::SyncState, t: i64) -> bool {
     let tried_ago = s.tried.map_or(i64::MAX, |x| t - x);
@@ -156,8 +175,46 @@ pub fn due(s: &catalog::SyncState, t: i64) -> bool {
     synced_ago >= DAY && (s.error.is_none() || tried_ago >= RETRY)
 }
 
-/// The background loop as a supervised periodic [`steve_runtime::Task`] for the catalog at `url`
-/// (`None`: turned off).
+struct PriceSyncSource {
+    store: Store,
+    client: reqwest::Client,
+    url: String,
+    first_at: i64,
+}
+
+impl DueSource for PriceSyncSource {
+    fn name(&self) -> &'static str {
+        "prices.sync"
+    }
+
+    async fn next_due(&self) -> Result<Option<i64>, DueError> {
+        let store = self.store.clone();
+        let state =
+            tokio::task::spawn_blocking(move || store.read(|r| Catalog(r).state(catalog::SOURCE)))
+                .await
+                .map_err(|e| DueError(format!("price sync next_due panicked: {e}")))?
+                .map_err(|e| DueError(e.to_string()))?;
+        Ok(Some(next_due_at(&state).max(self.first_at)))
+    }
+
+    async fn run_due(&self, now_ms: i64) -> Result<(), DueError> {
+        let store = self.store.clone();
+        let state =
+            tokio::task::spawn_blocking(move || store.read(|r| Catalog(r).state(catalog::SOURCE)))
+                .await
+                .map_err(|e| DueError(format!("price sync state panicked: {e}")))?
+                .map_err(|e| DueError(e.to_string()))?;
+        if due(&state, now_ms)
+            && let Ok(v) = sync_once(&self.store, &self.client, &self.url).await
+        {
+            tracing::info!("price sync: {v:?}");
+        }
+        Ok(())
+    }
+}
+
+/// The background loop as a supervised [`steve_runtime::Task`] driven by [`due_loop`] for the
+/// catalog at `url` (`None`: turned off).
 pub fn task(store: Store, url: Option<String>) -> steve_runtime::Task {
     let Some(url) = url else {
         return steve_runtime::spawn("prices.sync", async {
@@ -167,28 +224,25 @@ pub fn task(store: Store, url: Option<String>) -> steve_runtime::Task {
     if steve_modules::net::check_url(&url).is_err() {
         return steve_runtime::spawn("prices.sync", async {});
     }
-    let client = client();
-    steve_runtime::every_after(
+    let clock = Arc::new(SystemClock);
+    let first_at = clock.now().saturating_add(FIRST.as_millis() as i64);
+    let source = Arc::new(PriceSyncSource {
+        store,
+        client: client(),
+        url,
+        first_at,
+    });
+    let backoff = Backoff {
+        base: LOOP_RETRY_BASE,
+        max: LOOP_RETRY_MAX,
+        factor: 2,
+        jitter: Jitter::Equal,
+        attempts: None,
+        reset_after: None,
+    };
+    steve_runtime::spawn(
         "prices.sync",
-        std::sync::Arc::new(steve_runtime::SystemClock),
-        TICK,
-        steve_runtime::FirstRun::After(FIRST),
-        move || {
-            let (store, client, url) = (store.clone(), client.clone(), url.clone());
-            async move {
-                let s = store.clone();
-                let state = tokio::task::spawn_blocking(move || {
-                    s.read(|r| Catalog(r).state(catalog::SOURCE))
-                })
-                .await;
-                if let Ok(Ok(state)) = state
-                    && due(&state, now())
-                    && let Ok(v) = sync_once(&store, &client, &url).await
-                {
-                    tracing::info!("price sync: {v:?}");
-                }
-            }
-        },
+        due_loop(source, clock, Arc::new(Notify::new()), backoff),
     )
 }
 
