@@ -777,7 +777,15 @@ fn tool_name(u: &Value) -> String {
         .or_else(|| u.pointer("/_meta/tool_name").and_then(Value::as_str))
         .or_else(|| u.pointer("/rawInput/tool_name").and_then(Value::as_str))
         .map(str::to_owned)
-        .or_else(|| mcp_invocation(u).map(|(server, tool, _)| format!("mcp__{server}__{tool}")))
+        .or_else(|| {
+            mcp_invocation(u).map(|(server, tool, _)| {
+                if server == "steve" {
+                    tool.to_owned()
+                } else {
+                    format!("mcp__{server}__{tool}")
+                }
+            })
+        })
         // unknown: empty, never a made-up name
         .unwrap_or_default()
 }
@@ -1011,11 +1019,7 @@ impl ToolFact {
         let input = self.input();
         let action = if self.origin == ToolOrigin::Steve {
             Some(Action::Tool {
-                name: self
-                    .name
-                    .strip_prefix("mcp__steve__")
-                    .unwrap_or(&self.name)
-                    .into(),
+                name: self.name.clone(),
                 args: input.clone(),
             })
         } else if self.category == ToolCategory::Exec || self.name == "Bash" {
@@ -1116,6 +1120,16 @@ fn tool_fact(
         None if name.starts_with("mcp__") => ToolOrigin::External,
         None => ToolOrigin::Harness,
     };
+    // Strip the flat MCP transport prefix (`mcp__steve__<tool>`) only when the adapter did not
+    // supply structured server routing metadata. A structured invocation with `server: "steve"`
+    // already carries the literal tool name, so a nested `mcp__steve__` inside it must stay
+    // unstripped and fail strict name checks.
+    if server.is_none()
+        && origin == ToolOrigin::Steve
+        && let Some(short) = name.strip_prefix("mcp__steve__")
+    {
+        name = short.to_owned();
+    }
     let category = if origin == ToolOrigin::Steve {
         ToolCategory::Steve
     } else {

@@ -119,7 +119,10 @@ async fn every_typed_wire_variant_uses_scoped_visibility_and_keeps_typed_taps() 
         assert_eq!(serde_json::to_value(&*tap_value).unwrap(), value, "{tag}");
         assert!(value["rev"].is_number());
         assert_eq!(value["type"], tag);
-        let hub = matches!(tag, "device" | "release.hold" | "node" | "client");
+        let hub = matches!(
+            tag,
+            "device" | "release.hold" | "local_node.updating" | "node" | "client"
+        );
         for ws in ["a", "b", ""] {
             assert_eq!(
                 frame.visible_to(ws),

@@ -258,8 +258,12 @@ impl Hub {
         cfg.files_root = base.join("files");
         cfg.sandbox = sandbox;
         cfg.max_global = max_global;
+        let mut hub_cfg = steve_hub::wire::research::policy::ResearchConfig::new();
+        hub_cfg.models = vec!["m1".into()];
+        hub_cfg.max_global = max_global;
+        hub_cfg.sandbox = sandbox;
         let adapter = ResearchAdapter::new(
-            cfg.clone(),
+            hub_cfg,
             steve_core::repo::Db::new(store.clone()),
             data.clone(),
         );
@@ -305,7 +309,7 @@ impl Hub {
                 roots: roots.clone(),
                 capacity: Capacity {
                     sessions: 0,
-                    jobs: steve_hub::wire::LOCAL_JOB_CAPACITY,
+                    jobs: steve_node::LOCAL_JOB_CAPACITY,
                     execs: 0,
                 },
                 storage: steve_node::Storage::default(),
@@ -1067,7 +1071,8 @@ async fn what_the_node_cannot_read_fails_and_is_counted() {
     let w = World::new();
     let node = Hub::new(&w, "node", true, 3).await;
     let rt = node.rt.clone().unwrap();
-    let health = || steve_hub::wire::node_runtime::health(&node.store, Some(&rt), false).unwrap();
+    let health =
+        || steve_hub::wire::node_runtime::health(&node.store, Some(&rt), false, true).unwrap();
     assert_eq!(health()["research_fallbacks"], 0);
 
     // under the roots: on the Node, nothing counted

@@ -114,6 +114,86 @@ pub trait WorkspaceExecutor: Send + Sync {
     /// Scan a tree; read its pages under the scan's operation id.
     async fn scan(&self, c: Command<ScanSpec>) -> ApiResult<Receipt>;
     async fn scan_page(&self, scan: OperationId, page: PageRequest) -> ApiResult<ScanPage>;
+    /// Browse directories on the colocated Node (owner-only project chooser).
+    async fn browse_dir(&self, _q: BrowseDirRequest) -> ApiResult<BrowseDirResponse> {
+        Err(Error::new(
+            Code::Unsupported,
+            "host directory browsing unsupported",
+        ))
+    }
+    /// Inspect a directory on the colocated Node (existence, git status, top-level files, READMEs).
+    async fn describe_dir(&self, _q: DescribeDirRequest) -> ApiResult<DescribeDirResponse> {
+        Err(Error::new(
+            Code::Unsupported,
+            "host directory inspection unsupported",
+        ))
+    }
+    /// Canonicalize and check whether a path is a directory on the colocated Node.
+    async fn path_check(&self, _q: PathCheckRequest) -> ApiResult<PathCheckResponse> {
+        Err(Error::new(Code::Unsupported, "host path check unsupported"))
+    }
+    /// Validate and preview a new project destination on the colocated Node.
+    async fn project_setup_preview(
+        &self,
+        _q: ProjectSetupPreviewRequest,
+    ) -> ApiResult<ProjectSetupPreview> {
+        Err(Error::new(
+            Code::Unsupported,
+            "host project setup unsupported",
+        ))
+    }
+    /// Start provisioning a new empty or cloned project directory on the colocated Node.
+    async fn project_setup_start(
+        &self,
+        _c: Command<ProjectSetupRequest>,
+    ) -> ApiResult<ProjectSetupStatus> {
+        Err(Error::new(
+            Code::Unsupported,
+            "host project setup unsupported",
+        ))
+    }
+    /// Query the state of a running or finished project setup operation.
+    async fn project_setup_status(&self, _op: OperationId) -> ApiResult<ProjectSetupStatus> {
+        Err(Error::new(
+            Code::Unsupported,
+            "host project setup unsupported",
+        ))
+    }
+    /// Measure worktree, scratch, trash, and orphan disk usage on the colocated Node.
+    async fn disk_inspect(&self, _q: DiskInspectRequest) -> ApiResult<DiskInspectResponse> {
+        Err(Error::new(
+            Code::Unsupported,
+            "workspace disk inspection unsupported",
+        ))
+    }
+    /// Reclaim trash, closed worktrees, and rebuildable caches on the colocated Node.
+    async fn disk_reclaim(&self, _q: DiskReclaimRequest) -> ApiResult<DiskReclaimResponse> {
+        Err(Error::new(
+            Code::Unsupported,
+            "workspace disk reclamation unsupported",
+        ))
+    }
+    /// List tools exposed by a library `stdio` MCP server hosted in the colocated Node's sandbox.
+    async fn mcp_stdio_list(&self, _server: McpStdioServer) -> ApiResult<Vec<McpStdioTool>> {
+        Err(Error::new(
+            Code::Unsupported,
+            "node-hosted stdio MCP unsupported",
+        ))
+    }
+    /// Call a tool on a library `stdio` MCP server hosted in the colocated Node's sandbox.
+    async fn mcp_stdio_call(&self, _req: McpStdioCallRequest) -> ApiResult<McpStdioCallResponse> {
+        Err(Error::new(
+            Code::Unsupported,
+            "node-hosted stdio MCP unsupported",
+        ))
+    }
+    /// Close idle, updated, or deleted library `stdio` MCP servers hosted on the colocated Node.
+    async fn mcp_stdio_sweep(&self, _req: McpStdioSweepRequest) -> ApiResult<()> {
+        Err(Error::new(
+            Code::Unsupported,
+            "node-hosted stdio MCP unsupported",
+        ))
+    }
 }
 
 #[async_trait]
@@ -130,6 +210,12 @@ pub trait Discovery: Send + Sync {
     /// True when the Node is currently linked only on the frozen upgrade channel (protocol mismatch).
     fn is_upgrade_only(&self) -> bool {
         false
+    }
+
+    /// Capabilities last observed on the live link generation, if already probed.
+    /// Returns `None` when no cached probe exists yet (callers may fall back to [`Self::probe`]).
+    fn cached_capabilities(&self) -> Option<Capabilities> {
+        None
     }
 
     /// The frozen upgrade channel's minimal discovery; no ordinary capability payload crosses it.
@@ -212,6 +298,14 @@ pub trait Discovery: Send + Sync {
     /// Where an entry of [`Discovery::history`] (or `session:<id>`, a harness session) is. A key
     /// the Node did not list is `invalid`.
     async fn locate(&self, source: HistoryRef) -> ApiResult<HistoryLocation>;
+    /// Probe working directory, transcript metadata, and state environment variables for resuming
+    /// a harness session on this Node without the Hub reading the Node's filesystem.
+    async fn resume_probe(&self, _req: ResumeProbeRequest) -> ApiResult<ResumeProbeResponse> {
+        Err(Error::new(
+            Code::Unsupported,
+            "session resume probe unsupported",
+        ))
+    }
     /// How the machine is doing now (B3); a Node that cannot say answers `unsupported`.
     async fn vitals(&self) -> ApiResult<NodeVitals> {
         Err(Error::new(Code::Unsupported, "vitals"))

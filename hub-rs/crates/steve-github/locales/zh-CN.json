@@ -50,5 +50,9 @@
   "github.manifest.already_installed": "这个 GitHub App 已经装在 %{login} 上了，一个 App 目前只能接一个安装",
   "github.text.pat_name": "GitHub 个人令牌",
   "github.text.pat_token": "令牌",
-  "github.text.pat_token_hint": "GitHub 设置 → Developer settings → Fine-grained tokens：选好仓库，给 Contents、Pull requests、Issues 读写，Checks、Actions 读；要接收事件再给 Webhooks 读写"
+  "github.text.pat_token_hint": "GitHub 设置 → Developer settings → Fine-grained tokens：选好仓库，给 Contents、Pull requests、Issues 读写，Checks、Actions 读；要接收事件再给 Webhooks 读写",
+  "github.push.no_node": "没有可用的设备节点执行 Git 操作：%{detail}",
+  "github.push.no_git_nodes": "请确认本地或目标设备节点已连接",
+  "github.push.no_node_head": "事项工作区未绑定到在线节点，无法读取分支提交",
+  "github.push.no_node_push": "事项工作区未绑定到在线节点，无法推送分支"
 }

@@ -785,6 +785,13 @@ impl Drop for Waiting {
 
 /// Preserve a Node's typed failure. Older journal entries without phase evidence stay unknown.
 fn call_error(c: &Completion, phase: Option<GatewayPhase>) -> OneShotError {
+    if c.error
+        .as_ref()
+        .and_then(|e| e.reason.as_ref())
+        .is_some_and(|r| r.is(NodeReason::LocalNodeUpdating))
+    {
+        return OneShotError::LocalNodeUpdating;
+    }
     let detail = c.error.as_ref().map(super::said).unwrap_or_default();
     match c.error.as_ref().and_then(|e| e.gateway) {
         Some(GatewayFailure::Timeout { phase }) => return OneShotError::Timeout(phase),
@@ -837,11 +844,11 @@ fn think_reply(
 #[async_trait]
 impl OneModel for NodePrint {
     async fn preflight(&self, call: &OneCall<'_>) -> steve_core::Result<()> {
+        if self.runtime.node.is_upgrade_only() {
+            return Err(GatewayError::LocalNodeUpdating.into());
+        }
         let needs_tools = matches!(call.spec.required_tools, ThinkTools::Read(_));
         let needs_images = !call.images.is_empty();
-        if !needs_tools && !needs_images {
-            return Ok(());
-        }
         if let ThinkTools::Read(required) = call.spec.required_tools {
             let workspace = think_workspace();
             self.runtime
@@ -859,12 +866,31 @@ impl OneModel for NodePrint {
                 }
             }
         }
-        let probe = self
-            .runtime
-            .node
-            .probe(false)
-            .await
-            .map_err(|_| GatewayError::MissingCapability)?;
+        let probe = match self.runtime.node.cached_capabilities() {
+            Some(p) => p,
+            None => match self.runtime.node.probe(false).await {
+                Ok(p) => p,
+                Err(e)
+                    if e.reason
+                        .as_ref()
+                        .is_some_and(|r| r.is(NodeReason::LocalNodeUpdating)) =>
+                {
+                    return Err(GatewayError::LocalNodeUpdating.into());
+                }
+                Err(_) if !needs_tools && !needs_images => {
+                    // Transient offline state (e.g. cold boot or reconnect) still queues in `once`
+                    // until the call's deadline instead of failing preflight immediately.
+                    return Ok(());
+                }
+                Err(_) => return Err(GatewayError::MissingCapability.into()),
+            },
+        };
+        if !probe.supports_jobs() {
+            return Err(GatewayError::LocalNodeUpdating.into());
+        }
+        if !needs_tools && !needs_images {
+            return Ok(());
+        }
         let harness = probe.harnesses.iter().find(|h| {
             h.name == call.harness
                 && h.jobs
@@ -887,7 +913,10 @@ impl OneModel for NodePrint {
 
     async fn multimodal_harness(&self, call: &OneCall<'_>) -> Option<String> {
         let needs_tools = matches!(call.spec.required_tools, ThinkTools::Read(_));
-        let probe = self.runtime.node.probe(false).await.ok()?;
+        let probe = match self.runtime.node.cached_capabilities() {
+            Some(p) => p,
+            None => self.runtime.node.probe(false).await.ok()?,
+        };
         probe
             .harnesses
             .iter()

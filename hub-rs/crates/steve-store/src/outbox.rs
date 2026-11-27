@@ -271,6 +271,24 @@ impl Dispatcher {
         })
     }
 
+    /// Earliest due timestamp (ms) across all registered, enabled consumers, ignoring dead rows.
+    /// `Some(0)` means an unattempted delivery is due immediately; `None` means nothing is pending
+    /// (or maintenance mode has paused outbox delivery so callers do not spin while `pump` is gated).
+    pub fn next_due(&self, store: &Store) -> Result<Option<i64>> {
+        if store.maintenance() {
+            return Ok(None);
+        }
+        store.read(|r| {
+            let mut earliest: Option<i64> = None;
+            for c in &self.consumers {
+                if let Some(at) = leases::next_due(r, c.as_ref())? {
+                    earliest = Some(earliest.map_or(at, |prev| prev.min(at)));
+                }
+            }
+            Ok(earliest)
+        })
+    }
+
     /// One pass: every consumer, up to [`BATCH`] due deliveries each. Never two at once.
     pub fn pump(&self, store: &Store, now: i64) -> Result<Pumped> {
         let Some(_activity) = store.try_activity("outbox") else {

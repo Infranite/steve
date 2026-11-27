@@ -17,7 +17,9 @@ pub fn tags(event: &BusEvent) -> Tags {
                     tags.push(Tag::of("runtimes", id.as_str()));
                 }
                 DevicesEvent::Device { .. } => tags.push(Tag::global("runtimes")),
-                DevicesEvent::ReleaseHold { .. } | DevicesEvent::Client { .. } => {}
+                DevicesEvent::ReleaseHold { .. }
+                | DevicesEvent::LocalNodeUpdating { .. }
+                | DevicesEvent::Client { .. } => {}
             },
             DomainEvent::Channels(event) => match event {
                 ChannelsEvent::Connection { id, .. } | ChannelsEvent::Channel { id, .. } => {

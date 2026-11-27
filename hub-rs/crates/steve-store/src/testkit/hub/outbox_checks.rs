@@ -211,3 +211,30 @@ pub fn seed_notice_workspace(store: &crate::Store) -> Result<()> {
         Ok(())
     })
 }
+
+/// Seeds three open decisions for maintenance_gate tests:
+/// - `dc_running_perm`: waiting permission card on a currently running Node turn/attempt
+/// - `dc_finished_perm`: waiting permission card whose Node turn/attempt has already finished
+/// - `dc_plain_ask`: ordinary non-permission decision
+pub fn seed_maintenance_decision_cases(path: &Path) -> Result<()> {
+    super::api::writable(path)?.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         INSERT INTO decisions (id, workspace_id, kind, subject_type, subject_id, question, options, status, requested_by, created) VALUES
+           ('dc_running_perm', 'default', 'approve', 'session', 'sess_run', 'allow bash?', '[\"allow_once\",\"deny\"]', 'open', 'steve', 1),
+           ('dc_finished_perm', 'default', 'approve', 'session', 'sess_fin', 'stale perm?', '[\"allow_once\",\"deny\"]', 'open', 'steve', 1),
+           ('dc_plain_ask', 'default', 'ask', 'item', 'item_1', 'proceed?', '[\"yes\",\"no\"]', 'open', 'steve', 1);
+         INSERT INTO runtime_sessions (session_id, backend, node_id, workspace_ref, node_session_id, config_revision, phase, revision, updated) VALUES
+           ('sess_run', 'node', 'local', 'local/w1', 'ns_run', 'r1', 'ready', 1, 1),
+           ('sess_fin', 'node', 'local', 'local/w2', 'ns_fin', 'r1', 'ready', 1, 1);
+         INSERT INTO runtime_turns (turn_id, session_id, state, active_attempt, retry_ordinal, revision, applied, created, updated) VALUES
+           ('turn_run', 'sess_run', 'running', 'att_run', 0, 1, 0, 1, 1),
+           ('turn_fin', 'sess_fin', 'finished', 'att_fin', 0, 1, 1, 1, 1);
+         INSERT INTO runtime_attempts (attempt_id, turn_id, ordinal, node_id, operation_id, execution, spec, digest, state, cancel_requested, revision, created, updated) VALUES
+           ('att_run', 'turn_run', 0, 'local', 'op_run', 'turn', '{}', 'd1', 'running', 0, 1, 1, 1),
+           ('att_fin', 'turn_fin', 0, 'local', 'op_fin', 'turn', '{}', 'd2', 'finished', 0, 1, 1, 1);
+         INSERT INTO runtime_permissions (decision_id, node_id, session_id, attempt_id, permission_id, request, expires_at, state, revision, created, updated) VALUES
+           ('dc_running_perm', 'local', 'sess_run', 'att_run', 'perm_run', '{}', 9999999999999, 'waiting', 1, 1, 1),
+           ('dc_finished_perm', 'local', 'sess_fin', 'att_fin', 'perm_fin', '{}', 9999999999999, 'waiting', 1, 1, 1);",
+    )?;
+    Ok(())
+}

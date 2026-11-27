@@ -175,8 +175,8 @@ async fn a_node_that_linked_but_has_not_answered_is_not_a_refusal() {
     .unwrap();
 }
 
-/// Service/Off model jobs use local-jobs; a Hub without a model Node must only
-/// wait for the linked Nodes it actually has, rather than a fictitious local one.
+/// Model jobs use the connected local Node (or a linked remote Node); a Hub without a local Node
+/// must only wait for the linked Nodes it actually has, rather than a fictitious local one.
 #[tokio::test]
 async fn preflight_uses_the_actual_model_node_or_only_linked_nodes_when_absent() {
     let (_d, s) = store();
@@ -185,7 +185,7 @@ async fn preflight_uses_the_actual_model_node_or_only_linked_nodes_when_absent()
         (k == "STEVE_HOME").then(|| home.path().display().to_string())
     })
     .unwrap();
-    for model in [Some("local-jobs"), None] {
+    for model in [Some("local"), None] {
         let reports = crate::system::RuntimeReports::new(Arc::new(
             steve_runtime::cache::Caches::new(cfg.cache),
         ));

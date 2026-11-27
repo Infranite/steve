@@ -31,7 +31,7 @@ use steve_store::{Read, References, W, now};
 use crate::index;
 use crate::notes::{self, NewNote};
 use crate::service::own_doc;
-use crate::sources::folder::{self, SourceBody, SourcePatch, check_path};
+use crate::sources::folder::{self, SourceBody, SourcePatch};
 use crate::sources::{self, is_builtin};
 use crate::state::Knowledge;
 use crate::sync;
@@ -866,10 +866,12 @@ fn plan_create(
             )],
         ))
     };
-    let path = match check_path(kb.folder_policy(), &raw) {
-        Ok(p) => p,
-        Err(why) => return refused(why),
-    };
+    let path =
+        match folder::check_path_via_node(kb, &raw, steve_store::knowledge::SourceRole::Knowledge)?
+        {
+            Ok(p) => p,
+            Err(why) => return refused(why),
+        };
     if let Some(why) = folder::overlap_reason_in(r, &viewer.ws, &path)? {
         return refused(why);
     }
@@ -1252,8 +1254,16 @@ fn source_body(op: &Value) -> ApiResult<SourceBody> {
 }
 
 impl ChangeOp for SourceCreateOp {
-    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, op: &Value) -> ApiResult<Value> {
-        let f = folder::check_new(self.0.folder_policy(), &source_body(op)?)?;
+    fn prepare(&self, op: &Value) -> ApiResult<Value> {
+        // Probe the folder on the Node *before* opening the SQLite write transaction so the single
+        // SQLite writer connection is never held across a Node RPC.
+        let f = folder::check_new(&self.0, &source_body(op)?)?;
+        serde_json::to_value(&f).map_err(|e| ApiError::Internal(e.to_string()))
+    }
+
+    fn apply(&self, w: &mut steve_store::W<'_>, cx: &OpCx, _op: &Value) -> ApiResult<Value> {
+        let f: folder::NewFolder = serde_json::from_value(cx.prepared())
+            .map_err(|_| ApiError::Internal("source create op missing pre-probed folder".into()))?;
         let at = now();
         let s = {
             sources::ensure_builtin(w, cx.ws, cx.actor, at)?;

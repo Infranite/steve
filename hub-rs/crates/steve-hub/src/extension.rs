@@ -569,7 +569,9 @@ impl EventCapability {
             "calendar" => Ok(Self::Calendar),
             "mail" => Ok(Self::Mail),
             "gh" => Ok(Self::Github),
-            "device" | "node" | "client" | "release.hold" => Ok(Self::Devices),
+            "device" | "node" | "client" | "release.hold" | "local_node.updating" => {
+                Ok(Self::Devices)
+            }
             "approval_policy" => Ok(Self::Autonomy),
             "stats" => Ok(Self::Stats),
             _ => Err(EventTypeRefusal::Unknown),
@@ -1182,16 +1184,6 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         let args: Vec<String> = std::env::args().skip(2).collect();
         std::process::exit(crate::access::main(&args));
     }
-    // the ACP adapters in this Hub's home (steve_acp::managed); `steve setup` and `steve adapters` run it
-    if std::env::args().nth(1).as_deref() == Some("--adapters") {
-        let args: Vec<String> = std::env::args().skip(2).collect();
-        let home = std::env::var_os("STEVE_HOME")
-            .filter(|h| !h.is_empty())
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|| crate::config::home_dir().join(".steve"));
-        let node = std::env::var_os("STEVE_NODE").map(std::path::PathBuf::from);
-        std::process::exit(steve_acp::managed::cli(&home, node.as_deref(), &args));
-    }
     // the one-shot launchd job of a one-click local upgrade (upgrades/runner.rs); needs no Config
     let args: Vec<String> = std::env::args().collect();
     if args.get(1).map(String::as_str) == Some("--upgrade-runner") {
@@ -1207,7 +1199,7 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
     // An argument this binary does not know (a test filter, a typo) must not do that.
     match args.get(1..).unwrap_or_default() {
         [] => {}
-        [one] if one == "--supervise" || one == "--local-node" => {}
+        [one] if one == "--supervise" => {}
         other => {
             eprintln!(
                 "steve-hub: unknown arguments {other:?}; run it without arguments to start the Hub"
@@ -1224,12 +1216,6 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         .init();
 
     steve_store::db::tune_sqlite();
-    // the Hub's own Node in a process of its own (STEVE_NODE_MODE=service, B1): started by the
-    // Hub, it outlives Hub restarts and never creates a missing Hub home.
-    if args.get(1).is_some_and(|arg| arg == "--local-node") {
-        let cfg = Config::from_vars(|k| std::env::var(k).ok())?;
-        return crate::wire::local_service::run(&cfg).await;
-    }
     let mut cfg = Config::from_env()?;
     if args.get(1).is_some_and(|arg| arg == "--supervise") {
         return crate::upgrades::supervise(cfg).await;

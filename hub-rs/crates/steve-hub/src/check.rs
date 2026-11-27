@@ -127,17 +127,27 @@ pub(crate) fn local_node_warnings(cfg: &Config, vars: &crate::wire::Vars) -> Vec
     local_node_checks(cfg, vars).0
 }
 
-fn program_available(program: &str, executable: bool, path: &str) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    let usable = |p: &std::path::Path| {
+fn is_executable_file(p: &std::path::Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
         p.metadata()
-            .is_ok_and(|m| m.is_file() && (!executable || m.permissions().mode() & 0o111 != 0))
-    };
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    }
+    #[cfg(not(unix))]
+    {
+        p.is_file()
+    }
+}
+
+fn program_available(program: &str, path: &str) -> bool {
     let p = std::path::Path::new(program);
     if p.components().count() > 1 {
-        usable(p)
+        is_executable_file(p)
     } else {
-        std::env::split_paths(path).any(|d| usable(&d.join(p)))
+        std::env::split_paths(path)
+            .map(|d| d.join(p))
+            .any(|candidate| is_executable_file(&candidate))
     }
 }
 
@@ -154,7 +164,7 @@ fn check_tailcat(
     }
     let program = explicit.as_deref().unwrap_or("tailcat");
     let path = vars("PATH").unwrap_or_default();
-    if !program_available(program, true, &path) {
+    if !program_available(program, &path) {
         harnesses.missing_tailcat = true;
         warnings.push(steve_i18n::t!(
             "hub.check.tailcat_missing",
@@ -163,51 +173,119 @@ fn check_tailcat(
     }
 }
 
+/// Timeout for invoking the sibling `steve-node harness-probe` binary during offline preflight.
+const HARNESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+fn sibling_steve_node() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let candidate = exe.with_file_name("steve-node");
+    if is_executable_file(&candidate) {
+        return Some(candidate);
+    }
+    // Under `cargo test`, unit-test binaries live in `target/<profile>/deps/`; check parent dir too.
+    if let Some(parent) = exe.parent().and_then(std::path::Path::parent) {
+        let sibling = parent.join("steve-node");
+        if is_executable_file(&sibling) {
+            return Some(sibling);
+        }
+    }
+    None
+}
+
+/// Delegates offline harness & Node.js resolution to `steve-node harness-probe` (which uses
+/// `steve-acp` as the single source of truth) so `steve-hub` never duplicates adapter discovery.
+fn probe_harnesses_via_node(
+    cfg: &Config,
+    vars: &crate::wire::Vars,
+) -> Option<steve_node_api::HarnessPreflight> {
+    if let Some(bin) = sibling_steve_node() {
+        let mut cmd = std::process::Command::new(bin);
+        cmd.arg("harness-probe")
+            .env_clear()
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .env("STEVE_HOME", &cfg.home)
+            .env("STEVE_HARNESS_MANIFEST", &cfg.harness_manifest);
+        for key in ["HOME", "PATH", "STEVE_NODE"] {
+            if let Some(v) = vars(key) {
+                cmd.env(key, v);
+            }
+        }
+        for (_, env_var) in steve_harness_spec::builtin_command_vars() {
+            if let Some(v) = vars(env_var) {
+                cmd.env(env_var, v);
+            }
+        }
+        if let Ok(mut child) = cmd.spawn() {
+            let deadline = std::time::Instant::now() + HARNESS_PROBE_TIMEOUT;
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => {
+                        if status.success()
+                            && let Some(mut stdout) = child.stdout.take()
+                        {
+                            let mut buf = Vec::new();
+                            if std::io::Read::read_to_end(&mut stdout, &mut buf).is_ok()
+                                && let Ok(report) =
+                                    serde_json::from_slice::<steve_node_api::HarnessPreflight>(&buf)
+                            {
+                                return Some(report);
+                            }
+                        }
+                        break;
+                    }
+                    Ok(None) if std::time::Instant::now() < deadline => {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                    _ => {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    #[cfg(test)]
+    {
+        return Some(steve_node_cli::local_node::probe_harnesses(|k| {
+            if k == "STEVE_HOME" {
+                Some(cfg.home.to_string_lossy().into_owned())
+            } else if k == "STEVE_HARNESS_MANIFEST" {
+                Some(cfg.harness_manifest.to_string_lossy().into_owned())
+            } else {
+                vars(k)
+            }
+        }));
+    }
+    #[cfg(not(test))]
+    {
+        None
+    }
+}
+
 fn local_node_checks(cfg: &Config, vars: &crate::wire::Vars) -> (Vec<String>, HarnessCheck) {
     let mut warnings = Vec::new();
     let mut harnesses = HarnessCheck::default();
-    let path = vars("PATH").unwrap_or_default();
-    let available = |program: &str, executable: bool| program_available(program, executable, &path);
-    let path_only_bins: std::collections::HashMap<&str, (&str, &str)> =
-        steve_harness_spec::builtin_bins()
-            .zip(steve_harness_spec::builtin_command_vars())
-            .filter(|((id, ..), _)| !steve_harness_spec::is_npm_managed(id))
-            .map(|((id, bin, _), (_, var))| (id, (bin, var)))
-            .collect();
-    for (harness, adapter) in &cfg.adapters {
-        let js = steve_acp::is_node_script(std::path::Path::new(adapter));
-        if !available(adapter, !js) {
-            /* an adapter the user left out at setup (steve_acp::managed) is not a problem to report */
-            if steve_acp::managed::home_of(std::path::Path::new(adapter))
-                .is_some_and(|home| !steve_acp::managed::wanted(&home, harness))
-            {
-                continue;
-            }
-            /* a PATH-only built-in CLI the operator never explicitly pointed at a command is optional */
-            if let Some((bin, var)) = path_only_bins.get(harness.as_str())
-                && adapter == bin
-                && vars(var).is_none_or(|v| v.is_empty())
-                && !cfg.manifest_adapters.contains(harness)
-                && !cfg.declared_adapters.contains_key(harness)
-            {
-                continue;
-            }
-            harnesses.missing_adapters.push(harness.clone());
+    if let Some(preflight) = probe_harnesses_via_node(cfg, vars) {
+        for missing in preflight.missing_adapters {
+            harnesses.missing_adapters.push(missing.harness.clone());
             warnings.push(steve_i18n::t!(
                 "hub.check.adapter_missing",
-                harness = harness,
-                adapter = adapter
+                harness = missing.harness,
+                adapter = missing.adapter
             ));
-        } else if js && !available(&cfg.node, true) {
+        }
+        for missing in preflight.missing_node {
             harnesses.missing_node = true;
             warnings.push(steve_i18n::t!(
                 "hub.check.node_missing",
-                node = cfg.node,
-                harness = harness
+                node = missing.node,
+                harness = missing.harness
             ));
-        } else {
-            harnesses.resolved_adapters.push(harness.clone());
         }
+        harnesses.resolved_adapters = preflight.resolved_adapters;
     }
     harnesses.missing_adapters.sort();
     harnesses.resolved_adapters.sort();
@@ -291,19 +369,12 @@ mod tests {
         });
         let cfg = Config::from_vars(|k| match k {
             "STEVE_HOME" => Some("/nonexistent/steve-test/home".into()),
-            "STEVE_ADAPTER_CODEX" => Some("/nonexistent/steve-test/codex-acp".into()),
-            v if v.starts_with("STEVE_ADAPTER_") => Some("/usr/bin/false".into()),
             _ => None,
         })
         .expect("config");
         let zh = steve_i18n::with(steve_i18n::ZH_CN, || local_node_warnings(&cfg, &vars));
         let en = steve_i18n::with(steve_i18n::EN, || local_node_warnings(&cfg, &vars));
         assert_eq!(zh.len(), en.len(), "{zh:?} {en:?}");
-        assert!(
-            zh.iter().any(|w| w.contains("ACP 适配器 codex")
-                && w.contains("/nonexistent/steve-test/codex-acp")),
-            "{zh:?}"
-        );
         assert!(
             zh.iter().any(|w| w.starts_with("STEVE_PRINCIPAL_STATE=on")
                 && w.contains("harness-setup")
@@ -399,14 +470,9 @@ mod tests {
     }
 
     #[test]
-    fn missing_adapters_and_principal_login_migration_are_actionable_warnings() {
-        let r = run(&[("STEVE_ADAPTER_CODEX", "/nonexistent/steve-test/codex-acp")]);
+    fn principal_login_migration_is_an_actionable_warning() {
+        let r = run(&[]);
         assert!(r.ok, "the Hub remains available for setup: {r:?}");
-        assert!(
-            r.warnings
-                .iter()
-                .any(|w| w.contains("ACP adapter codex") && w.contains("install its ACP adapter"))
-        );
         assert!(
             r.warnings
                 .iter()
@@ -423,50 +489,6 @@ mod tests {
     }
 
     #[test]
-    fn an_adapter_left_out_at_setup_is_not_reported_missing() {
-        let tmp = tempfile::tempdir().expect("tmp");
-        let home = tmp.path().to_string_lossy().into_owned();
-        // where Steve itself would have installed it; nothing is there
-        let own = steve_acp::managed::command(tmp.path(), "codex").expect("built in");
-        let own = own.to_string_lossy().into_owned();
-        let missing = |r: &Report| r.warnings.iter().any(|w| w.contains("ACP adapter codex"));
-        let own_install = || {
-            run(&[
-                ("STEVE_HOME", home.as_str()),
-                ("STEVE_ADAPTER_CODEX", own.as_str()),
-            ])
-        };
-        assert!(
-            missing(&own_install()),
-            "nothing was ever chosen: all of them are expected"
-        );
-        let chosen = steve_acp::managed::dir(tmp.path()).join("selected.json");
-        std::fs::create_dir_all(chosen.parent().expect("dir")).expect("dir");
-        std::fs::write(&chosen, r#"["codex"]"#).expect("choice");
-        assert!(missing(&own_install()), "chosen and not there");
-        std::fs::write(&chosen, r#"["claude-code"]"#).expect("choice");
-        let r = own_install();
-        assert!(r.ok && !missing(&r), "{r:?}");
-        // the same choice does not hide an adapter configured somewhere else
-        let r = run(&[
-            ("STEVE_HOME", home.as_str()),
-            ("STEVE_ADAPTER_CODEX", "/nonexistent/steve-test/codex-acp"),
-        ]);
-        assert!(missing(&r), "{r:?}");
-        // a PATH-only adapter left unconfigured stays quiet, unless declared in harness.json
-        let missing_cursor =
-            |r: &Report| r.warnings.iter().any(|w| w.contains("ACP adapter cursor"));
-        assert!(!missing_cursor(&r), "{r:?}");
-        std::fs::write(
-            tmp.path().join("harness.json"),
-            r#"{"adapters": {"cursor": "agent"}}"#,
-        )
-        .expect("manifest");
-        let r = run(&[("STEVE_HOME", home.as_str()), ("PATH", "/nonexistent")]);
-        assert!(missing_cursor(&r), "{r:?}");
-    }
-
-    #[test]
     fn the_other_startup_refusals_are_found_too() {
         let r = run(&[("STEVE_NODE_PROXY_PEERS", "192.0.2.0/24")]);
         assert!(
@@ -476,11 +498,13 @@ mod tests {
         );
         let r = run(&[("STEVE_NODE_PROXY_PEERS", "192.0.2.10")]);
         assert!(r.ok, "{r:?}");
-        let r = run(&[("STEVE_NODE_MODE", "sometimes")]);
-        assert!(
-            r.errors.iter().any(|e| e.contains("STEVE_NODE_MODE")),
-            "{r:?}"
-        );
+        for bad in ["sometimes", "local"] {
+            let r = run(&[("STEVE_NODE_MODE", bad)]);
+            assert!(
+                r.errors.iter().any(|e| e.contains("STEVE_NODE_MODE")),
+                "{bad}: {r:?}"
+            );
+        }
         let r = run(&[("STEVE_PORT", "nope")]);
         assert!(r.errors[0].starts_with("STEVE_PORT"), "{r:?}");
         let tmp = tempfile::tempdir().expect("tmp");
@@ -533,5 +557,79 @@ mod tests {
             !ok.harnesses.missing_tailcat,
             "executable tailcat on PATH must clear missing_tailcat: {ok:?}"
         );
+    }
+
+    #[test]
+    fn harness_check_reports_missing_adapters_node_and_respects_selection() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().expect("tmp");
+        let home = tmp.path().to_string_lossy().into_owned();
+        let js_adapter = tmp.path().join("adapter.js");
+        std::fs::write(&js_adapter, "console.log('ok');\n").expect("js adapter");
+        let js_str = js_adapter.to_string_lossy().into_owned();
+
+        // Only claude-code selected; codex left out of selection must not be flagged missing.
+        std::fs::create_dir_all(tmp.path().join("adapters")).expect("adapters dir");
+        std::fs::write(
+            tmp.path().join("adapters/selected.json"),
+            r#"["claude-code"]"#,
+        )
+        .expect("selected.json");
+
+        let r = steve_i18n::with(steve_i18n::EN, || {
+            let home_c = home.clone();
+            check(move |k| match k {
+                "STEVE_HOME" | "HOME" => Some(home_c.clone()),
+                "STEVE_VAULT_KEYSTORE" => Some("file".into()),
+                "PATH" => Some("/nonexistent".into()),
+                _ => None,
+            })
+        });
+        assert!(r.ok, "{r:?}");
+        assert_eq!(r.harnesses.missing_adapters, vec!["claude-code"]);
+        assert!(!r.harnesses.missing_node);
+
+        // JS adapter present, but node missing from PATH -> missing_node = true.
+        let r_missing_node = steve_i18n::with(steve_i18n::EN, || {
+            let home_c = home.clone();
+            let js_c = js_str.clone();
+            check(move |k| match k {
+                "STEVE_HOME" | "HOME" => Some(home_c.clone()),
+                "STEVE_VAULT_KEYSTORE" => Some("file".into()),
+                "STEVE_ADAPTER_CLAUDE" => Some(js_c.clone()),
+                "PATH" => Some("/nonexistent".into()),
+                _ => None,
+            })
+        });
+        assert!(r_missing_node.harnesses.missing_node, "{r_missing_node:?}");
+        assert!(
+            r_missing_node.harnesses.missing_adapters.is_empty(),
+            "{r_missing_node:?}"
+        );
+
+        // Executable node on PATH resolves the JS adapter cleanly.
+        let bin_dir = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin_dir).expect("bin dir");
+        let node = bin_dir.join("node");
+        std::fs::write(&node, "#!/bin/sh\nexit 0\n").expect("node stub");
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).expect("chmod");
+        let path_str = bin_dir.to_string_lossy().into_owned();
+
+        let r_ok = steve_i18n::with(steve_i18n::EN, || {
+            let home_c = home.clone();
+            let js_c = js_str.clone();
+            let path_c = path_str.clone();
+            check(move |k| match k {
+                "STEVE_HOME" | "HOME" => Some(home_c.clone()),
+                "STEVE_VAULT_KEYSTORE" => Some("file".into()),
+                "STEVE_ADAPTER_CLAUDE" => Some(js_c.clone()),
+                "PATH" => Some(path_c.clone()),
+                _ => None,
+            })
+        });
+        assert!(!r_ok.harnesses.missing_node, "{r_ok:?}");
+        assert!(r_ok.harnesses.missing_adapters.is_empty(), "{r_ok:?}");
+        assert_eq!(r_ok.harnesses.resolved_adapters, vec!["claude-code"]);
     }
 }

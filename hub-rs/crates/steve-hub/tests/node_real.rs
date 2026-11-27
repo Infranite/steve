@@ -1,4 +1,4 @@
-//! A7: the local Node (`STEVE_NODE_MODE=local`) against the real Claude, end to end on the real
+//! A7: the colocated service Node against the real Claude, end to end on the real
 //! `steve-hub` binary. They cost model calls and use the user's Claude login (read-only), so every
 //! case is `#[ignore]`d and run by hand only:
 //!
@@ -37,7 +37,7 @@ use std::process::Stdio;
 use std::time::Duration;
 use steve_runtime::testkit::eventually;
 use steve_runtime::testkit::eventually_sync;
-use steve_runtime::testkit::process::{Command, ProcessGuard};
+use steve_runtime::testkit::process::{Command, GroupGuard, ProcessGuard};
 use steve_store::testkit::hub::node_process;
 
 use serde_json::{Value, json};
@@ -144,26 +144,49 @@ impl Home {
     }
 }
 
-/// A running Hub process (its own process group, reaped by [`ProcessGuard`]).
-struct Hub(Option<ProcessGuard>);
+/// A running Hub process (its own process group, reaped by [`ProcessGuard`]) plus cleanup for its
+/// detached colocated `steve-node --local-node` process.
+struct Hub {
+    child: Option<ProcessGuard>,
+    node_pid_file: PathBuf,
+}
 
 impl Hub {
-    /// SIGKILL the Hub and its agents (each agent runs in its own process group).
+    fn kill_local_node(&self) {
+        if let Ok(text) = std::fs::read_to_string(&self.node_pid_file)
+            && let Some(pid) = text
+                .lines()
+                .next()
+                .and_then(|l| l.trim().parse::<i32>().ok())
+                .filter(|p| *p > 1)
+        {
+            GroupGuard::kill_pgid(pid);
+        }
+    }
+    /// SIGKILL the Hub and its colocated local Node.
     fn kill(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
         }
+        self.kill_local_node();
     }
-    /// SIGTERM: the Hub stops its Node and the Node its harnesses; SIGKILL after 60 s.
+    /// SIGTERM: the Hub stops cleanly, and the fixture retires its colocated local Node.
     fn stop(&mut self) {
-        if let Some(mut child) = self.0.take() {
+        if let Some(mut child) = self.child.take() {
             child.terminate(Duration::from_secs(60));
         }
+        self.kill_local_node();
     }
 }
 
-/// The real Hub with the local Node on (`STEVE_NODE_MODE=local`). On a [`Home::fake`] the scripted agent replaces claude and
+impl Drop for Hub {
+    fn drop(&mut self) {
+        self.kill();
+    }
+}
+
+/// The real Hub with its colocated service Node. On a [`Home::fake`] the scripted agent replaces claude and
 /// `HOME` is the temp dir, so nothing of the user's login is read.
 fn spawn(h: &Home) -> Hub {
     let mut c = handed::command(env!("CARGO_BIN_EXE_steve-hub"), &[("hub", &h.socket)]);
@@ -179,7 +202,8 @@ fn spawn(h: &Home) -> Hub {
         .env("STEVE_WEB_DIR", &h.web)
         .env("STEVE_HARNESS_MANIFEST", h.steve().join("harness.json"))
         .env_remove("STEVE_NODE")
-        .env("STEVE_NODE_MODE", "local")
+        .env_remove("STEVE_NODE_MODE")
+        .env("STEVE_LOCAL_NODE_PORT", "0")
         .env("STEVE_ADAPTER_CODEX", "/usr/bin/false")
         // no "you ended without delivering" follow-up turn: each case counts its own turns
         .env("STEVE_TAKEOVER_CONTINUES", "0")
@@ -224,7 +248,10 @@ fn spawn(h: &Home) -> Hub {
             .env("STEVE_ADAPTER_CLAUDE", fake)
             .env_remove("CLAUDE_CONFIG_DIR");
     }
-    Hub(Some(c.spawn().expect("spawn hub")))
+    Hub {
+        child: Some(c.spawn().expect("spawn hub")),
+        node_pid_file: h.steve().join("data/node/service.pid"),
+    }
 }
 
 /// Now, in ms since the epoch (the clock the Hub stamps rows with).
@@ -235,7 +262,7 @@ fn now_ms() -> i64 {
         .as_millis() as i64
 }
 
-/// Up and serving the full app.
+/// Up and serving the full app, with its colocated service Node linked and reconciled.
 async fn serving(h: &Home) {
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!("the Hub serves; log:\n{}", hub_log(h))
@@ -249,9 +276,9 @@ async fn serving(h: &Home) {
         else {
             return false;
         };
-        r.json::<Value>()
-            .await
-            .is_ok_and(|v| v["ok"] == true && v["maintenance"] != true)
+        r.json::<Value>().await.is_ok_and(|v| {
+            v["ok"] == true && v["maintenance"] != true && v["node"]["reconciled"] == true
+        })
     })
     .await;
 }
@@ -260,6 +287,11 @@ fn hub_log(h: &Home) -> String {
     let s = std::fs::read_to_string(h.dir.path().join("hub.log")).unwrap_or_default();
     let lines: Vec<&str> = s.lines().collect();
     let mut out = lines[lines.len().saturating_sub(60)..].join("\n");
+    if let Ok(ns) = std::fs::read_to_string(h.steve().join("data/node/logs/local-node.log")) {
+        let nlines: Vec<&str> = ns.lines().collect();
+        out.push_str("\nlocal-node.log:\n");
+        out.push_str(&nlines[nlines.len().saturating_sub(40)..].join("\n"));
+    }
     // the Node's side, which the Hub's log may not tell: its commands and their receipts
     if let Ok(rows) = node_process::command_trace(&h.db_path()) {
         out.push_str("\nnode_commands:\n");

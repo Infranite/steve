@@ -5,12 +5,14 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::CreateItem;
-use crate::git::tests::{branch_with, g, repo};
+use crate::git::tests::{branch_with, g, git_read, git_test, repo};
 use crate::patch;
 use crate::repo::WS;
 use crate::testkit::Kit;
-use crate::workspace::{self, DiskPolicy, purge, trash_dir};
+use crate::workspace::{self, DiskPolicy};
+use steve_node::housekeeping::{
+    cache_dirs, in_use, process_dirs, purge, scratch_cache_dirs, space, to_trash, trash_dir,
+};
 
 /// Steve's repo in miniature: `target/` and `node_modules/` ignored, on main.
 fn project(k: &Kit) -> (PathBuf, String) {
@@ -95,7 +97,7 @@ fn cache_dirs_are_ignored_untracked_and_marked_or_known() {
     fs::create_dir_all(wt.join("vendor/node_modules")).unwrap();
     fs::write(wt.join("vendor/node_modules/a.js"), "a").unwrap();
     g(&wt, &["add", "-f", "vendor/node_modules/a.js"]);
-    let found: Vec<String> = workspace::cache_dirs(&wt)
+    let found: Vec<String> = cache_dirs(&wt)
         .iter()
         .map(|p| p.strip_prefix(&wt).unwrap().to_string_lossy().to_string())
         .collect();
@@ -113,9 +115,7 @@ fn a_closed_item_gives_back_its_caches_and_a_landed_worktree_keeps_its_branch() 
     g(&r, &["add", "m.txt"]);
     g(&r, &["commit", "-q", "-m", "main moved on"]);
     g(&r, &["cherry-pick", &branch]);
-    assert!(
-        crate::git::git_test(&r, &["merge-base", "--is-ancestor", &branch, "main"]) == Ok(false)
-    );
+    assert!(git_test(&r, &["merge-base", "--is-ancestor", &branch, "main"]) == Ok(false));
 
     let res = k.core.reclaim_workspaces().unwrap();
     assert!(freed_of(&res, &done) >= 2 << 20, "{res:?}");
@@ -145,9 +145,6 @@ fn a_closed_item_gives_back_its_caches_and_a_landed_worktree_keeps_its_branch() 
             .any(|t| t.contains("回收了可重建的缓存 node_modules、target")),
         "{tl:?}"
     );
-    /* continuing brings the worktree back from the kept branch */
-    k.core.tx().ensure_cwd(&done).unwrap();
-    assert!(wt.join("x.txt").exists());
 }
 
 /// #180: a toolchain's output moved into the item's `.steve/build` (cargo's `target` through
@@ -214,7 +211,7 @@ fn clean_unmerged_closed_worktree_is_removed_keeping_branch_and_dirty_work_stays
     let diagnose = |res: &workspace::Reclaimed| {
         let root = &k.core.config().worktrees;
         let root = root.canonicalize().unwrap_or_else(|_| root.clone());
-        let procs = workspace::process_dirs().map(|dirs| {
+        let procs = process_dirs().map(|dirs| {
             dirs.into_iter()
                 .filter(|path| path.starts_with(&root))
                 .collect::<Vec<_>>()
@@ -229,8 +226,8 @@ fn clean_unmerged_closed_worktree_is_removed_keeping_branch_and_dirty_work_stays
                 path.join("x.txt").exists(),
                 path.join("node_modules").exists(),
                 path.join("target").exists(),
-                procs.as_deref().map(|p| workspace::in_use(path, p)),
-                crate::git::git_read(
+                procs.as_deref().map(|p| in_use(path, p)),
+                git_read(
                     path,
                     &[
                         "status",
@@ -239,7 +236,7 @@ fn clean_unmerged_closed_worktree_is_removed_keeping_branch_and_dirty_work_stays
                         "--ignored"
                     ],
                 ),
-                crate::git::git_read(
+                git_read(
                     path,
                     &[
                         "check-ignore",
@@ -250,7 +247,7 @@ fn clean_unmerged_closed_worktree_is_removed_keeping_branch_and_dirty_work_stays
                         "target/"
                     ],
                 ),
-                crate::git::git_read(
+                git_read(
                     path,
                     &["ls-files", "--", "notes.txt", "node_modules", "target"],
                 ),
@@ -318,7 +315,7 @@ fn busy_sessions_and_running_processes_keep_everything() {
     let res = res.unwrap();
     assert!(busy_wt.join("target/debug/big").exists());
     assert!(served_wt.join("node_modules/x/index.js").exists());
-    if workspace::process_dirs().is_some() {
+    if process_dirs().is_some() {
         assert!(
             res.kept
                 .iter()
@@ -347,7 +344,10 @@ fn a_release_on_its_way_keeps_the_worktree_until_it_is_done() {
     assert!(wt.join("x.txt").exists(), "the worktree is kept");
     k.rt.st().release_answers.remove(&s);
     assert!(k.core.tx().tidy_branch_now(&done).unwrap());
-    assert!(!wt.exists(), "tidied once nothing runs in it");
+    steve_runtime::testkit::eventually_blocking(
+        "The released worktree is reclaimed by Node housekeeping.",
+        || !wt.exists(),
+    );
 }
 
 #[test]
@@ -357,7 +357,7 @@ fn an_interrupted_pass_is_finished_by_the_next() {
     let (id, _, wt) = item_with_caches(&k, &r, &p, "done");
     let trash = trash_dir(&k.core.config().worktrees);
     /* the pass got as far as moving the caches, then the Hub stopped */
-    let moved = workspace::to_trash(&trash, &id, &wt, &workspace::cache_dirs(&wt));
+    let moved = to_trash(&trash, &id, &wt, &cache_dirs(&wt));
     assert_eq!(moved, vec!["node_modules", "target"]);
     assert!(!wt.join("target").exists() && trash.read_dir().unwrap().count() == 1);
     /* and a worktree folder deleted halfway through a removal */
@@ -394,57 +394,13 @@ fn under_pressure_idle_open_items_give_back_their_caches_oldest_first() {
         steve_store::core_fixture::ItemState::ShiftUpdated(-7_200_000),
     );
     let res = k.core.reclaim_workspaces().unwrap();
-    if workspace::process_dirs().is_some() {
+    if process_dirs().is_some() {
         assert!(freed_of(&res, &idle) >= 2 << 20, "{res:?}");
         assert!(!idle_wt.join("target").exists() && idle_wt.join("x.txt").exists());
     }
     assert_eq!(freed_of(&res, &fresh), 0);
     assert!(fresh_wt.join("target/debug/big").exists());
     assert!(res.removed.is_empty(), "open items keep their worktree");
-}
-
-#[test]
-fn below_the_floor_no_new_worktree_is_made_but_an_existing_one_continues() {
-    let k = Kit::with(|c| {
-        c.disk = DiskPolicy {
-            floor: u64::MAX,
-            low: u64::MAX,
-            idle_ms: i64::MAX,
-        }
-    });
-    let (r, p) = project(&k);
-    let i = k
-        .core
-        .create_item(CreateItem {
-            ws: WS.into(),
-            goal: "g".into(),
-            title: "新事项".into(),
-            bot: Some("dev".into()),
-            project: Some(Some(p.clone())),
-            ..Default::default()
-        })
-        .unwrap();
-    assert!(!k.core.config().worktrees.join(&i.id).exists());
-    let cards = k.db().decisions_of_item(&i.id).unwrap();
-    assert!(
-        cards
-            .iter()
-            .any(|d| d.kind == "fail" && d.question.contains("磁盘空间不足")),
-        "{:?}",
-        cards.iter().map(|d| &d.question).collect::<Vec<_>>()
-    );
-
-    /* an item whose worktree is there already is not stopped */
-    let (id, _, wt) = item_with_caches(&k, &r, &p, "run");
-    let s = k.core.tx().start_session(&id, Some("继续"), None).unwrap();
-    assert_eq!(s.cwd, wt.to_string_lossy());
-    /* and one whose worktree was given back gets its sources again (megabytes, not a new build) */
-    g(
-        &r,
-        &["worktree", "remove", "--force", &wt.to_string_lossy()],
-    );
-    k.core.tx().ensure_cwd(&id).unwrap();
-    assert!(wt.join("x.txt").exists());
 }
 
 #[test]
@@ -484,9 +440,9 @@ fn reclaiming_frees_the_disk_space() {
         f.sync_all().unwrap();
     }
     let root = k.core.config().worktrees.clone();
-    let before = workspace::space(&root).unwrap().0;
+    let before = space(&root).unwrap().0;
     let res = k.core.reclaim_workspaces().unwrap();
-    let after = workspace::space(&root).unwrap().0;
+    let after = space(&root).unwrap().0;
     let gained = after.saturating_sub(before);
     println!(
         "freed (counted) {} · free before {} · after {} · gained {}",
@@ -578,7 +534,7 @@ fn under_pressure_an_ended_scratch_item_gives_back_only_its_marked_caches() {
     let (ended, dir) = scratch_item(&k, "done");
     let (open, open_dir) = scratch_item(&k, "run");
     let res = k.core.reclaim_workspaces().unwrap();
-    if workspace::process_dirs().is_some() {
+    if process_dirs().is_some() {
         assert!(freed_of(&res, &ended) >= 2 << 20, "{res:?}");
         assert!(!dir.join("target").exists() && !dir.join("node_modules").exists());
     }
@@ -655,7 +611,7 @@ fn shared_disposable_predicate_preserves_reclaimer_depth_and_never_follows_links
     ));
     assert!(!workspace::is_disposable_dir(&user, None));
     assert!(!workspace::is_disposable_dir(&link, None));
-    let found = workspace::scratch_cache_dirs(root.path());
+    let found = scratch_cache_dirs(root.path());
     for path in [&named, &marked, &tool_output] {
         assert!(found.contains(path));
     }

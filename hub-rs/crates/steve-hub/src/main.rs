@@ -37,8 +37,8 @@ fn main() -> anyhow::Result<()> {
     // Skip unknown arguments and --check-config (which validates the exact caller-supplied env).
     let should_load_env = match args.first().map(String::as_str) {
         None => true,
-        Some("--supervise" | "--local-node") if args.len() == 1 => true,
-        Some("--serve-web" | "--access" | "--admin" | "--adapters") => true,
+        Some("--supervise") if args.len() == 1 => true,
+        Some("--serve-web" | "--access" | "--admin") => true,
         _ => false,
     };
     if should_load_env {

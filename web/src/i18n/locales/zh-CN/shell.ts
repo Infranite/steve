@@ -241,6 +241,8 @@ export default {
     waitTurns_other: "等 {{count}} 个回合结束",
     restartNow: "马上重启",
     hold: "正在发布 <link>{{item}}</link>，{{wait}}；新消息发布后发送",
+    localNodeUpdating: "本机 Node 正在更新，{{wait}}；切换完成前对话回复暂不可用",
+    localNodeSwitchNow: "马上切换",
   },
   /* resume.tsx: the harness's own session behind a conversation */
   resume: {

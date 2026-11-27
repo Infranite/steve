@@ -80,7 +80,7 @@ pub use workflow_run::{
     WfDeliveryBlocker, WfRunAction, WfRunSnapshot, WfToolOutput, WorkflowStepExecutor,
     validate_child_result,
 };
-pub use worktrees::{CLOSED_WORKTREE_BACKFILL_KEY, WorktreeBackfillReport};
+pub use worktrees::{CLOSED_WORKTREE_BACKFILL_KEY, WorkspaceFailure, WorktreeBackfillReport};
 
 use repo::Db;
 use std::collections::HashMap;
@@ -104,10 +104,14 @@ pub(crate) struct Inner {
     hook_queue: modules::HookQueue,
     /// What Steve has to tell a session with its next message (a delivery that went void meanwhile).
     steve_notes: Mutex<HashMap<String, String>>,
-    /// A reclaim pass or trash purge is running (`workspace`): one at a time.
+    /// A reclaim pass is running (`workspace`): one at a time.
     reclaiming: std::sync::atomic::AtomicBool,
-    /// The way to items' Nodes, once wired (`node_git`); unset: the Hub's own git everywhere.
+    /// Last observed free bytes on the worktrees volume (reported by Node housekeeping; `u64::MAX` = unknown).
+    last_free_bytes: std::sync::atomic::AtomicU64,
+    /// The way to items' Nodes, once wired (`node_git`).
     node_git: OnceLock<Arc<dyn node_git::NodeGit>>,
+    /// Workspace disk inspection and reclamation on the colocated Node (`workspace`).
+    housekeeping: OnceLock<Arc<dyn workspace::NodeHousekeeping>>,
     /// Out-of-process JS workflow step executor (`StepRunner` wired by `steve-hub`).
     workflow_executor: OnceLock<Arc<dyn workflow_run::WorkflowStepExecutor>>,
     /// Per-run async locks serializing `step_workflow_run` executions for the same `run_id`.
@@ -210,7 +214,9 @@ impl Core {
             hook_queue: OnceLock::new(),
             steve_notes: Default::default(),
             reclaiming: Default::default(),
+            last_free_bytes: std::sync::atomic::AtomicU64::new(u64::MAX),
             node_git: OnceLock::new(),
+            housekeeping: OnceLock::new(),
             workflow_executor: OnceLock::new(),
             workflow_run_locks: Default::default(),
             workflow_step_permits: Arc::new(tokio::sync::Semaphore::new(
@@ -297,14 +303,19 @@ impl Core {
     }
 }
 
-/// Run `f` on its own thread inside the caller's tokio runtime, if there is one. A TS timer runs on the event loop;
-/// a bare thread has no runtime, and the agent runtime starts turns (and the item hooks run) with `tokio::spawn`.
+/// Run `f` off the current critical section inside the caller's tokio runtime blocking pool, if
+/// there is one (or a bare thread in synchronous unit tests with no runtime). Using the runtime's
+/// blocking pool instead of a raw thread with `Handle::enter` keeps `block_in_place` / `block_on`
+/// valid inside detached work such as `disk_low -> reclaim_workspaces` and git gathers.
 pub(crate) fn detach(f: impl FnOnce() + Send + 'static) {
-    let rt = tokio::runtime::Handle::try_current().ok();
-    std::thread::spawn(move || {
-        let _in = rt.as_ref().map(|h| h.enter());
-        f()
-    });
+    match tokio::runtime::Handle::try_current() {
+        Ok(rt) => {
+            rt.spawn_blocking(f);
+        }
+        Err(_) => {
+            std::thread::spawn(f);
+        }
+    }
 }
 
 impl Tx<'_> {

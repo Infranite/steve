@@ -39,7 +39,7 @@ governor = { version = "=0.10.4", optional = true }
 metrics = { version = "=0.24.6", optional = true }
 tracing = { version = "=0.1.44", optional = true }
 libc = { version = "=0.2.191", optional = true }
-moka = { version = "=0.12.16", default-features = false, features = ["future"], optional = true }
+moka = { version = "=0.12.16", default-features = false, features = ["future", "sync"], optional = true }
 
 [dev-dependencies]
 steve-runtime = { path = ".", features = ["due-contract", "testkit", "process"] }

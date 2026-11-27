@@ -321,5 +321,12 @@
   "core.worktree.cleanup_in_use": "Workspace cleanup deferred (%{cwd}): another process is still using this directory",
   "core.worktree.branch_deleted": "Deleted merged branch %{branch}",
   "core.worktree.branch_delete_failed": "Failed to delete merged branch %{branch}: %{error}",
-  "core.worktree.branch_preserved": "Preserved unmerged branch %{branch} (at %{head})"
+  "core.worktree.branch_preserved": "Preserved unmerged branch %{branch} (at %{head})",
+  "core.node.local_updating": "The local Node is updating and will switch automatically once active turns finish. Please try again shortly.",
+  "core.workspace.node_unconnected_inspect": "Local device Node is not connected; cannot inspect workspace status",
+  "core.workspace.node_unconnected_clean": "Local device Node is not connected; cannot clean workspace",
+  "core.workspace.node_unconnected_reclaim": "Local device Node is not connected; cannot reclaim workspaces",
+  "core.workspace.node_unconnected_disk": "Local device Node is not connected; cannot inspect workspace disk usage",
+  "core.workspace.node_offline": "Local device Node is offline: %{detail}",
+  "core.release.no_node_rebase": "No device Node available to run rebase"
 }

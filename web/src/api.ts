@@ -124,6 +124,7 @@ export type AddHarnessInput = {
 /** a harness adapter as the Hub knows it: what its Node's probe said (modes are Steve's: plan, ask, accept_edits, auto, full_access) */
 export type RRuntime = {
   id: string; name: string; ok: boolean; version: string; path: string; models: string[]; note: string; custom?: boolean; builtin?: boolean; error?: string | null; install_hint?: string | null
+  brand_mark?: string; model_strip_prefixes?: string[]
   adapter_version?: string | null; default_model?: string | null; efforts?: string[]; effort_mode?: EffortMode; effort_map?: EffortMapping[]; modes?: string[] | null
   /** its adapter declares where it reads skills, so a Bot's skills reach its sessions (absent: not said) */
   skills?: boolean
@@ -198,8 +199,9 @@ export type Shell = {
   notifySeen?: number
   dismissedAlerts?: string[]
 }
-export type Summary = { ws: string; workspace_name: string; thinking: boolean; live?: ThreadLiveSnapshot | null; hold: RHold | null }
+export type Summary = { ws: string; workspace_name: string; thinking: boolean; live?: ThreadLiveSnapshot | null; hold: RHold | null; local_node_updating?: RLocalNodeUpdating | null }
 export type RHold = { item: string; running: number; since: number }
+export type RLocalNodeUpdating = { running: number }
 export type RNotice = { id: string; kind: "release" | "archive" | "system"; level: "info" | "success" | "fail"; text: string; item_id: string | null; created: number; closed?: boolean }
 export type HubEvent = Envelope<BusEvent> | StreamControl
 

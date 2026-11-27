@@ -227,6 +227,10 @@ pub fn typed(ty: &str, ws: &str) -> BusEvent {
             ws: ws.into(),
         })
         .into(),
+        "local_node.updating" => DomainEvent::from(DevicesEvent::LocalNodeUpdating {
+            updating: Some(devices::LocalNodeUpdating { running: 1 }),
+        })
+        .into(),
         _ => panic!("missing typed fixture: {ty}"),
     }
 }

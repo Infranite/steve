@@ -32,6 +32,12 @@ pub(crate) struct Research {
     cfg: Mutex<Option<Arc<r::ResearchConfig>>>,
 }
 
+impl Research {
+    pub(crate) fn is_enabled(&self) -> bool {
+        self.cfg.lock().unwrap().is_some()
+    }
+}
+
 /// A recorded process group: its id and its leader's start time.
 type Group = (i64, Option<u64>);
 

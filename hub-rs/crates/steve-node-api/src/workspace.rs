@@ -611,3 +611,339 @@ pub fn github_repo(url: &str) -> Option<String> {
     };
     (ok(o) && ok(n) && !n.contains('/')).then(|| format!("{o}/{n}").to_lowercase())
 }
+
+// ── Host roots, git refusal codes, host project setup, housekeeping, and stdio MCP ──
+
+/// A directory root configured for a colocated or standalone Node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostRoot {
+    pub id: RootId,
+    pub path: std::path::PathBuf,
+    /// How it is shown (`~/code`).
+    pub display: String,
+    /// A read-only root is listed, read and scanned; no workspace is prepared in it.
+    pub access: crate::discovery::RootAccess,
+}
+
+/// Where a prepared workspace lives on the colocated machine.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalDir {
+    pub path: std::path::PathBuf,
+    pub owned: bool,
+}
+
+/// Stable git push refusal detail strings returned by a Node's `git_apply` face.
+pub const GIT_HOST_FORBIDDEN: &str = "push target forbidden by STEVE_FORBID_REAL_HOSTS";
+pub const GIT_BRANCH_MOVED: &str = "the branch moved";
+pub const GIT_NO_BRANCH: &str = "no such branch";
+pub const GIT_WRONG_REMOTE: &str = "the workspace's remote points elsewhere";
+
+/// Colocated host directory browser request (owner-only, before a directory becomes a root).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseDirRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseDirEntry {
+    pub name: String,
+    pub path: String,
+    pub git: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BrowseDirResponse {
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
+    pub exists: bool,
+    pub denied: bool,
+    pub git: bool,
+    #[serde(default)]
+    pub dirs: Vec<BrowseDirEntry>,
+    pub more: bool,
+}
+
+/// Colocated host directory inspection for project creation / AI description.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescribeDirRequest {
+    pub path: String,
+    /// When true, also collect top-level names and README heads for description drafting.
+    #[serde(default)]
+    pub with_readme: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DescribeDirResponse {
+    pub resolved_path: String,
+    pub exists: bool,
+    pub is_dir: bool,
+    pub git: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub files: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub readmes: Vec<(String, String)>,
+}
+
+/// Colocated path check (canonicalization + directory check, e.g. for knowledge folder policy).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathCheckRequest {
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PathCheckResponse {
+    pub exists: bool,
+    pub is_dir: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub canonical: Option<String>,
+    /// True when the path is an existing directory writable by the Node process.
+    #[serde(default)]
+    pub writable: bool,
+}
+
+/// Typed refusal reasons for owner-initiated project directory provisioning on the colocated Node.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectSetupError {
+    DirectoryName,
+    Parent,
+    Conflict,
+    Filesystem,
+    Remote,
+    Branch,
+    DefaultBranch,
+    Git,
+    Authentication,
+    Network,
+    Timeout,
+    Clone,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSetupPreviewRequest {
+    pub parent: String,
+    pub directory: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum ProjectSetupPreview {
+    Ready { path: String },
+    Failed { error: ProjectSetupError },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ProjectSetupMode {
+    Empty,
+    Clone {
+        remote: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        branch: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSetupRequest {
+    pub parent: String,
+    pub directory: String,
+    pub preview: String,
+    pub mode: ProjectSetupMode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProjectSetupStatus {
+    pub operation: OperationId,
+    /// `connecting` | `receiving` | `resolving` | `checkout` | `done` | `failed`.
+    pub phase: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<ProjectSetupError>,
+}
+
+impl ProjectSetupStatus {
+    pub fn is_terminal(&self) -> bool {
+        matches!(self.phase.as_str(), "done" | "failed")
+    }
+}
+
+/// One worktree or scratch directory to measure on the colocated Node.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskInspectTarget {
+    pub item: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub repo: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub branch: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskInspectRequest {
+    pub worktrees_root: String,
+    #[serde(default)]
+    pub entries: Vec<DiskInspectTarget>,
+    #[serde(default)]
+    pub scratch: Vec<DiskInspectTarget>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskEntryMeasure {
+    pub item: String,
+    pub exists: bool,
+    pub bytes: u64,
+    pub cache_bytes: u64,
+    #[serde(default)]
+    pub caches: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub in_use: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_merged: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_head: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskOrphan {
+    pub path: String,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskInspectResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub git: Option<String>,
+    pub trash: u64,
+    #[serde(default)]
+    pub entries: Vec<DiskEntryMeasure>,
+    #[serde(default)]
+    pub scratch: Vec<DiskEntryMeasure>,
+    #[serde(default)]
+    pub orphans: Vec<DiskOrphan>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReclaimClosedTarget {
+    pub item: String,
+    pub path: String,
+    pub repo: String,
+    pub branch: String,
+    pub keep_unmerged: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReclaimCacheTarget {
+    pub item: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskReclaimRequest {
+    pub worktrees_root: String,
+    #[serde(default)]
+    pub git_projects: Vec<String>,
+    #[serde(default)]
+    pub closed_worktrees: Vec<ReclaimClosedTarget>,
+    #[serde(default)]
+    pub idle_worktrees: Vec<ReclaimCacheTarget>,
+    #[serde(default)]
+    pub ended_scratch: Vec<ReclaimCacheTarget>,
+    pub low_bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskFreed {
+    pub item: String,
+    pub caches: Vec<String>,
+    pub bytes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskKept {
+    pub item: String,
+    pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiskReclaimResponse {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_before: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub free_after: Option<u64>,
+    #[serde(default)]
+    pub freed: Vec<DiskFreed>,
+    #[serde(default)]
+    pub removed: Vec<String>,
+    #[serde(default)]
+    pub kept: Vec<DiskKept>,
+    /// Branches deleted because they were already merged (`item -> branch`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deleted_branches: Vec<(String, String)>,
+    /// Branches kept with short head (`(item, path, branch, head)` — `head` empty if unresolvable).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub kept_branches: Vec<(String, String, String, String)>,
+    /// Merged branches that failed `git branch -d` after the worktree was removed (`(item, branch, error)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub branch_delete_failed: Vec<(String, String, String)>,
+    /// Merged branches deleted for an already-absent worktree (`(item, branch)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub absent_deleted_branches: Vec<(String, String)>,
+    /// Merged branches that failed deletion for an already-absent worktree (`(item, branch, error)`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub absent_branch_delete_failed: Vec<(String, String, String)>,
+}
+
+/// External library `stdio` MCP server specification hosted inside the colocated Node's sandbox.
+/// Secret values never cross the wire here: `secret_env` names `(ENV_VAR, secret_id)` pairs that
+/// the Node fetches once via `HubSecrets::take(operation, secret_id)` when opening the process.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpStdioServer {
+    pub id: String,
+    pub updated: i64,
+    pub name: String,
+    pub command: String,
+    #[serde(default)]
+    pub args: Vec<String>,
+    #[serde(default)]
+    pub env: Vec<(String, String)>,
+    #[serde(default)]
+    pub secret_env: Vec<(String, String)>,
+    pub operation: OperationId,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpStdioTool {
+    pub name: String,
+    pub description: String,
+    pub input_schema: serde_json::Value,
+    #[serde(default)]
+    pub annotations: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpStdioCallRequest {
+    pub server: McpStdioServer,
+    pub tool: String,
+    pub arguments: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct McpStdioCallResponse {
+    pub result: serde_json::Value,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct McpStdioSweepRequest {
+    /// Currently existing `(server_id, updated)` versions in the Hub store.
+    pub live: Vec<(String, i64)>,
+}

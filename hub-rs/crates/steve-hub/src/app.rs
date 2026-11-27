@@ -111,8 +111,10 @@ async fn maintenance_gate(State(st): State<AppState>, req: Request, next: Next) 
                 .get(header::AUTHORIZATION)
                 .and_then(|v| v.to_str().ok())
                 .and_then(|v| v.strip_prefix("Bearer "));
-            // a Node turn waiting for a permission holds the drain until it is answered (D1), so
-            // its answer must get through
+            // While maintenance is draining (before seal), only a waiting permission card of a
+            // currently running Node turn is admitted through `continuing_activity`, holding an
+            // activity permit until the handler finishes so seal waits for it; all other decisions
+            // and any late mutation after seal receive 503.
             let card = (*req.method() == axum::http::Method::POST)
                 .then(|| path.strip_prefix("/api/decisions/"))
                 .flatten()
@@ -242,18 +244,29 @@ fn health_routes(st: &AppState) -> Router {
         .route("/healthz", get({
             let cfg = st.cfg.clone();
             let store = st.modules.as_ref().map(|m| m.store.clone());
-            let (local, remote) = (st.node.clone(), st.nodes.is_some());
+            let (local, nodes) = (st.node.clone(), st.nodes.clone());
+            let remote = nodes.is_some();
             move || async move {
                 // the outbox (owed / dead deliveries) is information; `ok` stays the liveness answer.
                 // `drain`: the durable maintenance drain is on (business answers 503) and a release script
                 // must lift it. Not `maintenance`, which only the supervisor's candidate gate reports.
                 // `node`: the Node path for rollout and rollback decisions (node_runtime::health)
                 let drain = store.as_ref().map(|s| s.maintenance());
+                let linked = nodes.as_ref().is_some_and(|svc| {
+                    svc.registry
+                        .conn(crate::wire::local_service::NODE_ID)
+                        .is_some_and(|c| !c.is_closed() && !c.is_upgrade())
+                });
                 let (outbox, node) = match store {
                     Some(s) => tokio::task::spawn_blocking(move || {
-                        let node = crate::wire::node_runtime::health(&s, local.as_deref(), remote)
-                            .inspect_err(|e| tracing::warn!("healthz node: {e}"))
-                            .ok();
+                        let node = crate::wire::node_runtime::health(
+                            &s,
+                            local.as_deref(),
+                            remote,
+                            linked,
+                        )
+                        .inspect_err(|e| tracing::warn!("healthz node: {e}"))
+                        .ok();
                         (s.read(|r| steve_store::outbox::stats(r)).ok(), node)
                     })
                     .await

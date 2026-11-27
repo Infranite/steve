@@ -714,17 +714,17 @@ pub(super) fn unpack(bytes: &[u8], dest: &Path, manifest: &Manifest) -> Result<(
     if web["version"].as_str() != Some(&manifest.version)
         || !dest.join("web/dist/index.html").is_file()
         || !dest.join("bin/steve-hub").is_file()
+        || !dest.join("bin/steve-node").is_file()
     {
-        bail!("bundle missing matching Hub/Web")
+        bail!("bundle missing matching Hub/Node/Web")
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(
-            dest.join("bin/steve-hub"),
-            fs::Permissions::from_mode(0o755),
-        )?;
+        for bin in ["bin/steve-hub", "bin/steve-node"] {
+            fs::set_permissions(dest.join(bin), fs::Permissions::from_mode(0o755))?;
+        }
     }
     Ok(())
 }
