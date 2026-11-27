@@ -1784,7 +1784,8 @@ mod tests {
             c.session_meta_with_mode("grok-build", false, Some(PermissionMode::FullAccess)),
             Some(json!({"yoloMode": true}))
         );
-        // antigravity: native PATH binary, runs inside Steve's OS sandbox; auto & full_access use --dangerously-skip-permissions
+        // antigravity: native PATH binary, runs inside Steve's OS sandbox; auto uses native ACP
+        // `auto`, full_access launches with --dangerously-skip-permissions
         let agy = c.adapter_spec("antigravity");
         assert_eq!(agy.name, "Antigravity CLI");
         assert!(agy.properties.nested_sandbox);
@@ -1821,11 +1822,7 @@ mod tests {
                 Some("accept-edits"),
                 vec!["acp"],
             ),
-            (
-                PermissionMode::Auto,
-                None,
-                vec!["acp", "--dangerously-skip-permissions"],
-            ),
+            (PermissionMode::Auto, Some("auto"), vec!["acp"]),
             (
                 PermissionMode::FullAccess,
                 None,
@@ -1989,10 +1986,10 @@ rl.on("line", (line) => {{
         );
         assert_eq!(offer.efforts, ["low", "medium", "high", "xhigh"]);
 
-        // 2. Open session in Ask mode: sends session/set_mode("default"), switches model + effort,
+        // 2. Open session in Auto mode: sends session/set_mode("auto"), switches model + effort,
         //    and handles Antigravity permission request (`CommandLine` + allow/deny options)
         let (program, args) = c
-            .adapter_command_for_mode("antigravity", Some(PermissionMode::Ask))
+            .adapter_command_for_mode("antigravity", Some(PermissionMode::Auto))
             .unwrap();
         assert_eq!(args, vec![OsString::from("acp")]);
         let seen_perm = std::sync::Arc::new(std::sync::Mutex::new(None::<String>));
@@ -2043,19 +2040,19 @@ rl.on("line", (line) => {{
                 cwd: dir.path().to_str().unwrap(),
                 resume: None,
                 mcp_servers: json!([]),
-                mode: Some(c.mode_choice("antigravity", PermissionMode::Ask)),
+                mode: Some(c.mode_choice("antigravity", PermissionMode::Auto)),
                 model: Some("gemini-3.8-flash"),
                 effort: steve_node_api::ReasoningEffort::Medium,
                 effort_mode: steve_node_api::EffortMode::AcpOption,
                 system_prompt: None,
             },
-            c.session_meta_with_mode("antigravity", false, Some(PermissionMode::Ask)),
+            c.session_meta_with_mode("antigravity", false, Some(PermissionMode::Auto)),
             &NoopReports,
         )
         .await
         .unwrap();
         assert_eq!(opened.acp_id, "agy-sess-1");
-        assert_eq!(opened.mode.as_deref(), Some("default"));
+        assert_eq!(opened.mode.as_deref(), Some("auto"));
         let prompt_res = conn
             .request(
                 "session/prompt",
@@ -2068,54 +2065,52 @@ rl.on("line", (line) => {{
         assert_eq!(seen_perm.lock().unwrap().as_deref(), Some("ls -la"));
         conn.kill();
 
-        // 3. Auto and FullAccess modes pass --dangerously-skip-permissions and skip set_mode
-        for mode in [PermissionMode::Auto, PermissionMode::FullAccess] {
-            let (program, args) = c
-                .adapter_command_for_mode("antigravity", Some(mode))
-                .unwrap();
-            assert_eq!(
+        // 3. FullAccess mode passes --dangerously-skip-permissions and skips set_mode
+        let (program, args) = c
+            .adapter_command_for_mode("antigravity", Some(PermissionMode::FullAccess))
+            .unwrap();
+        assert_eq!(
+            args,
+            vec![
+                OsString::from("acp"),
+                OsString::from("--dangerously-skip-permissions")
+            ]
+        );
+        let conn = Conn::spawn(
+            Spawn {
+                prefix: None,
+                program,
                 args,
-                vec![
-                    OsString::from("acp"),
-                    OsString::from("--dangerously-skip-permissions")
-                ]
-            );
-            let conn = Conn::spawn(
-                Spawn {
-                    prefix: None,
-                    program,
-                    args,
-                    cwd: dir.path().to_path_buf(),
-                    env: c.adapter_env("antigravity"),
-                    log_tag: "[test-agy-yolo]".into(),
-                    clean_env: false,
-                },
-                |_, _| {},
-                || {},
-            )
-            .unwrap();
-            let opened_yolo = crate::session::open(
-                &conn,
-                crate::session::OpenConfig {
-                    harness: "antigravity",
-                    client_version: "test",
-                    cwd: dir.path().to_str().unwrap(),
-                    resume: None,
-                    mcp_servers: json!([]),
-                    mode: Some(c.mode_choice("antigravity", mode)),
-                    model: None,
-                    effort: steve_node_api::ReasoningEffort::Default,
-                    effort_mode: steve_node_api::EffortMode::AcpOption,
-                    system_prompt: None,
-                },
-                c.session_meta_with_mode("antigravity", false, Some(mode)),
-                &NoopReports,
-            )
-            .await
-            .unwrap();
-            assert_eq!(opened_yolo.mode, None);
-            conn.kill();
-        }
+                cwd: dir.path().to_path_buf(),
+                env: c.adapter_env("antigravity"),
+                log_tag: "[test-agy-full]".into(),
+                clean_env: false,
+            },
+            |_, _| {},
+            || {},
+        )
+        .unwrap();
+        let opened_full = crate::session::open(
+            &conn,
+            crate::session::OpenConfig {
+                harness: "antigravity",
+                client_version: "test",
+                cwd: dir.path().to_str().unwrap(),
+                resume: None,
+                mcp_servers: json!([]),
+                mode: Some(c.mode_choice("antigravity", PermissionMode::FullAccess)),
+                model: None,
+                effort: steve_node_api::ReasoningEffort::Default,
+                effort_mode: steve_node_api::EffortMode::AcpOption,
+                system_prompt: None,
+            },
+            c.session_meta_with_mode("antigravity", false, Some(PermissionMode::FullAccess)),
+            &NoopReports,
+        )
+        .await
+        .unwrap();
+        assert_eq!(opened_full.mode, None);
+        conn.kill();
 
         let argv_lines: Vec<Vec<String>> = std::fs::read_to_string(&log)
             .unwrap()
@@ -2127,10 +2122,6 @@ rl.on("line", (line) => {{
             vec![
                 vec!["acp".to_string()],
                 vec!["acp".to_string()],
-                vec![
-                    "acp".to_string(),
-                    "--dangerously-skip-permissions".to_string()
-                ],
                 vec![
                     "acp".to_string(),
                     "--dangerously-skip-permissions".to_string()

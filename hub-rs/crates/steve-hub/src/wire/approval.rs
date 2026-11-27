@@ -20,9 +20,8 @@ pub struct Desired {
 
 impl ApprovalModes {
     pub fn native_mode(&self, harness: &str) -> Option<String> {
-        steve_harness_spec::spec(harness, self.0.get(harness))
-            .properties
-            .native_mode_id()
+        let properties = steve_harness_spec::spec(harness, self.0.get(harness)).properties;
+        properties.native_approval().map(|_| properties.modes.auto)
     }
 
     pub fn desired(&self, db: &Store, session: &str) -> Result<Option<Desired>> {
@@ -64,7 +63,7 @@ impl ApprovalModes {
             mode,
             native,
             policy,
-            native_id: spec.properties.native_mode_id(),
+            native_id: native.map(|_| spec.properties.modes.auto.clone()),
         }))
     }
 }

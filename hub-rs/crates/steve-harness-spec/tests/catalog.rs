@@ -21,8 +21,6 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
             entry["properties"]["fallback_efforts"] =
                 json!(["low", "medium", "high", "xhigh", "max"]);
         } else if id == "antigravity" {
-            entry["properties"]["modes"]["auto"] = json!("");
-            entry["properties"]["mode_args"]["auto"] = json!(["--dangerously-skip-permissions"]);
             entry["properties"]["fallback_efforts"] = json!(["low", "medium", "high", "xhigh"]);
         }
         // Card 1 adds declarative native `append_system_context` for empirically verified harnesses.
@@ -201,7 +199,7 @@ fn only_declared_native_approval_modes_are_offered() {
         ("codex", "agent"),
         ("goose", "smart_approve"),
         ("mistral-vibe", "smart-approve"),
-        ("antigravity", ""),
+        ("antigravity", "auto"),
     ];
     for builtin in builtins() {
         let want = native.iter().find(|(id, _)| *id == builtin.id);
@@ -215,19 +213,23 @@ fn only_declared_native_approval_modes_are_offered() {
         if let Some((_, id)) = want {
             use steve_node_api::PermissionMode;
             let offered = [id.to_string(), props.modes.full_access.clone()];
-            let choice =
+            assert_eq!(
                 props
                     .modes
-                    .choice_with(PermissionMode::Auto, false, None, Some(&props.mode_args));
-            assert!(choice.resolve(Some(&offered)).is_ok(), "{}", builtin.id);
+                    .choice(PermissionMode::Auto)
+                    .resolve(Some(&offered)),
+                Ok(Some((*id).into())),
+                "{}",
+                builtin.id
+            );
+            assert!(
+                props
+                    .modes
+                    .choice(PermissionMode::Auto)
+                    .resolve(Some(&offered[1..]))
+                    .is_err()
+            );
             assert_eq!(props.modes.id(PermissionMode::Auto), *id);
-            if id.is_empty() {
-                assert!(props.mode_args.get("auto").is_some_and(|a| !a.is_empty()));
-                assert_eq!(props.native_mode_id().as_deref(), Some("auto"));
-            } else {
-                assert_eq!(props.native_mode_id().as_deref(), Some(*id));
-                assert!(choice.resolve(Some(&offered[1..])).is_err());
-            }
         }
     }
     for mode in ["", "default", "bypassPermissions", "custom-reviewed"] {
@@ -296,12 +298,13 @@ fn verified_append_system_context_declarations_match_contract() {
 }
 
 #[test]
-fn antigravity_declares_nested_sandbox_flag_auto_and_state_settings() {
+fn antigravity_declares_nested_sandbox_native_auto_full_access_and_state_settings() {
     let agy = builtin("antigravity").unwrap();
     assert!(agy.properties.nested_sandbox);
-    assert_eq!(agy.properties.modes.auto, "");
+    assert_eq!(agy.properties.modes.auto, "auto");
+    assert_eq!(agy.properties.mode_args.get("auto"), None);
     assert_eq!(
-        agy.properties.mode_args.get("auto"),
+        agy.properties.mode_args.get("full_access"),
         Some(&vec!["--dangerously-skip-permissions".to_string()])
     );
     assert_eq!(

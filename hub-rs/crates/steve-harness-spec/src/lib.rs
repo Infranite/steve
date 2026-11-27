@@ -523,35 +523,20 @@ pub enum NativeApprovalFallback {
 }
 
 impl AdapterProperties {
-    /// Native auto is opt-in: either a distinct `modes.auto` ACP mode id (never an alias for Ask
-    /// or Full Access) or explicit launch flags in `mode_args["auto"]`.
+    /// Native auto is opt-in and must resolve to a distinct ACP mode, never an alias for Ask or
+    /// Full Access.
     pub fn native_approval(&self) -> Option<NativeApprovalFallback> {
-        if self.native_execution || self.permission_policy == PermissionPolicy::FullAccessOnly {
-            return None;
-        }
         let mode = self.modes.auto.as_str();
-        if !mode.is_empty() {
-            if mode == self.modes.ask || mode == self.modes.full_access {
-                None
-            } else {
-                self.native_approval
-            }
-        } else if self.mode_args.get("auto").is_some_and(|a| !a.is_empty()) {
-            self.native_approval
-        } else {
+        if self.native_execution
+            || self.permission_policy == PermissionPolicy::FullAccessOnly
+            || mode.is_empty()
+            || mode == self.modes.ask
+            || mode == self.modes.full_access
+        {
             None
-        }
-    }
-
-    /// Display id for the adapter's declared native auto mode (`modes.auto` when set, or `"auto"`
-    /// when native auto is launched via `mode_args["auto"]`).
-    pub fn native_mode_id(&self) -> Option<String> {
-        self.native_approval()?;
-        Some(if self.modes.auto.is_empty() {
-            "auto".to_string()
         } else {
-            self.modes.auto.clone()
-        })
+            self.native_approval
+        }
     }
 }
 
