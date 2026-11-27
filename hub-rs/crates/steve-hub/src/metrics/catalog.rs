@@ -19,6 +19,7 @@ pub(super) const LONG: &[&str] = &[
     "steve_backup_operation_seconds",
     "steve_backup_phase_seconds",
     "steve_backup_engine_command_seconds",
+    "steve_process_duration_seconds",
     "steve_supervisor_step_seconds",
 ];
 /// Histograms of token counts across a turn's context window.

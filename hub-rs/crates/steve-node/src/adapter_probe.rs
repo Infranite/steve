@@ -69,19 +69,18 @@ async fn run_shell_probe(
     extra_env: &[(&str, &str)],
     timeout: Duration,
 ) -> Option<String> {
-    let mut cmd = std::process::Command::new(shell);
+    let mut cmd = steve_runtime::process::DetachedCommand::new(shell);
     cmd.args(args).env("TERM", "dumb");
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
-    // `DetachedSession` uses `POSIX_SPAWN_SETSID` on macOS (zero `fork()` in multithreaded
+    // `DetachedCommand` uses `POSIX_SPAWN_SETSID` on macOS (zero `fork()` in multithreaded
     // `steve-node`) and `setsid()` on Linux so interactive shells have no controlling `/dev/tty`,
     // while `kill_group_after_exit` terminates any `.zshrc` background helpers BEFORE reaping.
-    let output = steve_runtime::process::run_bounded_async(
+    let output = steve_runtime::process::run_detached_async(
         cmd,
         shell,
         steve_runtime::process::BoundedOptions {
-            isolation: steve_runtime::process::ProcessIsolation::DetachedSession,
             max_output_bytes: SHELL_PROBE_MAX_OUTPUT_BYTES,
             kill_group_after_exit: true,
             ..steve_runtime::process::BoundedOptions::capture("shell_probe", timeout)

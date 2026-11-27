@@ -30,6 +30,9 @@ const CHECK_CONFIG_TIMEOUT: Duration = Duration::from_secs(120);
 /// Pre-upgrade SQLite+state restic backup budget before switching versions; if exceeded, the
 /// existing Hub stays untouched.
 const PRE_UPGRADE_BACKUP_TIMEOUT: Duration = Duration::from_secs(120);
+/// Upper bound for `steve-hub --admin backup-list` verifying that a recorded pre-upgrade snapshot
+/// still exists in the local restic repository before resuming or rolling back.
+const BACKUP_LIST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Database restore budget during rollback (matches `BACKUP_BUDGET` = 3600s and exceeds
 /// `migration::TOTAL_TIMEOUT` = 15min so large databases are never stranded after mutation).
 const DATABASE_RESTORE_TIMEOUT: Duration = Duration::from_secs(3600);
@@ -42,6 +45,8 @@ const DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
 const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 /// Polling interval for local health and drain checks.
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Polling cadence while waiting for a persisted orphan probe PID to exit after `SIGTERM`.
+const ORPHAN_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(25);
 /// Maximum wait after `launchctl bootout` for the old Hub's loopback port to close (matches `STOP_GRACE`).
 const STOP_PORT_WAIT_MAX: Duration = Duration::from_secs(15);
 /// TCP connect timeout and polling cadence while waiting for the Hub port to close.
@@ -513,7 +518,7 @@ impl Runtime {
         }
         command.stdin(Stdio::null());
         if allow_unloaded {
-            let out = signing::output(&mut command, LAUNCHCTL_TIMEOUT)?;
+            let out = signing::output(&mut command, "launchctl", LAUNCHCTL_TIMEOUT)?;
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 let unloaded = stderr.contains("Could not find service")
@@ -524,7 +529,7 @@ impl Runtime {
             }
             Ok(())
         } else {
-            successful(&mut command, LAUNCHCTL_TIMEOUT)?;
+            successful(&mut command, "launchctl", LAUNCHCTL_TIMEOUT)?;
             Ok(())
         }
     }
@@ -556,7 +561,10 @@ impl Runtime {
         env: &BTreeMap<String, String>,
         working_dir: Option<&Path>,
     ) -> Command {
-        let mut command = Command::new(candidate.join("bin/steve-hub"));
+        let bin = candidate.join("bin/steve-hub");
+        let program =
+            steve_runtime::process::resolve_program(bin.as_os_str(), None, None).unwrap_or(bin);
+        let mut command = Command::new(program);
         command
             .env_clear()
             .envs(env)
@@ -584,7 +592,7 @@ impl Runtime {
         }
         let mut command = self.hub_command_with_env(candidate, env, working_dir);
         command.arg("--check-config").stdin(Stdio::null());
-        let output = signing::output(&mut command, CHECK_CONFIG_TIMEOUT)?;
+        let output = signing::output(&mut command, "check_config", CHECK_CONFIG_TIMEOUT)?;
         let report: Value = serde_json::from_slice(&output.stdout)
             .context("candidate returned no configuration report")?;
         ensure!(
@@ -751,7 +759,7 @@ fn backup_with_env(
     command
         .args(["--admin", "backup", "--reason", "pre-upgrade", "--offline"])
         .stdin(Stdio::null());
-    let output = signing::output(&mut command, PRE_UPGRADE_BACKUP_TIMEOUT)?;
+    let output = signing::output(&mut command, "backup", PRE_UPGRADE_BACKUP_TIMEOUT)?;
     ensure!(
         output.status.success(),
         "candidate backup failed: {}",
@@ -1180,7 +1188,7 @@ fn restore_snapshot(runtime: &Runtime, helper_release: &Path, saved: &SnapshotId
     command
         .args(["--admin", "restore", saved.as_str(), "--database-only"])
         .stdin(Stdio::null());
-    let output = signing::output(&mut command, DATABASE_RESTORE_TIMEOUT)?;
+    let output = signing::output(&mut command, "restore", DATABASE_RESTORE_TIMEOUT)?;
     ensure!(
         output.status.success(),
         "candidate restore failed: {}",
@@ -1425,7 +1433,7 @@ fn reap_orphan_probe(
         if !alive {
             return;
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(ORPHAN_PROBE_POLL_INTERVAL);
     }
     unsafe {
         libc::kill(-pgid, libc::SIGKILL);
@@ -1442,7 +1450,7 @@ fn verify_snapshot_exists(
     command
         .args(["--admin", "backup-list"])
         .stdin(Stdio::null());
-    let output = signing::output(&mut command, Duration::from_secs(30))?;
+    let output = signing::output(&mut command, "backup_list", BACKUP_LIST_TIMEOUT)?;
     ensure!(
         output.status.success(),
         "cannot verify backup snapshot {} in repository: {}",
@@ -1761,7 +1769,7 @@ where
                     Instant::now() < until,
                     "Hub did not drain before its deadline"
                 );
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(POLL_INTERVAL);
             }
             phase = "stop";
             changed.stopped = true;
@@ -2223,7 +2231,7 @@ fn rollback_macos_with(
                     Instant::now() < until,
                     "Hub did not drain before rollback deadline"
                 );
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(POLL_INTERVAL);
             }
             Ok(())
         })();

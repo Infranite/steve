@@ -11,10 +11,11 @@ pub mod macos_spawn;
 
 #[cfg(unix)]
 pub use bounded::{
-    BoundedOptions, BoundedStdin, CommandError, DEFAULT_MAX_OUTPUT_BYTES, HeldPipePolicy,
-    PIPE_DRAIN_GRACE, PIPE_POST_KILL_TIMEOUT, PROCESS_KILL_REAP_TIMEOUT, ProcessIsolation,
-    TermTarget, ZeroizingOutput, exited_unreaped, run_bounded, run_bounded_async,
-    run_bounded_zeroizing, stop_child_group_sync,
+    BoundedOptions, BoundedStdin, CommandError, DEFAULT_MAX_OUTPUT_BYTES, DetachedCommand,
+    EnvPolicy, HeldPipePolicy, PIPE_DRAIN_GRACE, PIPE_POST_KILL_TIMEOUT, PROCESS_KILL_REAP_TIMEOUT,
+    ProcessIsolation, TermTarget, ZEROIZE_MAX_OUTPUT_BYTES, ZeroizingOutput, effective_path,
+    exited_unreaped, resolve_program, run_bounded, run_bounded_async, run_bounded_zeroizing,
+    run_detached, run_detached_async, stop_child_group_sync,
 };
 
 /// One process's use, or the sum over a process group's members.

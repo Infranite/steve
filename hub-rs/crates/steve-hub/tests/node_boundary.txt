@@ -133,4 +133,5 @@ Spawn	steve-install/src/signing.rs	18
 Spawn	steve-keyhelper/src/mac.rs	2
 Spawn	steve-modules/src/net.rs	1
 Spawn	steve-modules/src/vault/keystore/helper.rs	1
-Spawn	steve-runtime/src/process/macos_spawn.rs	17
+Spawn	steve-runtime/src/process/bounded.rs	1
+Spawn	steve-runtime/src/process/macos_spawn.rs	15

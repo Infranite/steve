@@ -53,15 +53,21 @@ fn map_exit(code: Option<i32>, stderr: &str) -> KeyStoreError {
 }
 
 impl HelperStore {
-    /// `STEVE_KEYHELPER`, else `<steve_home>/bin/steve-keyhelper`, if it exists and is executable.
+    /// `STEVE_KEYHELPER`, else `<steve_home>/bin/steve-keyhelper`, if it is an absolute path to
+    /// an executable regular file (canonicalized so `Command::env_clear()` on macOS never falls
+    /// back to multithreaded `fork()`).
     pub fn find(steve_home: &Path, configured: Option<&str>) -> Option<Self> {
         let bin = configured
             .filter(|s| !s.trim().is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| steve_home.join("bin/steve-keyhelper"));
+        if !bin.is_absolute() {
+            return None;
+        }
+        let resolved = std::fs::canonicalize(&bin).ok()?;
         use std::os::unix::fs::PermissionsExt;
-        let meta = std::fs::metadata(&bin).ok()?;
-        (meta.is_file() && meta.permissions().mode() & 0o111 != 0).then_some(Self { bin })
+        let meta = std::fs::metadata(&resolved).ok()?;
+        (meta.is_file() && meta.permissions().mode() & 0o111 != 0).then_some(Self { bin: resolved })
     }
 
     /// Runs `steve-keyhelper <args>`; `Ok((exit code, stdout, stderr))` once it has exited.
@@ -178,8 +184,19 @@ mod tests {
         );
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert_eq!(HelperStore::find(home.path(), None).unwrap().bin, bin);
+        assert_eq!(
+            HelperStore::find(home.path(), None).unwrap().bin,
+            std::fs::canonicalize(&bin).unwrap()
+        );
         assert!(HelperStore::find(home.path(), Some("/nonexistent/helper")).is_none());
+        assert!(
+            HelperStore::find(home.path(), Some("steve-keyhelper")).is_none(),
+            "relative STEVE_KEYHELPER must be rejected"
+        );
+        assert!(
+            HelperStore::find(home.path(), Some("./bin/steve-keyhelper")).is_none(),
+            "relative path STEVE_KEYHELPER must be rejected"
+        );
     }
 
     /// A stand-in helper script speaking the same protocol, to check the pipes and exit codes end to end.

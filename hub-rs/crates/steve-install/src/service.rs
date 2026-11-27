@@ -436,40 +436,40 @@ fn execute_with(
             stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
         });
     }
-    let opts = steve_runtime::process::BoundedOptions {
-        operation: if detached_session {
-            "service_shell_probe"
-        } else {
-            "service_manager"
-        },
-        timeout,
-        isolation: if detached_session {
-            steve_runtime::process::ProcessIsolation::DetachedSession
-        } else {
-            steve_runtime::process::ProcessIsolation::ProcessGroup
-        },
-        stdin: steve_runtime::process::BoundedStdin::Null,
-        max_output_bytes: if detached_session {
-            SHELL_PROBE_MAX_OUTPUT_BYTES
-        } else {
-            steve_runtime::process::DEFAULT_MAX_OUTPUT_BYTES
-        },
-        kill_group_after_exit: detached_session,
-        ..steve_runtime::process::BoundedOptions::capture("service_manager", timeout)
+    let map_err = |err: steve_runtime::process::CommandError| match err {
+        steve_runtime::process::CommandError::TimedOut { timeout, .. } => anyhow::anyhow!(
+            "service manager unavailable: command timed out after {} seconds",
+            timeout.as_secs()
+        ),
+        steve_runtime::process::CommandError::Spawn { source, .. } => {
+            anyhow::Error::new(source).context(format!("service manager unavailable: {}", args[0]))
+        }
+        other => anyhow::Error::new(other),
     };
-    let output = steve_runtime::process::run_bounded(&mut command, &args[0], opts).map_err(
-        |err| match err {
-            steve_runtime::process::CommandError::TimedOut { timeout, .. } => anyhow::anyhow!(
-                "service manager unavailable: command timed out after {} seconds",
-                timeout.as_secs()
-            ),
-            steve_runtime::process::CommandError::Spawn { source, .. } => {
-                anyhow::Error::new(source)
-                    .context(format!("service manager unavailable: {}", args[0]))
-            }
-            other => anyhow::Error::new(other),
-        },
-    )?;
+    let output = if detached_session {
+        let mut detached = steve_runtime::process::DetachedCommand::new(&args[0]);
+        detached.args(&args[1..]);
+        for (key, value) in extra_env {
+            detached.env(key, value);
+        }
+        steve_runtime::process::run_detached(
+            &detached,
+            &args[0],
+            steve_runtime::process::BoundedOptions {
+                max_output_bytes: SHELL_PROBE_MAX_OUTPUT_BYTES,
+                kill_group_after_exit: true,
+                ..steve_runtime::process::BoundedOptions::capture("service_shell_probe", timeout)
+            },
+        )
+        .map_err(map_err)?
+    } else {
+        steve_runtime::process::run_bounded(
+            &mut command,
+            &args[0],
+            steve_runtime::process::BoundedOptions::capture("service_manager", timeout),
+        )
+        .map_err(map_err)?
+    };
     Ok(Output {
         code: output.status.code().unwrap_or(-1),
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),

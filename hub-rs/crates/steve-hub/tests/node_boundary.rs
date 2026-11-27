@@ -239,6 +239,7 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-hub/src/metrics/backup.rs", Hub, "consumes decoded offline observations once as they enter the Hub metrics recorder"),
     e(Dir, "steve-runtime/src/process.rs", Library, "process meters: this process and its own process group (/proc on Linux, libproc on macOS); no workspace data"),
     e(Fs, "steve-runtime/src/process.rs", Library, "process meters: read-only counters of this process (/proc/self on Linux); no workspace data"),
+    e(Spawn, "steve-runtime/src/process/bounded.rs", Library, "unified bounded subprocess runner rebuilding Command::new with a PATH-resolved absolute executable (preventing macOS std PATH fork fallback and running Linux DetachedCommand); callers are independently registered at their own Command/DetachedCommand entry points"),
     e(Spawn, "steve-runtime/src/process/macos_spawn.rs", Library, "unified macOS posix_spawn wrapper avoiding multithreaded fork() for detached-session probes and inherited-fd backup engine runs; callers are independently registered at their Command::new or engine entry points"),
     /* project directories on the Hub host */
     e(Spawn, "steve-core/src/git.rs", NoNode, "git for items no Node holds"),

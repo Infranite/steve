@@ -365,24 +365,11 @@ impl Command {
                 }
             },
         )
-        .map_err(|err| {
-            let reason = match err.kind {
-                crate::process::bounded::TestkitOutputErrorKind::TimedOut(d) => {
-                    format!("timed out after {d:?}")
-                }
-                crate::process::bounded::TestkitOutputErrorKind::PipeDrainTimedOut(stream) => {
-                    format!("{stream} pipe did not close after exit")
-                }
-                crate::process::bounded::TestkitOutputErrorKind::OutputLimitExceeded(
-                    stream,
-                    limit,
-                ) => format!("{stream} exceeded {limit} bytes"),
-                crate::process::bounded::TestkitOutputErrorKind::Io(e) => format!("I/O error: {e}"),
-            };
+        .map_err(|(err, stdout, stderr)| {
             format!(
-                "test command (pid {pid}) {reason}\nstdout:\n{}\nstderr:\n{}",
-                String::from_utf8_lossy(&err.stdout),
-                String::from_utf8_lossy(&err.stderr),
+                "test command (pid {pid}): {err}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
             )
         })
     }

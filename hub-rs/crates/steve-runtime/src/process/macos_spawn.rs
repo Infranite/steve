@@ -1,4 +1,4 @@
-//! macOS `posix_spawn` wrapper shared by bounded subprocess execution (`DetachedSession`) and the
+//! macOS `posix_spawn` wrapper shared by detached-session execution (`DetachedCommand`) and the
 //! backup engine (inherited lock fd). Avoids calling `fork()` in multithreaded macOS processes
 //! where CoreFoundation / Security / libdispatch locks can deadlock child threads, while matching
 //! `std::process::Command` signal semantics (`POSIX_SPAWN_SETSIGDEF` for `SIGPIPE` and empty
@@ -9,8 +9,7 @@ use std::ffi::{CString, OsStr, OsString};
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use libc::{
     POSIX_SPAWN_CLOEXEC_DEFAULT, POSIX_SPAWN_SETPGROUP, POSIX_SPAWN_SETSIGDEF,
@@ -22,7 +21,6 @@ use libc::{
     posix_spawnattr_init as attr_init, posix_spawnattr_setflags as attr_setflags,
     posix_spawnattr_setpgroup as attr_setpgroup, posix_spawnattr_setsigdefault as attr_setsigdef,
     posix_spawnattr_setsigmask as attr_setsigmask, posix_spawnattr_t as Attr,
-    posix_spawnp as sys_spawnp,
 };
 
 use super::ProcessIsolation;
@@ -83,9 +81,7 @@ impl FileActions {
         let mut raw = std::mem::MaybeUninit::<Fa>::uninit();
         // SAFETY: initializes an opaque POSIX file-actions handle.
         let rc = unsafe { fa_init(raw.as_mut_ptr()) };
-        if rc != 0 {
-            return Err(io::Error::from_raw_os_error(rc));
-        }
+        check_rc(rc)?;
         // SAFETY: initialized by `fa_init`.
         Ok(Self(unsafe { raw.assume_init() }))
     }
@@ -105,9 +101,7 @@ impl SpawnAttr {
         let mut raw = std::mem::MaybeUninit::<Attr>::uninit();
         // SAFETY: initializes an opaque POSIX spawnattr handle.
         let rc = unsafe { attr_init(raw.as_mut_ptr()) };
-        if rc != 0 {
-            return Err(io::Error::from_raw_os_error(rc));
-        }
+        check_rc(rc)?;
         // SAFETY: initialized by `attr_init`.
         Ok(Self(unsafe { raw.assume_init() }))
     }
@@ -166,24 +160,44 @@ fn dup_cloexec_above_stdio(fd: RawFd) -> io::Result<OwnedFd> {
     Ok(unsafe { OwnedFd::from_raw_fd(duped) })
 }
 
-fn is_executable_file(path: &Path) -> bool {
-    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-}
-
-fn resolve_in_path(program: &OsStr, path_value: &OsStr) -> Option<PathBuf> {
-    for dir in std::env::split_paths(path_value) {
-        let candidate = dir.join(program);
-        if is_executable_file(&candidate) {
-            return Some(candidate);
-        }
-    }
-    None
-}
-
-/// Spawn a child process directly through macOS `posix_spawn` / `posix_spawnp` without `fork()`.
+/// Spawn a child process directly through macOS `posix_spawn` without `fork()`.
+///
+/// `spec.program` is resolved into an absolute executable path strictly against the child's own
+/// effective `PATH` (from `spec.env`) and optional `spec.cwd`. It never falls back to
+/// `posix_spawnp` or the parent process's ambient `PATH` when the child cleared or customized
+/// `PATH`.
 pub fn spawn(spec: SpawnSpec<'_>) -> io::Result<Spawned> {
-    // Keep all duplicated child-side source fds alive across the `posix_spawn` syscall, and keep
-    // them at slots >= 3 so `adddup2(_, 0/1/2)` never aliases another source fd.
+    let env_entries: Vec<(OsString, OsString)> = match spec.env {
+        EnvSpec::Clear(entries) => entries.to_vec(),
+        EnvSpec::InheritWithDeltas(deltas) => {
+            let mut merged: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
+            for (k, v) in deltas {
+                match v {
+                    Some(val) => {
+                        merged.insert(k.clone(), val.clone());
+                    }
+                    None => {
+                        merged.remove(k);
+                    }
+                }
+            }
+            merged.into_iter().collect()
+        }
+    };
+
+    // Resolve `spec.program` strictly against the child's effective `PATH` before allocating pipes
+    // or file actions; never fall back to `posix_spawnp` (which reads the parent's `environ`).
+    let child_path = env_entries
+        .iter()
+        .rev()
+        .find(|(k, _)| k.as_bytes() == b"PATH")
+        .map(|(_, v)| v.as_os_str());
+    let resolved_program = super::bounded::resolve_program(spec.program, child_path, spec.cwd)?;
+    let spawn_path_c = cstring_os(resolved_program.as_os_str())?;
+    let argv0_c = cstring_os(spec.program)?;
+
+    // Keep all duplicated child-side source fds alive across `posix_spawn` at slots >= 3 so
+    // `adddup2(_, 0/1/2)` never aliases another source fd.
     let mut keep_alive: Vec<OwnedFd> = Vec::new();
     let mut actions = FileActions::new()?;
 
@@ -302,40 +316,6 @@ pub fn spawn(spec: SpawnSpec<'_>) -> io::Result<Spawned> {
         }
     }
 
-    let env_entries: Vec<(OsString, OsString)> = match spec.env {
-        EnvSpec::Clear(entries) => entries.to_vec(),
-        EnvSpec::InheritWithDeltas(deltas) => {
-            let mut merged: BTreeMap<OsString, OsString> = std::env::vars_os().collect();
-            for (k, v) in deltas {
-                match v {
-                    Some(val) => {
-                        merged.insert(k.clone(), val.clone());
-                    }
-                    None => {
-                        merged.remove(k);
-                    }
-                }
-            }
-            merged.into_iter().collect()
-        }
-    };
-
-    let has_slash = spec.program.as_bytes().contains(&b'/');
-    let resolved_program: Option<PathBuf> = if !has_slash {
-        env_entries
-            .iter()
-            .find(|(k, _)| k.as_bytes() == b"PATH")
-            .and_then(|(_, path_val)| resolve_in_path(spec.program, path_val))
-    } else {
-        None
-    };
-    let spawn_path = resolved_program
-        .as_deref()
-        .map(Path::as_os_str)
-        .unwrap_or(spec.program);
-    let spawn_path_c = cstring_os(spawn_path)?;
-    let argv0_c = cstring_os(spec.program)?;
-
     let mut argv_c = Vec::with_capacity(spec.args.len() + 1);
     argv_c.push(argv0_c);
     for arg in spec.args {
@@ -363,32 +343,19 @@ pub fn spawn(spec: SpawnSpec<'_>) -> io::Result<Spawned> {
 
     let mut pid: libc::pid_t = 0;
     // SAFETY: all pointers, file actions, attributes, and duplicated source descriptors stay
-    // alive across the `posix_spawn` / `posix_spawnp` call.
+    // alive across the `posix_spawn` call.
     let rc = unsafe {
-        if has_slash || resolved_program.is_some() {
-            sys_spawn(
-                &mut pid,
-                spawn_path_c.as_ptr(),
-                &actions.0,
-                &attr.0,
-                argv_ptrs.as_mut_ptr(),
-                envp_ptrs.as_ptr(),
-            )
-        } else {
-            sys_spawnp(
-                &mut pid,
-                spawn_path_c.as_ptr(),
-                &actions.0,
-                &attr.0,
-                argv_ptrs.as_mut_ptr(),
-                envp_ptrs.as_ptr(),
-            )
-        }
+        sys_spawn(
+            &mut pid,
+            spawn_path_c.as_ptr(),
+            &actions.0,
+            &attr.0,
+            argv_ptrs.as_mut_ptr(),
+            envp_ptrs.as_ptr(),
+        )
     };
     drop(keep_alive);
-    if rc != 0 {
-        return Err(io::Error::from_raw_os_error(rc));
-    }
+    check_rc(rc)?;
     Ok(Spawned {
         pid,
         stdin: parent_stdin,
