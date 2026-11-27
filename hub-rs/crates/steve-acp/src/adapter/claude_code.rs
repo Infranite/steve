@@ -108,10 +108,10 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         let Some(ev) = parse_stderr_permission_check(line) else {
             return false;
         };
-        record_permission_check_metric(self.id(), ev.phase, "stderr");
+        record_permission_check_metric(HarnessAdapter::id(self), ev.phase, "stderr");
         tracing::debug!(
             tag = %tag,
-            harness = self.id(),
+            harness = HarnessAdapter::id(self),
             status = ev.phase.as_str(),
             tool_use_id = ev.tool_use_id.as_deref().unwrap_or(""),
             agent_id = ev.agent_id.as_deref().unwrap_or(""),
@@ -132,9 +132,9 @@ impl HarnessAdapter for ClaudeCodeAdapter {
             .unwrap_or("");
         if kind == "permission_check_status" {
             if let Some(ev) = parse_permission_check_status(update) {
-                record_permission_check_metric(self.id(), ev.phase, "acp");
+                record_permission_check_metric(HarnessAdapter::id(self), ev.phase, "acp");
                 tracing::debug!(
-                    harness = self.id(),
+                    harness = HarnessAdapter::id(self),
                     status = ev.phase.as_str(),
                     tool_use_id = ev.tool_use_id.as_deref().unwrap_or(""),
                     agent_id = ev.agent_id.as_deref().unwrap_or(""),
@@ -173,7 +173,7 @@ impl HarnessAdapter for ClaudeCodeAdapter {
         fact: &ToolFact,
         view: &mut ToolView,
     ) -> Vec<Fact> {
-        let mut out = observe_classifier_denial(self.id(), ctx, raw_id, fact);
+        let mut out = observe_classifier_denial(HarnessAdapter::id(self), ctx, raw_id, fact);
 
         let parent_tool_use_id = fact
             .raw
@@ -733,6 +733,211 @@ fn parse_bg_output(text: &str) -> (Option<SubtaskStatus>, String) {
     (status, lines.join("\n"))
 }
 
+// ── Local transcript history & resume lookup ──
+
+use std::path::{Path, PathBuf};
+
+use crate::adapter::history::{
+    HistoryAdapter, HistorySession, agent_chunk, first_lines, is_steve, js_string, mtime_ms,
+    read_dir_sorted, real_user_text, slice, str_field, truthy,
+};
+
+/// Claude Code's project directory name for a working directory.
+pub fn claude_project(cwd: &str) -> String {
+    cwd.chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect()
+}
+
+impl HistoryAdapter for ClaudeCodeAdapter {
+    fn id(&self) -> &'static str {
+        "claude-code"
+    }
+
+    fn display_name(&self) -> &'static str {
+        "Claude Code"
+    }
+
+    fn key_prefix(&self) -> &'static str {
+        "cc"
+    }
+
+    fn default_state_rel(&self) -> &'static str {
+        ".claude"
+    }
+
+    fn list_files(&self, user_home: &Path) -> Vec<PathBuf> {
+        let root = user_home.join(".claude/projects");
+        let Ok(dirs) = read_dir_sorted(&root) else {
+            return vec![];
+        };
+        dirs.into_iter()
+            .flat_map(|d| {
+                let dir = root.join(&d);
+                read_dir_sorted(&dir)
+                    .map(|fs| {
+                        fs.into_iter()
+                            .filter(|f| f.ends_with(".jsonl"))
+                            .map(|f| dir.join(f))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    fn peek(&self, steve_home: &Path, file: &Path) -> Option<HistorySession> {
+        let (mut title, mut cwd) = (String::new(), String::new());
+        for l in first_lines(file, 200_000).ok()? {
+            if l.is_empty() {
+                continue;
+            }
+            let Ok(m) = serde_json::from_str::<Value>(&l) else {
+                continue;
+            };
+            if cwd.is_empty() && truthy(m.get("cwd")) {
+                cwd = js_string(&m["cwd"]);
+            }
+            if m.get("type").and_then(Value::as_str) == Some("user")
+                && let Some(Value::String(c)) = str_field(&m, &["message", "content"])
+                && real_user_text(c)
+            {
+                title = c.clone();
+                break;
+            }
+        }
+        if title.is_empty() || is_steve(steve_home, &cwd) {
+            return None;
+        }
+        Some(HistorySession {
+            key: format!("{}:{}", self.key_prefix(), file.display()),
+            harness_id: HistoryAdapter::id(self),
+            harness: self.display_name().into(),
+            title: slice(&title, 80),
+            cwd,
+            when: mtime_ms(file)?,
+            size: std::fs::metadata(file).ok()?.len(),
+        })
+    }
+
+    fn parse_rows(&self, text: &str) -> Vec<(String, Value)> {
+        let read = |n: &str| ["Read", "Grep", "Glob"].iter().any(|x| n.contains(x));
+        let edit = |n: &str| ["Edit", "Write"].iter().any(|x| n.contains(x));
+        let mut out = vec![];
+        for l in text.split('\n') {
+            if l.is_empty() {
+                continue;
+            }
+            let Ok(m) = serde_json::from_str::<Value>(l) else {
+                continue;
+            };
+            let ty = m.get("type").and_then(Value::as_str);
+            if ty == Some("user")
+                && let Some(Value::String(c)) = str_field(&m, &["message", "content"])
+                && real_user_text(c)
+            {
+                out.push(("user".into(), json!({ "text": c, "via": "me" })));
+            }
+            if ty == Some("assistant")
+                && let Some(Value::Array(cs)) = str_field(&m, &["message", "content"])
+            {
+                for c in cs {
+                    let cty = c.get("type").and_then(Value::as_str);
+                    if cty == Some("text") && truthy(c.get("text")) {
+                        out.push(agent_chunk(&js_string(&c["text"])));
+                    }
+                    if cty == Some("tool_use") {
+                        let name = c
+                            .get("name")
+                            .map(js_string)
+                            .unwrap_or_else(|| "undefined".into());
+                        let input = c.get("input");
+                        let extra = if truthy(input.and_then(|i| i.get("command"))) {
+                            format!(
+                                " {}",
+                                slice(
+                                    &js_string(
+                                        &input.map(|i| i["command"].clone()).unwrap_or_default()
+                                    ),
+                                    120
+                                )
+                            )
+                        } else if truthy(input.and_then(|i| i.get("file_path"))) {
+                            format!(
+                                " {}",
+                                js_string(
+                                    &input.map(|i| i["file_path"].clone()).unwrap_or_default()
+                                )
+                            )
+                        } else {
+                            String::new()
+                        };
+                        let kind = if read(&name) {
+                            "read"
+                        } else if edit(&name) {
+                            "edit"
+                        } else {
+                            "execute"
+                        };
+                        let mut call = serde_json::Map::new();
+                        call.insert("sessionUpdate".into(), json!("tool_call"));
+                        if let Some(id) = c.get("id") {
+                            call.insert("toolCallId".into(), id.clone());
+                        }
+                        call.insert("title".into(), json!(format!("{name}{extra}")));
+                        call.insert("kind".into(), json!(kind));
+                        call.insert("status".into(), json!("completed"));
+                        out.push(("tool_call".into(), Value::Object(call)));
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    fn find_transcript(&self, state_dir: &Path, id: &str, cwd: &str) -> Option<PathBuf> {
+        let projects = state_dir.join("projects");
+        let name = format!("{id}.jsonl");
+        let direct = projects.join(claude_project(cwd)).join(&name);
+        if direct.is_file() {
+            return Some(direct);
+        }
+        std::fs::read_dir(&projects)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.path().join(&name))
+            .find(|p| p.is_file())
+    }
+
+    fn recorded(&self, file: &Path) -> (Option<String>, Option<String>) {
+        use std::io::{BufRead, BufReader, Read};
+        let Ok(f) = std::fs::File::open(file) else {
+            return (None, None);
+        };
+        let (mut id, mut cwd) = (None, None);
+        let field = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
+        for line in BufReader::new(f.take(8 << 20)).lines().take(50) {
+            let Ok(line) = line else { break };
+            let Ok(v) = serde_json::from_str::<Value>(&line) else {
+                continue;
+            };
+            id = id.or_else(|| field(&v, "sessionId"));
+            cwd = cwd.or_else(|| field(&v, "cwd"));
+            if id.is_some() && cwd.is_some() {
+                break;
+            }
+        }
+        (id, cwd)
+    }
+
+    fn session_id_from_file(&self, file: &Path) -> String {
+        file.file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1024,208 +1229,5 @@ mod tests {
             )),
             "expected immediate error diagnostic on hostCode stop: {facts:?}"
         );
-
-// ── Local transcript history & resume lookup ──
-
-use std::path::{Path, PathBuf};
-
-use crate::adapter::history::{
-    HistoryAdapter, HistorySession, agent_chunk, first_lines, is_steve, js_string, mtime_ms,
-    read_dir_sorted, real_user_text, slice, str_field, truthy,
-};
-
-/// Claude Code's project directory name for a working directory.
-pub fn claude_project(cwd: &str) -> String {
-    cwd.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
-}
-
-impl HistoryAdapter for ClaudeCodeAdapter {
-    fn id(&self) -> &'static str {
-        "claude-code"
-    }
-
-    fn display_name(&self) -> &'static str {
-        "Claude Code"
-    }
-
-    fn key_prefix(&self) -> &'static str {
-        "cc"
-    }
-
-    fn default_state_rel(&self) -> &'static str {
-        ".claude"
-    }
-
-    fn list_files(&self, user_home: &Path) -> Vec<PathBuf> {
-        let root = user_home.join(".claude/projects");
-        let Ok(dirs) = read_dir_sorted(&root) else {
-            return vec![];
-        };
-        dirs.into_iter()
-            .flat_map(|d| {
-                let dir = root.join(&d);
-                read_dir_sorted(&dir)
-                    .map(|fs| {
-                        fs.into_iter()
-                            .filter(|f| f.ends_with(".jsonl"))
-                            .map(|f| dir.join(f))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            })
-            .collect()
-    }
-
-    fn peek(&self, steve_home: &Path, file: &Path) -> Option<HistorySession> {
-        let (mut title, mut cwd) = (String::new(), String::new());
-        for l in first_lines(file, 200_000).ok()? {
-            if l.is_empty() {
-                continue;
-            }
-            let Ok(m) = serde_json::from_str::<Value>(&l) else {
-                continue;
-            };
-            if cwd.is_empty() && truthy(m.get("cwd")) {
-                cwd = js_string(&m["cwd"]);
-            }
-            if m.get("type").and_then(Value::as_str) == Some("user")
-                && let Some(Value::String(c)) = str_field(&m, &["message", "content"])
-                && real_user_text(c)
-            {
-                title = c.clone();
-                break;
-            }
-        }
-        if title.is_empty() || is_steve(steve_home, &cwd) {
-            return None;
-        }
-        Some(HistorySession {
-            key: format!("{}:{}", self.key_prefix(), file.display()),
-            harness_id: HistoryAdapter::id(self),
-            harness: self.display_name().into(),
-            title: slice(&title, 80),
-            cwd,
-            when: mtime_ms(file)?,
-            size: std::fs::metadata(file).ok()?.len(),
-        })
-    }
-
-    fn parse_rows(&self, text: &str) -> Vec<(String, Value)> {
-        let read = |n: &str| ["Read", "Grep", "Glob"].iter().any(|x| n.contains(x));
-        let edit = |n: &str| ["Edit", "Write"].iter().any(|x| n.contains(x));
-        let mut out = vec![];
-        for l in text.split('\n') {
-            if l.is_empty() {
-                continue;
-            }
-            let Ok(m) = serde_json::from_str::<Value>(l) else {
-                continue;
-            };
-            let ty = m.get("type").and_then(Value::as_str);
-            if ty == Some("user")
-                && let Some(Value::String(c)) = str_field(&m, &["message", "content"])
-                && real_user_text(c)
-            {
-                out.push(("user".into(), json!({ "text": c, "via": "me" })));
-            }
-            if ty == Some("assistant")
-                && let Some(Value::Array(cs)) = str_field(&m, &["message", "content"])
-            {
-                for c in cs {
-                    let cty = c.get("type").and_then(Value::as_str);
-                    if cty == Some("text") && truthy(c.get("text")) {
-                        out.push(agent_chunk(&js_string(&c["text"])));
-                    }
-                    if cty == Some("tool_use") {
-                        let name = c
-                            .get("name")
-                            .map(js_string)
-                            .unwrap_or_else(|| "undefined".into());
-                        let input = c.get("input");
-                        let extra = if truthy(input.and_then(|i| i.get("command"))) {
-                            format!(
-                                " {}",
-                                slice(
-                                    &js_string(
-                                        &input.map(|i| i["command"].clone()).unwrap_or_default()
-                                    ),
-                                    120
-                                )
-                            )
-                        } else if truthy(input.and_then(|i| i.get("file_path"))) {
-                            format!(
-                                " {}",
-                                js_string(
-                                    &input.map(|i| i["file_path"].clone()).unwrap_or_default()
-                                )
-                            )
-                        } else {
-                            String::new()
-                        };
-                        let kind = if read(&name) {
-                            "read"
-                        } else if edit(&name) {
-                            "edit"
-                        } else {
-                            "execute"
-                        };
-                        let mut call = serde_json::Map::new();
-                        call.insert("sessionUpdate".into(), json!("tool_call"));
-                        if let Some(id) = c.get("id") {
-                            call.insert("toolCallId".into(), id.clone());
-                        }
-                        call.insert("title".into(), json!(format!("{name}{extra}")));
-                        call.insert("kind".into(), json!(kind));
-                        call.insert("status".into(), json!("completed"));
-                        out.push(("tool_call".into(), Value::Object(call)));
-                    }
-                }
-            }
-        }
-        out
-    }
-
-    fn find_transcript(&self, state_dir: &Path, id: &str, cwd: &str) -> Option<PathBuf> {
-        let projects = state_dir.join("projects");
-        let name = format!("{id}.jsonl");
-        let direct = projects.join(claude_project(cwd)).join(&name);
-        if direct.is_file() {
-            return Some(direct);
-        }
-        std::fs::read_dir(&projects)
-            .ok()?
-            .filter_map(|e| e.ok())
-            .map(|e| e.path().join(&name))
-            .find(|p| p.is_file())
-    }
-
-    fn recorded(&self, file: &Path) -> (Option<String>, Option<String>) {
-        use std::io::{BufRead, BufReader, Read};
-        let Ok(f) = std::fs::File::open(file) else {
-            return (None, None);
-        };
-        let (mut id, mut cwd) = (None, None);
-        let field = |v: &Value, k: &str| v.get(k).and_then(Value::as_str).map(str::to_owned);
-        for line in BufReader::new(f.take(8 << 20)).lines().take(50) {
-            let Ok(line) = line else { break };
-            let Ok(v) = serde_json::from_str::<Value>(&line) else {
-                continue;
-            };
-            id = id.or_else(|| field(&v, "sessionId"));
-            cwd = cwd.or_else(|| field(&v, "cwd"));
-            if id.is_some() && cwd.is_some() {
-                break;
-            }
-        }
-        (id, cwd)
-    }
-
-    fn session_id_from_file(&self, file: &Path) -> String {
-        file.file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("")
-            .to_string()
     }
 }
