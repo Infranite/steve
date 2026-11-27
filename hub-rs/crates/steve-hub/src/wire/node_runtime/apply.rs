@@ -112,17 +112,51 @@ impl NodeRuntime {
         Ok(())
     }
 
-    /// The diagnostic record of an adapter that exited under a session.
+    /// The diagnostic record of structured session diagnostics emitted by a Node.
     fn diagnostic_of(&self, ev: &NodeEvent) -> Option<steve_store::diagnostics::Record> {
         let EventBody::Diagnostic {
             code,
             severity,
-            details: Some(details),
+            details,
             ..
         } = &ev.body
         else {
             return None;
         };
+        let mapped_severity = match severity {
+            Severity::Info => steve_store::diagnostics::Severity::Info,
+            Severity::Warning => steve_store::diagnostics::Severity::Warning,
+            Severity::Error => steve_store::diagnostics::Severity::Error,
+        };
+        if code == AUTO_MODE_CLASSIFIER_UNAVAILABLE {
+            let session = ev_session(ev)?;
+            let attempt_id = match &ev.subject {
+                Subject::Execution(x) => Some(x.attempt().to_string()),
+                _ => None,
+            };
+            let reason_code = if matches!(severity, Severity::Error) {
+                "auto_mode_stopped"
+            } else {
+                "classifier_unavailable"
+            };
+            return Some(steve_store::diagnostics::Record {
+                session_id: Some(session),
+                attempt_id,
+                cause_id: Some(ev.id.to_string()),
+                kind: "harness.auto_mode_classifier_unavailable".into(),
+                reason_code: reason_code.into(),
+                severity: mapped_severity,
+                details: steve_store::diagnostics::Details {
+                    code: Some(AUTO_MODE_CLASSIFIER_UNAVAILABLE.into()),
+                    source_at: Some(ev.at.0),
+                    source_node: Some(self.node_id.to_string()),
+                    source_epoch: Some(ev.cursor.epoch.to_string()),
+                    ..Default::default()
+                },
+                ..Default::default()
+            });
+        }
+        let details = details.as_ref()?;
         if code != "adapter_exited" {
             return None;
         }
@@ -155,11 +189,7 @@ impl NodeRuntime {
             cause_id: Some(ev.id.to_string()),
             kind: "adapter.exited".into(),
             reason_code: "process_exit".into(),
-            severity: match severity {
-                Severity::Info => steve_store::diagnostics::Severity::Info,
-                Severity::Warning => steve_store::diagnostics::Severity::Warning,
-                Severity::Error => steve_store::diagnostics::Severity::Error,
-            },
+            severity: mapped_severity,
             details: d,
             ..Default::default()
         })
@@ -672,6 +702,13 @@ impl NodeRuntime {
                     tools_missing_in(w, s)?;
                 }
             }
+            EventBody::Diagnostic { code, severity, .. }
+                if code == AUTO_MODE_CLASSIFIER_UNAVAILABLE =>
+            {
+                if let Some(s) = &session {
+                    auto_mode_classifier_unavailable_in(w, s, *severity)?;
+                }
+            }
             _ => {}
         }
         if let Some(s) = session
@@ -895,6 +932,56 @@ fn tools_missing_in(w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
             now(),
         )?;
     }
+    Ok(())
+}
+
+/// Surfaces a harness auto-mode classifier failure in the session's timeline (deduplicated per
+/// turn, allowing an initial warning to escalate once if the harness stops auto mode).
+fn auto_mode_classifier_unavailable_in(
+    w: &mut W<'_>,
+    session: &str,
+    severity: Severity,
+) -> Result<(), StoreError> {
+    let stopped = matches!(severity, Severity::Error);
+    let already = observations::has_system_code_since_turn(
+        w,
+        session,
+        AUTO_MODE_CLASSIFIER_UNAVAILABLE,
+        stopped.then_some("error"),
+    )?;
+    if already {
+        return Ok(());
+    }
+    let harness_name = observations::session_harness(w, session)?
+        .filter(|id| !id.is_empty())
+        .map(|id| steve_harness_spec::spec(&id, None).name)
+        .unwrap_or_else(|| "Harness".to_string());
+    let text = steve_i18n::stored(|| {
+        if stopped {
+            steve_i18n::t!(
+                "hub.node.auto_mode_classifier_stopped",
+                harness = harness_name.as_str()
+            )
+        } else {
+            steve_i18n::t!(
+                "hub.node.auto_mode_classifier_unavailable",
+                harness = harness_name.as_str()
+            )
+        }
+    });
+    w.events().add(
+        session,
+        "system",
+        json!({
+            "text": text,
+            "code": AUTO_MODE_CLASSIFIER_UNAVAILABLE,
+            "severity": if stopped { "error" } else { "warning" },
+            "harness": harness_name,
+            "stopped": stopped,
+        }),
+        None,
+        now(),
+    )?;
     Ok(())
 }
 

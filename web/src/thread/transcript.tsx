@@ -25,11 +25,11 @@ import { Files } from "@/attach"
 import { useTurnUsage } from "@/session/turn-usage"
 import { fmtUsageCost, fmtUsage } from "@/stats/format"
 import { steveToolIcon } from "@/tool-icons"
-import { Segmented, Status, StatusDot, go, openSheet } from "@/ui"
+import { Notice, Segmented, Status, StatusDot, go, openSheet } from "@/ui"
 import { ActorAvatar } from "@/components/actor-avatar"
 
 import { getTranscript, loadOlderTranscript, useTranscript, useTranscriptSelector } from "@/data/transcript"
-import { isActiveSubtaskStatus, partitionWork, segmentsOf, subtaskOf, subtaskTimes, toolDurationMs, type Seg } from "@/data/transcript-model"
+import { isActiveSubtaskStatus, partitionWork, segmentsOf, subtaskOf, subtaskTimes, toolDurationMs, type AutoModeClassifierWarning, type Seg } from "@/data/transcript-model"
 import { SubtaskList, type SubtaskEntry } from "@/components/subtask-list"
 import { recordTranscriptOpen } from "@/perf"
 import { VirtualList } from "@/components/virtual-list"
@@ -354,9 +354,28 @@ const SegView = memo(function SegView({ k, g, live }: { k: string; g: Seg; live:
   if (g.t === "ask") return <TranscriptPermission e={e} />
   if (g.t === "away") return <div className="flex items-center gap-2 type-footnote text-muted-foreground" data-away><CornerDownRightIcon className="size-3.5 shrink-0" strokeWidth={1.5} />{t("core:transcript.away")}</div>
   if (g.t === "sys" && e[2] === "faulted") return <FaultedLine k={k} text={e[1]} />
+  if (g.t === "sys" && e[2] === "auto_mode_classifier_unavailable") {
+    const warn = e[3] as AutoModeClassifierWarning | undefined
+    if (warn) return <AutoModeClassifierAlert warning={warn} harnessFallback={getSession(k)?.h} />
+  }
   if (g.t === "sys") return <SysRow text={String(e[1] ?? "")} />
   return null
 })
+
+export function AutoModeClassifierAlert({ warning, harnessFallback, className }: {
+  warning: AutoModeClassifierWarning
+  harnessFallback?: string
+  className?: string
+}) {
+  const t = useT()
+  const harness = warning.harness || harnessFallback || t("core:unknownHarness")
+  return (
+    <Notice tone={warning.stopped ? "destructive" : "attention"} className={className} data-auto-mode-warning={warning.stopped ? "stopped" : "unavailable"}>
+      <div className="font-medium text-foreground">{t("core:transcript.autoModeClassifierTitle", { harness })}</div>
+      <div className="mt-0.5 type-footnote text-muted-foreground">{t(warning.stopped ? "core:transcript.autoModeClassifierStopped" : "core:transcript.autoModeClassifierHint", { harness })}</div>
+    </Notice>
+  )
+}
 /** an event in the conversation (started, queued, compacted…): a short one is a centred line between rules, truncated
  *  with the whole text on hover; a longer notice is a left-aligned muted fill with an icon, two lines at most */
 export function SysRow({ text, className }: { text: string; className?: string }) {
@@ -371,6 +390,7 @@ export function SysRow({ text, className }: { text: string; className?: string }
 }
 const EMPTY_SEGS: Seg[] = []
 function transcriptRowHeight(row: Seg) {
+  if (row.t === "sys" && row.evs[0][2] === "auto_mode_classifier_unavailable") return 96
   if (row.t === "sys") return String(row.evs[0][1] ?? "").length <= 40 ? 36 : 60
   return 112
 }

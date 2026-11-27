@@ -111,6 +111,10 @@ pub const NODE_RESTARTED: &str = "node_restarted";
 /// The code of the [`EventBody::Diagnostic`] for an attempt whose session's harness was given
 /// Steve's tools and never listed them: its agent ran without them.
 pub const STEVE_TOOLS_MISSING: &str = "steve_tools_missing";
+/// The code of the [`EventBody::Diagnostic`] when a harness's native auto-mode safety classifier
+/// repeatedly returns no verdict (`Severity::Warning`) or halts auto mode for the turn
+/// (`Severity::Error`).
+pub const AUTO_MODE_CLASSIFIER_UNAVAILABLE: &str = "auto_mode_classifier_unavailable";
 /// Version of [`events::NodeEvent`] bodies, separate from the transport.
 pub const EVENT_SCHEMA: u16 = 1;
 

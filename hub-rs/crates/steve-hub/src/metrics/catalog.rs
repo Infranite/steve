@@ -523,6 +523,21 @@ pub(super) fn describe() {
         "Attempts whose harness never listed Steve's tools (a Node diagnostic)."
     );
     describe_counter!(
+        "steve_session_auto_mode_unavailable_total",
+        Count,
+        "Session diagnostics reporting that a harness auto-mode classifier returned no safety verdict. Labels: severity (warning, error)."
+    );
+    describe_counter!(
+        "steve_acp_permission_check_status_total",
+        Count,
+        "Harness permission_check_status signals observed by ACP adapters. Labels: harness, status (checking, done), source (acp, stderr)."
+    );
+    describe_counter!(
+        "steve_acp_classifier_unavailable_total",
+        Count,
+        "Tool calls denied or turns stopped because a harness auto-mode classifier returned no safety verdict. Labels: harness, kind (denied, stopped)."
+    );
+    describe_counter!(
         "steve_node_ingest_commits_total",
         Count,
         "Event batches committed. Labels: node."

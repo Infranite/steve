@@ -394,6 +394,9 @@ export default {
     moreSegs_other: "{{count}} earlier parts · Show all",
     startingShort: "Starting",
     startingSlow: "Taking longer than usual. The session starts once its Node has prepared the workspace and started the harness; if it stays here, the Hub's log and that Node's log say why.",
+    autoModeClassifierTitle: "{{harness}} auto mode unavailable (classifier returned no verdict)",
+    autoModeClassifierHint: "Repeated tool calls were denied because the safety classifier returned no verdict. Switch approval mode back to Ask me to continue, or check the harness's settings.json on the Node (verify gateway/proxy connectivity, enable local classifier fallback, or remove non-essential traffic restrictions).",
+    autoModeClassifierStopped: "{{harness}} stopped auto mode for this turn after repeated responses with no safety verdict. Switch approval mode back to Ask me to continue, or check the harness's settings.json on the Node (verify gateway/proxy connectivity, enable local classifier fallback, or remove non-essential traffic restrictions).",
   },
   subtask: {
     list: "Subtasks",

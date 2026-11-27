@@ -370,7 +370,18 @@ export function appendToTurn(prev: TranscriptTurn, fresh: readonly REvent[]): Tr
       push(sub, e.seq)
       continue
     }
-    if (e.kind === "system") { push(d.faulted ? ["sys", d.text, "faulted"] : ["sys", d.text], e.seq); continue }
+    if (e.kind === "system") {
+      if (d.faulted) push(["sys", d.text, "faulted"], e.seq)
+      else if (d.code === "auto_mode_classifier_unavailable") {
+        push(["sys", d.text, "auto_mode_classifier_unavailable", {
+          code: "auto_mode_classifier_unavailable",
+          harness: typeof d.harness === "string" ? d.harness : "",
+          stopped: Boolean(d.stopped || d.severity === "error"),
+          text: String(d.text ?? ""),
+        } satisfies AutoModeClassifierWarning], e.seq)
+      } else push(["sys", d.text], e.seq)
+      continue
+    }
     if (e.kind === "permission") { push(["ask", String(d.title ?? t("core:tool.permission")), d.decision], e.seq); continue }
     if (e.kind === "turn_end") { push(["end", d.stopReason ?? ""], e.seq); continue }
     if (e.kind === "queued") { push(["sys", t("core:queueLine.queued", { text: briefHead(String(d.text ?? "")) })], e.seq); continue }
@@ -405,6 +416,26 @@ function mapTurn(events: REvent[]): TranscriptTurn {
 }
 
 export type Transcript = { turns: TranscriptTurn[]; oldest: number | null; newest: number }
+
+export type AutoModeClassifierWarning = {
+  code: "auto_mode_classifier_unavailable"
+  harness: string
+  stopped: boolean
+  text: string
+}
+
+/** Latest auto-mode classifier unavailability warning in the active/most recent turn, or null once a new turn runs cleanly. */
+export function autoModeWarningOf(transcript: Transcript | undefined): AutoModeClassifierWarning | null {
+  if (!transcript?.turns.length) return null
+  const latest = transcript.turns.at(-1)!
+  for (let i = latest.ev.length - 1; i >= 0; i--) {
+    const e = latest.ev[i]
+    if (e[0] === "sys" && e[2] === "auto_mode_classifier_unavailable" && e[3]) {
+      return e[3] as AutoModeClassifierWarning
+    }
+  }
+  return null
+}
 
 export type ActiveSubtask = { subtask: RSubtaskView; started?: number; childSteps: number }
 /** Active (running/queued/needs_you) subtasks in the latest turn, for the header's RunningNow capsule. */

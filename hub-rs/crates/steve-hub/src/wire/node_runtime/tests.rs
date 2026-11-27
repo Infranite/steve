@@ -124,6 +124,107 @@ async fn missing_steve_tools_are_said_once_per_session() {
     assert_eq!(said(), 1);
 }
 
+/// Auto-mode classifier unavailability diagnostics deduplicate warnings per turn, escalate once
+/// when the harness stops auto mode, record structured diagnostic evidence, and allow a fresh
+/// warning in a subsequent turn.
+#[tokio::test]
+async fn auto_mode_classifier_unavailable_warns_escalates_and_records_diagnostics() {
+    let h = super::super::node_tools::tests::fixture(vec![]).await;
+    let diag = |seq: u64, severity: Severity| NodeEvent {
+        schema: 1,
+        id: EventId::new(format!("auto-classifier-{seq}")).unwrap(),
+        at: Timestamp(now()),
+        cursor: Watermark {
+            stream: StreamId::new("auto-classifier").unwrap(),
+            epoch: Epoch::new("e1").unwrap(),
+            seq,
+        },
+        subject: Subject::Execution(h.exec.clone()),
+        body: EventBody::Diagnostic {
+            severity,
+            code: AUTO_MODE_CLASSIFIER_UNAVAILABLE.into(),
+            safe_text: "classifier returned no verdict".into(),
+            details: None,
+        },
+    };
+    let said = || {
+        steve_store::testkit::hub::node_fixtures::diagnostic_notice_count(
+            &h.store,
+            AUTO_MODE_CLASSIFIER_UNAVAILABLE,
+        )
+        .unwrap()
+    };
+
+    // Two Warning diagnostics in the same turn produce only one timeline warning.
+    h._rt
+        .receive(&EventBatch {
+            events: vec![diag(1, Severity::Warning), diag(2, Severity::Warning)],
+        })
+        .unwrap();
+    assert_eq!(said(), 1);
+
+    // Escalating to Error (auto mode stopped) records once more in the same turn; a duplicate Error
+    // is deduplicated.
+    h._rt
+        .receive(&EventBatch {
+            events: vec![diag(3, Severity::Error), diag(4, Severity::Error)],
+        })
+        .unwrap();
+    assert_eq!(said(), 2);
+
+    // Structured diagnostic records are persisted for item debugging.
+    until("classifier diagnostic evidence persisted", || {
+        h.store
+            .diagnostics()
+            .events(
+                "default",
+                "i1",
+                steve_store::diagnostics::Filter {
+                    kind: Some("harness.auto_mode_classifier_unavailable".into()),
+                    limit: 20,
+                    ..Default::default()
+                },
+            )
+            .unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .len()
+            >= 2
+    })
+    .await;
+
+    // After a turn_end boundary, a subsequent turn can emit a fresh warning.
+    h.store
+        .write(|w| {
+            w.events().add(
+                "s1",
+                "turn_end",
+                json!({ "stopReason": "end_turn" }),
+                None,
+                now(),
+            )?;
+            Ok::<(), StoreError>(())
+        })
+        .unwrap();
+    h._rt
+        .receive(&EventBatch {
+            events: vec![diag(5, Severity::Warning)],
+        })
+        .unwrap();
+    assert_eq!(said(), 3);
+
+    // Verify stored system event carries the harness display name (never hardcoded in Hub logic).
+    let latest = h
+        .store
+        .read(|r| steve_store::session_repo::latest_system_text(r, "s1"))
+        .unwrap()
+        .expect("latest system text");
+    assert!(
+        latest.contains("自动模式不可用（分类器无判定）"),
+        "unexpected stored notice text: {latest}"
+    );
+}
+
 #[tokio::test]
 async fn adapter_exit_evidence_follows_commit_and_replay_without_claiming_the_current_attempt() {
     let h = super::super::node_tools::tests::fixture(vec![]).await;
