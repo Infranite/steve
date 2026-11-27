@@ -534,3 +534,51 @@ async fn bootstrap_owner_uses_the_cli_environment_instead_of_the_services_enviro
     assert_eq!(hub.store.access().owner().unwrap().unwrap().name, expected);
     hub.stop().await;
 }
+
+#[tokio::test]
+async fn admin_init_db_checks_running_hub_schema_over_admin_socket() {
+    // 1. Running Hub at current schema: `--admin init-db` queries `/admin/v1/storage/status`
+    //    and succeeds without taking the offline instance lock.
+    let hub = Hub::start(false);
+    let out = hub.cli(&["init-db"]).await;
+    assert_eq!(out.code, 0, "{}", out.stderr);
+    let report: serde_json::Value = serde_json::from_str(&out.stdout).unwrap();
+    assert_eq!(report["ok"], true);
+    assert_eq!(report["schema_version"], steve_store::db::SCHEMA_VERSION);
+    hub.stop().await;
+
+    // 2. Running Hub reporting an older schema: refused without creating or mutating a DB.
+    let home = tempfile::tempdir().unwrap();
+    let (cfg, _) = config(home.path());
+    std::fs::create_dir_all(cfg.home.join("run")).unwrap();
+    let path = access::admin_socket_path(&cfg.home).unwrap();
+    let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+    let db_display = cfg.db_path();
+    let body = serde_json::to_vec(&serde_json::json!({
+        "path": db_display,
+        "schema_version": steve_store::db::SCHEMA_VERSION - 1,
+        "file_size": 4096,
+    }))
+    .unwrap();
+    let worker = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().unwrap();
+        let mut buf = [0u8; 1024];
+        let _ = conn.read(&mut buf);
+        write!(
+            conn,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        )
+        .unwrap();
+        conn.write_all(&body).unwrap();
+    });
+    let output = access::command(&cfg, &["init-db".into()]);
+    assert_eq!(
+        output.code, 2,
+        "stdout={} stderr={}",
+        output.stdout, output.stderr
+    );
+    assert!(output.stderr.contains("schema"), "{}", output.stderr);
+    assert!(!cfg.db_path().exists());
+    worker.join().unwrap();
+}

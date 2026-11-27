@@ -122,7 +122,18 @@ impl Home {
 
     pub fn save_pairing(&self, p: &Pairing) -> Result<()> {
         let f = self.pairing_file();
-        std::fs::create_dir_all(f.parent().unwrap())?;
+        if let Some(parent) = f.parent() {
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                std::fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(parent)?;
+            }
+            #[cfg(not(unix))]
+            std::fs::create_dir_all(parent)?;
+        }
         std::fs::write(&f, serde_json::to_string_pretty(p)?)?;
         Ok(())
     }

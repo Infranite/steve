@@ -750,6 +750,7 @@ fn cache_config(
 impl Config {
     /// Reads the process environment and creates the Hub's data and working directories.
     pub fn from_env() -> Result<Self, ConfigError> {
+        use std::os::unix::fs::DirBuilderExt;
         let cfg = Self::from_vars(|k| std::env::var(k).ok())?;
         for d in [
             &cfg.data_dir,
@@ -757,10 +758,14 @@ impl Config {
             &cfg.scratch,
             &cfg.home.join("workspaces"),
         ] {
-            std::fs::create_dir_all(d).map_err(|source| ConfigError::Dir {
-                path: d.display().to_string(),
-                source,
-            })?;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(d)
+                .map_err(|source| ConfigError::Dir {
+                    path: d.display().to_string(),
+                    source,
+                })?;
         }
         Ok(cfg)
     }

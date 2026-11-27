@@ -285,7 +285,6 @@ const RATIONALE: &[Entry] = &[
     /* Hub-host work */
     e(Spawn, "steve-hub/src/system.rs", Hub, "host facts (sw_vers, sysctl, uname, hostname)"),
     e(Fs, "steve-hub/src/nodes/fleet.rs", Hub, "reads `<data>/node/link-status.json` written by the colocated service Node"),
-    e(Fs, "steve-hub/src/nodes/mod.rs", Hub, "the Hub's own identity key directory"),
     e(Spawn, "steve-hub/src/wire/local_service.rs", Hub, "starting the Hub's own Node in a process of its own (B1)"),
     e(Fs, "steve-hub/src/wire/local_service.rs", Hub, "the service Node's key, link file, pid file and log in its home (B1)"),
     e(Fs, "steve-hub/src/wire/host_node.rs", Hub, "the roots file the service Node reads (B1)"),

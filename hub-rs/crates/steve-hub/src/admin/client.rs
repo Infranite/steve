@@ -22,6 +22,29 @@ fn segment(text: &str) -> String {
         })
         .collect()
 }
+/// Queries `/admin/v1/storage/status` when a Hub is listening on the management socket.
+/// Returns `Ok(None)` only when the socket cannot be connected (offline).
+pub(crate) fn storage_status(home: &Path) -> Result<Option<super::routes::StorageStatus>> {
+    let path = super::socket_path(home)?;
+    let stream = match UnixStream::connect(&path) {
+        Ok(stream) => stream,
+        Err(_) => return Ok(None),
+    };
+    let (status, body) = exchange(stream, "GET", "/admin/v1/storage/status", &[])?;
+    if !(200..300).contains(&status) {
+        if let Ok(output) = serde_json::from_slice::<CliOutput>(&body) {
+            let detail = output.stderr.trim();
+            if !detail.is_empty() {
+                anyhow::bail!("{detail}");
+            }
+        }
+        anyhow::bail!("management storage status failed with HTTP {status}");
+    }
+    let info: super::routes::StorageStatus = serde_json::from_slice(&body)
+        .context("invalid management storage status response; no offline retry was attempted")?;
+    Ok(Some(info))
+}
+
 pub(crate) fn try_command(home: &Path, args: &[String]) -> Result<Option<CliOutput>> {
     let path = super::socket_path(home)?;
     let stream = match UnixStream::connect(&path) {
