@@ -220,14 +220,170 @@ fn task_words(req: &DispatchRequest<'_>) -> Vec<String> {
     )
 }
 
-pub(crate) fn select(
+pub(crate) struct EligibleBot {
+    pub bot: Bot,
+    pub project: Option<Project>,
+    pub choice: HarnessChoice,
+    pub node: String,
+    pub priority: u32,
+    pub skipped: Vec<Rejection>,
+}
+
+pub(crate) struct EligibleCandidates {
+    pub candidates: Vec<EligibleBot>,
+    #[allow(dead_code)]
+    pub rejected: Vec<PlacementBlocker>,
+    pub primary_rejection: Option<Rejection>,
+}
+
+impl EligibleBot {
+    pub(crate) fn into_placement(
+        self,
+        required_node: Option<&str>,
+        reason: PlacementReason,
+        why: Option<String>,
+        mut rejected: Vec<PlacementBlocker>,
+        fallback: Option<Rejection>,
+        deferred_by: Option<CoordinatorDeferSource>,
+    ) -> (BotPlacement, Option<Project>) {
+        let bot_id = self.bot.id;
+        rejected.extend(self.skipped.into_iter().map(|r| PlacementBlocker {
+            bot: Some(bot_id.clone().into()),
+            reason: r,
+        }));
+        let reasoning_effort = self.choice.effective_effort();
+        (
+            BotPlacement {
+                rule_version: RULE_VERSION,
+                bot_revision: self.bot.revision,
+                at: Millis(steve_store::now()),
+                node: self.node.into(),
+                required_node: required_node.map(Into::into),
+                node_priority: self.priority,
+                harness: self.choice.harness,
+                model: self.choice.model,
+                reasoning_effort,
+                explanation: PlacementExplanation {
+                    bot: bot_id.into(),
+                    reason,
+                    why: why.and_then(|s| {
+                        let t = s.trim();
+                        (!t.is_empty()).then(|| t.to_owned())
+                    }),
+                    matched: vec![],
+                    rejected,
+                    fallback,
+                    deferred_by,
+                },
+            },
+            self.project,
+        )
+    }
+}
+
+fn norm_specialty(tag: &str) -> Vec<String> {
+    tag.split(|c: char| !c.is_alphanumeric())
+        .filter(|part| !part.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+fn assess_bot(
     db: &Db,
     rt: &dyn AgentRuntime,
-    request: DispatchRequest<'_>,
-    default_model: impl Fn(&str) -> Option<String>,
-) -> Result<(BotPlacement, Option<Project>)> {
-    let started = Instant::now();
-    let result = select_inner(db, rt, request, default_model);
+    req: &DispatchRequest<'_>,
+    bot: Bot,
+    mandatory: &[Vec<String>],
+    default_model: &impl Fn(&str) -> Option<String>,
+) -> Result<std::result::Result<EligibleBot, Vec<Rejection>>> {
+    if !bot.main && req.team.is_some_and(|t| t.member(&bot.id).is_none()) {
+        return Ok(Err(vec![Rejection::OutsideTeam]));
+    }
+    if !mandatory.iter().all(|tag| {
+        bot.specialties
+            .iter()
+            .any(|have| norm_specialty(have) == *tag)
+    }) {
+        return Ok(Err(vec![Rejection::Specialty]));
+    }
+    if !bot.enabled {
+        return Ok(Err(vec![Rejection::Bot]));
+    }
+    let project = req
+        .project
+        .as_ref()
+        .unwrap_or(&bot.default_project)
+        .as_deref()
+        .filter(|p| !p.is_empty());
+    let found = db
+        .project(project)?
+        .filter(|p| p.workspace_id == req.workspace && !p.archived);
+    if project.is_some() && found.is_none() {
+        return Ok(Err(vec![Rejection::Project]));
+    }
+    let scope = db
+        .store()
+        .read(|r| bot_dispatch::scope_for(r, req.workspace, req.team, &bot.id))?;
+    let Scope::Nodes(nodes) = scope else {
+        return Ok(Err(vec![Rejection::OutsideTeam]));
+    };
+    let same_runtime = req
+        .harness
+        .is_none_or(|rt_id| rt_id == bot.harness.as_str());
+    let runtime_id = req.harness.unwrap_or(&bot.harness);
+    let model = req
+        .model
+        .map(str::to_owned)
+        .or_else(|| same_runtime.then(|| bot.model.clone()).flatten())
+        .or_else(|| default_model(runtime_id));
+    let effort = req
+        .effort
+        .or_else(|| same_runtime.then_some(bot.reasoning_effort))
+        .and_then(steve_types::ReasoningEffort::non_default);
+    let choice = HarnessChoice {
+        harness: runtime_id.to_string(),
+        model,
+        effort,
+    };
+    let mut skipped = Vec::new();
+    for (priority, node) in nodes
+        .into_iter()
+        .enumerate()
+        .filter(|(_, n)| req.node.is_none_or(|id| id == n))
+    {
+        if req
+            .required_nodes
+            .is_some_and(|nodes| !nodes.contains(&node))
+        {
+            skipped.push(Rejection::Tag);
+            continue;
+        }
+        if let Some(reason) = rt.assess_placement_node(
+            req.workspace,
+            found.as_ref(),
+            &node,
+            &choice,
+            &bot.perm_mode,
+        )? {
+            skipped.push(reason);
+            continue;
+        }
+        return Ok(Ok(EligibleBot {
+            bot,
+            project: found,
+            choice,
+            node,
+            priority: priority as u32,
+            skipped,
+        }));
+    }
+    if skipped.is_empty() {
+        skipped.push(Rejection::NoBindings);
+    }
+    Ok(Err(skipped))
+}
+
+fn record_selection_metrics(started: Instant, result: &Result<(BotPlacement, Option<Project>)>) {
     thread_local! {
         static SELECTION_SECONDS: std::cell::OnceCell<metrics::Histogram> =
             const { std::cell::OnceCell::new() };
@@ -243,7 +399,7 @@ pub(crate) fn select(
         cell.get_or_init(|| metrics::histogram!("steve_bot_selection_seconds"))
             .record(elapsed);
     });
-    match &result {
+    match result {
         Ok((placement, _)) => {
             let key = placement.explanation.reason.as_str();
             SELECTION_TOTAL.with(|cache| {
@@ -280,29 +436,165 @@ pub(crate) fn select(
         }
         Err(_) => {}
     }
+}
+
+/// Compute all hard-eligible non-main executor Bots for `req` without ranking or calling any model.
+pub(crate) fn eligible(
+    db: &Db,
+    rt: &dyn AgentRuntime,
+    req: &DispatchRequest<'_>,
+    default_model: impl Fn(&str) -> Option<String>,
+) -> Result<EligibleCandidates> {
+    let mut bots = db.bots(req.workspace)?;
+    bots.sort_unstable_by(|a, b| a.id.cmp(&b.id));
+    let mandatory: Vec<_> = req
+        .required_specialties
+        .iter()
+        .map(|tag| norm_specialty(tag))
+        .collect();
+    let mut candidates = Vec::new();
+    let mut rejected = Vec::new();
+    for bot in bots.into_iter().filter(|b| {
+        !b.main
+            && req.team.is_none_or(|t| t.member(&b.id).is_some())
+            && req.harness.is_none_or(|rt_id| rt_id == b.harness.as_str())
+    }) {
+        let id = bot.id.clone();
+        match assess_bot(db, rt, req, bot, &mandatory, &default_model)? {
+            Ok(eligible_bot) => candidates.push(eligible_bot),
+            Err(reasons) => rejected.extend(reasons.into_iter().map(|reason| PlacementBlocker {
+                bot: Some(id.clone().into()),
+                reason,
+            })),
+        }
+    }
+    let primary_rejection = rejected
+        .iter()
+        .map(|b| b.reason)
+        .find(|reason| *reason != Rejection::Specialty)
+        .or_else(|| rejected.first().map(|b| b.reason));
+    Ok(EligibleCandidates {
+        candidates,
+        rejected,
+        primary_rejection,
+    })
+}
+
+/// Validate a specific Bot choice (`req.bot` must be `Some`) without emitting dispatch metrics
+/// (used for OFFER card inspection and pre-validation).
+pub(crate) fn check_bot(
+    db: &Db,
+    rt: &dyn AgentRuntime,
+    req: &DispatchRequest<'_>,
+    default_model: impl Fn(&str) -> Option<String>,
+    reason: PlacementReason,
+    why: Option<String>,
+) -> Result<(BotPlacement, Option<Project>)> {
+    let Some(bot_id) = req.bot else {
+        return Err(CoreError::Placement(PlacementBlocked {
+            reason: Rejection::NoCandidates,
+            rejected: vec![],
+        }));
+    };
+    let Some(bot) = db.bots(req.workspace)?.into_iter().find(|b| b.id == bot_id) else {
+        return Err(CoreError::Placement(PlacementBlocked {
+            reason: Rejection::Unauthorized,
+            rejected: vec![],
+        }));
+    };
+    let mandatory: Vec<_> = req
+        .required_specialties
+        .iter()
+        .map(|tag| norm_specialty(tag))
+        .collect();
+    match assess_bot(db, rt, req, bot, &mandatory, &default_model)? {
+        Ok(eligible_bot) => {
+            Ok(eligible_bot.into_placement(req.node, reason, why, vec![], None, None))
+        }
+        Err(reasons) => {
+            let primary = reasons
+                .iter()
+                .copied()
+                .find(|r| *r != Rejection::Specialty)
+                .or_else(|| reasons.first().copied())
+                .unwrap_or(Rejection::Bot);
+            let rejected = reasons
+                .into_iter()
+                .map(|r| PlacementBlocker {
+                    bot: Some(bot_id.to_owned().into()),
+                    reason: r,
+                })
+                .collect();
+            Err(CoreError::Placement(PlacementBlocked {
+                reason: primary,
+                rejected,
+            }))
+        }
+    }
+}
+
+/// Validate a chosen Bot (`req.bot` must be `Some`) and record `steve_bot_selection_*` metrics.
+pub(crate) fn validate(
+    db: &Db,
+    rt: &dyn AgentRuntime,
+    req: &DispatchRequest<'_>,
+    default_model: impl Fn(&str) -> Option<String>,
+    reason: PlacementReason,
+    why: Option<String>,
+) -> Result<(BotPlacement, Option<Project>)> {
+    let started = Instant::now();
+    let result = check_bot(db, rt, req, default_model, reason, why);
+    record_selection_metrics(started, &result);
     result
 }
 
-/// Preview deterministic Bot placement for an OFFER card without incrementing dispatch metrics.
-pub(crate) fn preview(
+/// Validate the workspace coordinator (main bot) after no eligible executor Bot was found.
+#[allow(dead_code)]
+pub(crate) fn validate_coordinator(
+    db: &Db,
+    rt: &dyn AgentRuntime,
+    req: &DispatchRequest<'_>,
+    default_model: impl Fn(&str) -> Option<String>,
+    blocked: PlacementBlocked,
+    deferred_by: CoordinatorDeferSource,
+) -> Result<(BotPlacement, Option<Project>)> {
+    let main = db
+        .bots(req.workspace)?
+        .into_iter()
+        .find(|b| b.main)
+        .ok_or_else(|| CoreError::Placement(blocked.clone()))?;
+    let main_id = main.id.clone();
+    match assess_bot(db, rt, req, main, &[], &default_model)? {
+        Ok(eligible_bot) => Ok(eligible_bot.into_placement(
+            req.node,
+            PlacementReason::CoordinatorDeferred,
+            None,
+            blocked.rejected,
+            Some(blocked.reason),
+            Some(deferred_by),
+        )),
+        Err(reasons) => {
+            let mut rejected = blocked.rejected;
+            rejected.extend(reasons.iter().copied().map(|reason| PlacementBlocker {
+                bot: Some(main_id.clone().into()),
+                reason,
+            }));
+            let reason = reasons.first().copied().unwrap_or(blocked.reason);
+            Err(CoreError::Placement(PlacementBlocked { reason, rejected }))
+        }
+    }
+}
+
+pub(crate) fn select(
     db: &Db,
     rt: &dyn AgentRuntime,
     request: DispatchRequest<'_>,
     default_model: impl Fn(&str) -> Option<String>,
 ) -> Result<(BotPlacement, Option<Project>)> {
-    select_inner(db, rt, request, default_model)
-}
-
-/// Preview coordinator fallback placement for an OFFER card when workspace policy defers to Steve.
-pub(crate) fn preview_coordinator(
-    db: &Db,
-    rt: &dyn AgentRuntime,
-    req: DispatchRequest<'_>,
-    default_model: impl Fn(&str) -> Option<String>,
-    blocked: PlacementBlocked,
-    deferred_by: CoordinatorDeferSource,
-) -> Result<(BotPlacement, Option<Project>)> {
-    select_coordinator(db, rt, req, default_model, blocked, deferred_by)
+    let started = Instant::now();
+    let result = select_inner(db, rt, request, default_model);
+    record_selection_metrics(started, &result);
+    result
 }
 
 fn select_inner(
@@ -396,6 +688,7 @@ fn select_inner(
             explanation: PlacementExplanation {
                 bot: best.bot.id.into(),
                 reason,
+                why: None,
                 matched: best
                     .score
                     .specialties
@@ -463,6 +756,7 @@ pub(crate) fn select_coordinator(
             explanation: PlacementExplanation {
                 bot: best.bot.id.into(),
                 reason: PlacementReason::CoordinatorDeferred,
+                why: None,
                 matched: vec![],
                 rejected,
                 fallback: Some(blocked.reason),
@@ -588,6 +882,119 @@ mod tests {
         BotPatch, NewBot, WS,
         bot_dispatch::{Member, Team},
     };
+
+    #[test]
+    fn eligible_and_validate_enforce_hard_constraints_without_ranking() {
+        let k = Kit::new();
+        let db = k.core.store();
+        db.store()
+            .bots()
+            .seed(
+                "review",
+                false,
+                &NewBot {
+                    name: "Review".into(),
+                    harness: "fixture".into(),
+                    specialties: Some(vec!["code review".into()]),
+                    ..Default::default()
+                },
+                WS,
+            )
+            .unwrap();
+        db.store()
+            .bots()
+            .seed(
+                "off",
+                false,
+                &NewBot {
+                    name: "Off".into(),
+                    harness: "fixture".into(),
+                    enabled: Some(false),
+                    ..Default::default()
+                },
+                WS,
+            )
+            .unwrap();
+        let req = DispatchRequest {
+            workspace: WS,
+            bot: None,
+            harness: None,
+            model: None,
+            effort: None,
+            team: None,
+            project: &Some(None),
+            title: "Task",
+            goal: "Goal",
+            tags: &[],
+            required_specialties: &[],
+            node: None,
+            required_nodes: None,
+        };
+        let found = eligible(db, k.rt.as_ref(), &req, |_| None).unwrap();
+        let ids: Vec<&str> = found.candidates.iter().map(|c| c.bot.id.as_str()).collect();
+        assert_eq!(ids, vec!["dev", "review"]);
+        assert!(found.rejected.iter().any(|b| {
+            b.bot.as_ref().map(|id| id.as_str()) == Some("off") && b.reason == Rejection::Bot
+        }));
+        assert_eq!(found.primary_rejection, Some(Rejection::Bot));
+
+        let (placed, _) = validate(
+            db,
+            k.rt.as_ref(),
+            &DispatchRequest {
+                bot: Some("review"),
+                ..req
+            },
+            |_| None,
+            PlacementReason::SteveSelected,
+            Some("Best fit for review".into()),
+        )
+        .unwrap();
+        assert_eq!(placed.explanation.bot.as_str(), "review");
+        assert_eq!(placed.explanation.reason, PlacementReason::SteveSelected);
+        assert_eq!(
+            placed.explanation.why.as_deref(),
+            Some("Best fit for review")
+        );
+
+        let err = validate(
+            db,
+            k.rt.as_ref(),
+            &DispatchRequest {
+                bot: Some("off"),
+                ..req
+            },
+            |_| None,
+            PlacementReason::SteveSelected,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            CoreError::Placement(PlacementBlocked {
+                reason: Rejection::Bot,
+                ..
+            })
+        ));
+
+        let (coord, _) = validate_coordinator(
+            db,
+            k.rt.as_ref(),
+            &req,
+            |_| None,
+            PlacementBlocked {
+                reason: Rejection::NoCandidates,
+                rejected: vec![],
+            },
+            CoordinatorDeferSource::Setting,
+        )
+        .unwrap();
+        assert_eq!(coord.explanation.bot.as_str(), "steve");
+        assert_eq!(
+            coord.explanation.reason,
+            PlacementReason::CoordinatorDeferred
+        );
+    }
 
     #[test]
     fn selection_only_ranks_eligible_bots_and_preserves_explicit_routes() {

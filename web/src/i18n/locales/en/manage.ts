@@ -43,6 +43,8 @@ export default {
     },
     selection: {
       explicit: "Chosen by you",
+      steve_selected: "Selected by Steve",
+      only_eligible: "Only eligible Bot",
       specialty: "Matched Bot specialties",
       description: "Matched the Bot description",
       project_preference: "Matched the project preference",

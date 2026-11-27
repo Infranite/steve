@@ -109,6 +109,7 @@ impl steve_flow::Core for FlowCore {
                     files: vec![],
                     actor: Some("steve".into()),
                     requester: req.requester,
+                    ..Default::default()
                 })
                 .map_err(|e| e.to_string())?;
             if req.accept_auto {

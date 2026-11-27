@@ -627,8 +627,9 @@ mod tests {
             reasoning_effort: Default::default(),
             explanation: PlacementExplanation {
                 bot: bot.id.as_str().into(),
-                reason: PlacementReason::Specialty,
-                matched: vec!["code review".into()],
+                reason: PlacementReason::SteveSelected,
+                why: Some("Matches code review tasks".into()),
+                matched: vec![],
                 rejected: vec![],
                 fallback: None,
                 deferred_by: None,

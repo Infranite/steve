@@ -48,8 +48,8 @@ function initialMessages() {
           project: null,
           tags: ["t_fe"],
           bot: "dev",
-          reason: "description",
-          matched: ["前端"],
+          reason: "steve_selected",
+          why: "开发 Bot 负责前端样式调整且当前负载低",
           state: "open",
         },
       },
@@ -69,7 +69,7 @@ function initialMessages() {
           project: null,
           tags: [],
           bot: "dev",
-          reason: "stable_order",
+          reason: "only_eligible",
           state: "open",
         },
       },
@@ -79,16 +79,18 @@ function initialMessages() {
       id: "m_offer_3",
       ws: "default",
       author: "steve",
-      text: "当前没有可自动承接的常规执行 Bot。",
+      text: "建议交给停用测试 Bot 处理。",
       created: now - 10_000,
       meta: {
         origin: "u_3",
         offer: {
           title: "紧急热修复",
-          goal: "无可用常规 Bot 时的热修",
+          goal: "Steve 选择了已停用的 Bot",
           project: null,
           tags: [],
-          bot: null,
+          bot: "bot_off",
+          why: "历史上修过同类问题",
+          rejected: "bot",
           state: "open",
         },
       },
@@ -192,14 +194,15 @@ try {
     })
     await page.goto(base + "/")
 
-    // 1. Previewed Bot and matched placement reason show on m_offer_1; taking without override sends { take: true }.
+    // 1. Steve's chosen Bot and rationale show on m_offer_1; taking without override sends { take: true }.
     const bot1 = page.locator('[data-offer-bot="m_offer_1"]')
     await bot1.waitFor()
-    assert.match(await bot1.innerText(), /自动 · 开发 Bot/)
+    assert.match(await bot1.innerText(), /Steve 推荐 · 开发 Bot/)
+    assert.match(await page.locator('[data-offer-why="m_offer_1"]').innerText(), /开发 Bot 负责前端样式调整且当前负载低/)
     await bot1.click()
     const listbox1 = page.getByRole("listbox")
     await listbox1.waitFor()
-    assert.match(await listbox1.innerText(), /匹配 Bot 职责说明 · 前端/)
+    assert.match(await listbox1.innerText(), /Steve 选择了这个 Bot/)
     assert.equal(await listbox1.getByRole("option", { name: /停用测试/ }).count(), 0, "disabled bots must not be selectable")
     await page.keyboard.press("Escape")
     await listbox1.waitFor({ state: "detached" })
@@ -213,11 +216,11 @@ try {
     // 2. Switching Bot on m_offer_2 sends explicit bot override; a 409 placement refusal keeps the offer open for retry.
     const bot2 = page.locator('[data-offer-bot="m_offer_2"]')
     await bot2.waitFor()
-    assert.match(await bot2.innerText(), /自动 · 开发 Bot/)
+    assert.match(await bot2.innerText(), /唯一合格 · 开发 Bot/)
     await bot2.click()
     const listbox2 = page.getByRole("listbox")
     await listbox2.waitFor()
-    assert.match(await listbox2.innerText(), /按通用度、Team 顺序与执行节点优先级选定/)
+    assert.match(await listbox2.innerText(), /当前唯一合格的 Bot/)
     await listbox2.getByRole("option", { name: /文档 Bot/ }).click()
     await listbox2.waitFor({ state: "detached" })
     assert.match(await bot2.innerText(), /文档 Bot/)
@@ -233,14 +236,16 @@ try {
     assert.deepEqual(offerCalls[1], { id: "m_offer_2", body: { take: true, bot: "bot_doc" } })
     assert.deepEqual(offerCalls[2], { id: "m_offer_2", body: { take: true, bot: "bot_doc" } })
 
-    // 3. Unassigned preview (bot: null) offers explicit fallback picker including coordinator Steve.
+    // 3. Rejected Steve choice surfaces the real rejection reason, blocks take until owner switches Bot.
     const bot3 = page.locator('[data-offer-bot="m_offer_3"]')
     await bot3.waitFor()
-    assert.match(await bot3.innerText(), /自动（暂无可用 Bot）/)
+    assert.match(await bot3.innerText(), /停用测试 Bot（不可用）/)
+    assert.match(await page.locator('[data-offer="m_offer_3"] [data-offer-rejected="bot"]').innerText(), /Bot 已停用或不再属于当前工作空间/)
+    assert.equal(await page.locator('[data-offer="m_offer_3"] [data-offer-take]').isDisabled(), true)
     await bot3.click()
     const listbox3 = page.getByRole("listbox")
     await listbox3.waitFor()
-    assert.match(await listbox3.innerText(), /可在此直接指定执行 Bot/)
+    assert.match(await listbox3.innerText(), /请在此改选其他执行 Bot/)
     await listbox3.getByRole("option", { name: /Steve · 协调者/ }).click()
     await listbox3.waitFor({ state: "detached" })
     const post3 = page.waitForResponse((r) => r.url().endsWith("/api/thread/m_offer_3/offer") && r.request().method() === "POST")

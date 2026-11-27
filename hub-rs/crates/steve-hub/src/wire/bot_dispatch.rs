@@ -580,6 +580,7 @@ impl Routes {
             .unwrap_or_else(|| PlacementExplanation {
                 bot: self.bot.id.clone().into(),
                 reason: PlacementReason::ExistingAssignment,
+                why: None,
                 matched: vec![],
                 rejected: vec![],
                 fallback: None,

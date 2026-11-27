@@ -1797,8 +1797,14 @@ async fn offer_carries_route_tags_into_preview_and_item() {
             WS,
         )
         .unwrap();
-    k.core
-        .set_researcher(FakeResearch::new(vec![Step::Text("已梳理现状。")]));
+    let res = FakeResearch::new(vec![Step::Text("已梳理现状。")]);
+    *res.offer.lock().unwrap() = Some(crate::gateway::Offer {
+        title: "更新说明".into(),
+        goal: "整理本周变更".into(),
+        bot: Some("bot_doc".into()),
+        why: Some("文档 Bot 负责整理文档与变更说明".into()),
+    });
+    k.core.set_researcher(res);
     let tid = tag.id.clone();
     router(&k, move |_| {
         json!({
@@ -1819,8 +1825,9 @@ async fn offer_carries_route_tags_into_preview_and_item() {
     assert_eq!(offer["state"], "open", "{offer}");
     assert_eq!(offer["tags"], json!([tag.id]), "{offer}");
     assert_eq!(offer["bot"], "bot_doc", "{offer}");
-    assert_eq!(offer["reason"], "description", "{offer}");
-    assert_eq!(offer["matched"], json!(["文档"]), "{offer}");
+    assert_eq!(offer["reason"], "steve_selected", "{offer}");
+    assert_eq!(offer["why"], "文档 Bot 负责整理文档与变更说明", "{offer}");
+    assert!(offer.get("rejected").is_none(), "{offer}");
 
     let handled = k.core.offer(WS, &ms[1].id, true, None, None).unwrap();
     let item = handled.item.unwrap();
@@ -1834,9 +1841,91 @@ async fn offer_carries_route_tags_into_preview_and_item() {
         .unwrap();
     assert_eq!(
         initial.explanation.reason,
-        steve_types::PlacementReason::Description
+        steve_types::PlacementReason::SteveSelected
     );
-    assert_eq!(initial.explanation.matched, vec!["文档"]);
+    assert_eq!(
+        initial.explanation.why.as_deref(),
+        Some("文档 Bot 负责整理文档与变更说明")
+    );
+}
+
+#[tokio::test]
+async fn offer_invalid_steve_choice_is_rejected_without_silent_swap() {
+    let k = Kit::new();
+    for (id, enabled) in [("bot_doc", true), ("bot_off", false)] {
+        k.db()
+            .store()
+            .bots()
+            .seed(
+                id,
+                false,
+                &steve_store::NewBot {
+                    name: id.into(),
+                    harness: "fixture".into(),
+                    enabled: Some(enabled),
+                    ..Default::default()
+                },
+                WS,
+            )
+            .unwrap();
+    }
+    let res = FakeResearch::new(vec![Step::Text("建议交给 bot_off 处理。")]);
+    *res.offer.lock().unwrap() = Some(crate::gateway::Offer {
+        title: "整理变更".into(),
+        goal: "补齐本周文档".into(),
+        bot: Some("bot_off".into()),
+        why: Some("曾经做过类似任务".into()),
+    });
+    k.core.set_researcher(res);
+    router(&k, |_| {
+        json!({
+            "kind": "item",
+            "confidence": 0.6,
+            "signals": ["change"],
+            "title": "整理变更",
+            "goal": "补齐本周文档",
+            "project": null
+        })
+    });
+    k.core.say(WS, "你看看这份文档要怎么改", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    let offer = &ms[1].meta["offer"];
+    assert_eq!(offer["state"], "open", "{offer}");
+    assert_eq!(offer["bot"], "bot_off", "{offer}");
+    assert_eq!(offer["rejected"], "bot", "{offer}");
+    assert!(offer.get("reason").is_none(), "{offer}");
+
+    // Taking without owner override must return 409 placement refusal, never silently swap to dev.
+    let err = k.core.offer(WS, &ms[1].id, true, None, None).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::CoreError::Placement(steve_types::PlacementBlocked {
+                reason: steve_types::PlacementRejection::Bot,
+                ..
+            })
+        ),
+        "{err}"
+    );
+    assert_eq!(items(&k), 0);
+
+    // Owner overriding to an eligible Bot succeeds and records Explicit.
+    let handled = k
+        .core
+        .offer(WS, &ms[1].id, true, Some("bot_doc"), None)
+        .unwrap();
+    let item = handled.item.unwrap();
+    assert_eq!(item.bot_id.as_deref(), Some("bot_doc"));
+    let initial = k
+        .db()
+        .store()
+        .read(|r| steve_store::bot_dispatch::initial(r, &item.id))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        initial.explanation.reason,
+        steve_types::PlacementReason::Explicit
+    );
 }
 
 #[tokio::test]
@@ -1859,9 +1948,6 @@ async fn offer_explicit_bot_override_and_failed_override_recovery() {
             )
             .unwrap();
     }
-    for (id, ts) in [("dev", 100), ("bot_doc", 200), ("bot_off", 300)] {
-        steve_store::core_fixture::bot_workspace_created(k.db().store(), WS, id, ts);
-    }
     k.gw.set(|p, _| {
         if p.starts_with("You are the router") {
             Ok(json!({"kind": "answer", "confidence": 0.9}).to_string())
@@ -1876,7 +1962,17 @@ async fn offer_explicit_bot_override_and_failed_override_recovery() {
     });
     k.core.say(WS, "看下这部分", &[]).unwrap();
     let ms = settle(&k, 2).await;
-    assert_eq!(ms[1].meta["offer"]["bot"], "dev", "{}", ms[1].meta["offer"]);
+    // With >=2 eligible Bots and no Steve selection, OFFER leaves bot unset instead of scoring.
+    assert!(
+        ms[1].meta["offer"]["bot"].is_null(),
+        "{}",
+        ms[1].meta["offer"]
+    );
+    assert!(
+        ms[1].meta["offer"].get("rejected").is_none(),
+        "{}",
+        ms[1].meta["offer"]
+    );
 
     let err = k
         .core
@@ -1918,5 +2014,5 @@ async fn offer_explicit_bot_override_and_failed_override_recovery() {
     assert_eq!(saved.meta["offer"]["state"], "taken");
     assert_eq!(saved.meta["offer"]["bot"], "bot_doc");
     assert_eq!(saved.meta["offer"]["reason"], "explicit");
-    assert!(saved.meta["offer"].get("matched").is_none());
+    assert!(saved.meta["offer"].get("rejected").is_none());
 }

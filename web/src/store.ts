@@ -23,7 +23,7 @@ import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, PlacementReason, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, PlacementReason, PlacementRejection, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onEntityView, onViewKinds, messageView, messageViews, openDecisions, resetViews, settle, settled, subscribeItemScope, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork, useItemView, useSessionView, useViewGroup } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 import { itemDisplayStatusOf, itemState } from "./item-state"
@@ -94,7 +94,7 @@ export type ItemCardState = { item: string; state: string; at?: number; text?: s
   build?: { text: string; at?: number } }
 export type Offer = {
   title: string; goal: string; project?: string | null; bot?: string | null
-  reason?: PlacementReason | null; matched?: string[]; tags?: string[]
+  why?: string | null; reason?: PlacementReason | null; rejected?: PlacementRejection | null; tags?: string[]
   state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean
 }
 /** a key moment of an item made from the conversation, posted back to it (§5.2) */

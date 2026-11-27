@@ -1258,6 +1258,8 @@ impl CoreDomain {
             files: vec![],
             actor: Some(p.actor),
             requester: None,
+            placement_reason: None,
+            placement_why: None,
         };
         let rt = self.routed.clone();
         let result =

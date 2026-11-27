@@ -65,6 +65,10 @@ pub struct CreateItem {
     pub actor: Option<String>,
     /// Who asked for it when that is not the actor (a chat message's sender); `None`: the actor.
     pub requester: Option<String>,
+    /// Optional placement reason override when `bot` was already chosen (e.g. Steve OFFER selection).
+    pub placement_reason: Option<steve_types::PlacementReason>,
+    /// Optional one-sentence rationale explaining why Steve chose `bot`.
+    pub placement_why: Option<String>,
 }
 
 /// What [`Core::queued_send_now`] did with a queued message.
@@ -1422,7 +1426,19 @@ impl Tx<'_> {
                     required_nodes: required_nodes.as_deref(),
                 };
                 let default_model = |rt_id: &str| self.c.models().agent_model(ws, rt_id);
-                let selected = crate::placement::select(db, self.rt(), req, default_model);
+                let selected = if explicit_bot.is_some() {
+                    crate::placement::validate(
+                        db,
+                        self.rt(),
+                        &req,
+                        default_model,
+                        n.placement_reason
+                            .unwrap_or(steve_types::PlacementReason::Explicit),
+                        n.placement_why.clone(),
+                    )
+                } else {
+                    crate::placement::select(db, self.rt(), req, default_model)
+                };
                 let (placement, bot, project, blocked, deferred_by_setting) = match selected {
                     Ok((placement, project)) => {
                         let bot = db
@@ -6051,6 +6067,7 @@ impl Tx<'_> {
             node: None,
             node_tag: None,
             required_specialties: vec![],
+            ..Default::default()
         })?;
         if let Some(pi) = s.item_id.as_deref() {
             self.db().timeline_add(

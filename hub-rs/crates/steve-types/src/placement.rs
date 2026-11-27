@@ -49,6 +49,8 @@ placement_reasons! {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum PlacementReason {
     Explicit,
+    SteveSelected,
+    OnlyEligible,
     Specialty,
     Description,
     ProjectPreference,
@@ -64,6 +66,8 @@ impl PlacementReason {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Explicit => "explicit",
+            Self::SteveSelected => "steve_selected",
+            Self::OnlyEligible => "only_eligible",
             Self::Specialty => "specialty",
             Self::Description => "description",
             Self::ProjectPreference => "project_preference",
@@ -152,6 +156,10 @@ impl std::fmt::Display for PlacementBlocked {
 pub struct PlacementExplanation {
     pub bot: BotId,
     pub reason: PlacementReason,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub why: Option<String>,
+    #[serde(default)]
     pub matched: Vec<String>,
     pub rejected: Vec<PlacementBlocker>,
     pub fallback: Option<PlacementRejection>,

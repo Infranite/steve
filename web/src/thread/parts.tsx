@@ -228,21 +228,26 @@ export function OfferLine({ m }: { m: Msg }) {
 function OpenOfferLine({ m, o }: { m: Msg; o: NonNullable<Msg["offer"]> }) {
   useShellStore()
   const [busy, setBusy] = useState(false), [open, setOpen] = useState(false), [picked, setPicked] = useState(AUTO_OFFER_BOT), t = useT()
-  const previewBot = o.bot && st.bots[o.bot]?.on ? o.bot : undefined
+  const rejectedReason = o.rejected ? t(`manage:dispatch.reason.${o.rejected}`, { defaultValue: t("manage:dispatch.reason.bind_failed") }) : undefined
+  const previewBot = !o.rejected && o.bot && st.bots[o.bot]?.on ? o.bot : undefined
   const enabledBots = Object.keys(st.bots)
     .filter((k) => st.bots[k].on)
     .sort((a, b) => Number(!!st.bots[a].main) - Number(!!st.bots[b].main) || botName(a).localeCompare(botName(b)))
   const effectivePicked = picked === AUTO_OFFER_BOT || enabledBots.includes(picked) ? picked : AUTO_OFFER_BOT
-  const autoLabel = previewBot
-    ? t("thread:offer.botAutoPreview", { bot: botName(previewBot) })
-    : o.bot === null
-      ? t("thread:offer.botAutoUnassigned")
+  const autoLabel = o.rejected
+    ? o.bot
+      ? t("thread:offer.botRejected", { bot: botName(o.bot) })
+      : t("thread:offer.botAutoUnassigned")
+    : previewBot
+      ? o.reason === "only_eligible"
+        ? t("thread:offer.botOnlyEligible", { bot: botName(previewBot) })
+        : t("thread:offer.botSteveSelected", { bot: botName(previewBot) })
       : t("thread:offer.botAuto")
-  const autoDesc = previewBot && o.reason
-    ? [t(`manage:dispatch.selection.${o.reason}`), ...(o.matched ?? [])].filter(Boolean).join(" · ")
-    : o.bot === null
-      ? t("thread:offer.botAutoUnassignedHint")
-      : undefined
+  const autoDesc = o.rejected
+    ? [rejectedReason, t("thread:offer.botAutoUnassignedHint")].filter(Boolean).join(" · ")
+    : previewBot
+      ? [o.reason ? t(`manage:dispatch.selection.${o.reason}`) : undefined, o.why || undefined].filter(Boolean).join(" · ")
+      : t("thread:offer.botAutoHint")
   const options: SelectOption[] = [
     { value: AUTO_OFFER_BOT, label: autoLabel, description: autoDesc || undefined },
     ...enabledBots.map((k) => ({
@@ -251,25 +256,38 @@ function OpenOfferLine({ m, o }: { m: Msg; o: NonNullable<Msg["offer"]> }) {
       description: st.bots[k].role || undefined,
     })),
   ]
+  const usingAuto = effectivePicked === AUTO_OFFER_BOT
   const act = async (take: boolean) => {
     setBusy(true)
     try {
-      await takeOffer(m, take, take && effectivePicked !== AUTO_OFFER_BOT ? effectivePicked : undefined)
+      await takeOffer(m, take, take && !usingAuto ? effectivePicked : undefined)
     } finally {
       setBusy(false)
     }
   }
   if (o.folded && !open) return <button type="button" className="mt-2 self-start type-callout text-muted-foreground hover:text-foreground" onClick={() => setOpen(true)} data-offer-folded={m.id}>{t("thread:offer.folded", { title: o.title })}</button>
   return (
-    <div className="mt-3 flex flex-wrap items-center gap-2 anim-in" data-offer={m.id}>
-      <span className="type-callout text-muted-foreground">{t("thread:offer.question")}</span>
-      {(enabledBots.length > 0 || previewBot) && (
-        <Select size="sm" value={effectivePicked} options={options} onChange={setPicked} disabled={busy}
-          aria-label={t("thread:offer.chooseBot")} align="start" listMinWidth={OFFER_BOT_MENU_MIN_WIDTH}
-          className="min-w-0 max-w-full" triggerClassName="max-w-full" data-offer-bot={m.id} />
+    <div className="mt-3 flex flex-col gap-1.5 anim-in" data-offer={m.id}>
+      <div className="flex flex-wrap items-center gap-2">
+        <span className="type-callout text-muted-foreground">{t("thread:offer.question")}</span>
+        {(enabledBots.length > 0 || previewBot || o.rejected) && (
+          <Select size="sm" value={effectivePicked} options={options} onChange={setPicked} disabled={busy}
+            aria-label={t("thread:offer.chooseBot")} align="start" listMinWidth={OFFER_BOT_MENU_MIN_WIDTH}
+            className="min-w-0 max-w-full" triggerClassName="max-w-full" data-offer-bot={m.id} />
+        )}
+        <Button size="sm" variant="outline" className="max-w-full rounded-full" disabled={busy || (Boolean(o.rejected && o.bot) && usingAuto)} onClick={() => void act(true)} data-offer-take><span className="truncate">{t("thread:offer.take", { title: o.title })}</span></Button>
+        <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(false)} data-offer-dismiss>{t("thread:offer.dismiss")}</Button>
+      </div>
+      {usingAuto && o.rejected && rejectedReason && (
+        <p className="type-footnote text-attention" data-offer-rejected={o.rejected}>
+          {o.bot
+            ? t("thread:offer.rejectedNotice", { bot: botName(o.bot), reason: rejectedReason })
+            : t("thread:offer.unassignedNotice", { reason: rejectedReason })}
+        </p>
       )}
-      <Button size="sm" variant="outline" className="max-w-full rounded-full" disabled={busy} onClick={() => void act(true)} data-offer-take><span className="truncate">{t("thread:offer.take", { title: o.title })}</span></Button>
-      <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(false)} data-offer-dismiss>{t("thread:offer.dismiss")}</Button>
+      {usingAuto && !o.rejected && o.why && (
+        <p className="type-footnote text-muted-foreground" data-offer-why={m.id}>{o.why}</p>
+      )}
     </div>
   )
 }

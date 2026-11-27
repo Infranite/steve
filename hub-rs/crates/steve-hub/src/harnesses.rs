@@ -208,6 +208,15 @@ impl HubHarnesses {
             report.caps.iter().find(|c| c.name == harness).cloned(),
         ))
     }
+    pub(crate) fn node_report(
+        &self,
+        node: &str,
+        generation: Option<u64>,
+    ) -> Option<Vec<HarnessCapability>> {
+        self.report(node)
+            .filter(|r| r.link_generation == generation)
+            .map(|r| r.caps.clone())
+    }
     pub fn bot_source(
         self: &Arc<Self>,
         store: steve_store::Store,

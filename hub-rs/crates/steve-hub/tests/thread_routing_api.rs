@@ -1094,6 +1094,8 @@ async fn research_runs_get_read_only_mcp() {
             "steve_items_search",
             "steve_item_read",
             "steve_sessions_list",
+            "steve_bots_list",
+            "steve_nodes_list",
             "steve_debug"
         ])
     );
@@ -1143,6 +1145,20 @@ async fn research_runs_get_read_only_mcp() {
     assert!(t.starts_with("共 ") && t.contains("正在运行"), "{t}");
     let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {"name": "steve_sessions_list", "arguments": {}}}), "research-token-2").await;
     assert_eq!(v["result"]["isError"], true, "{v}");
+    let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": "bots_ok", "method": "tools/call", "params": {"name": "steve_bots_list", "arguments": {}}}), token).await;
+    assert!(v["result"]["isError"].is_null(), "{v}");
+    let bots_json: Value =
+        serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(bots_json["bots"].is_array(), "{bots_json}");
+    let (_, v) = rpc(json!({"jsonrpc": "2.0", "id": "nodes_ok", "method": "tools/call", "params": {"name": "steve_nodes_list", "arguments": {}}}), token).await;
+    assert!(v["result"]["isError"].is_null(), "{v}");
+    let nodes_json: Value =
+        serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
+    assert!(nodes_json["nodes"].is_array(), "{nodes_json}");
+    for tool_name in ["steve_bots_list", "steve_nodes_list"] {
+        let (_, denied) = rpc(json!({"jsonrpc": "2.0", "id": tool_name, "method": "tools/call", "params": {"name": tool_name, "arguments": {}}}), "research-token-2").await;
+        assert_eq!(denied["result"]["isError"], true, "{denied}");
+    }
     /* someone else listens: the item tools see only what this conversation produced */
     let text = |v: &Value| {
         v["result"]["content"][0]["text"]

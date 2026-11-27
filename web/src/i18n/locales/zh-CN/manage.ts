@@ -43,6 +43,8 @@ export default {
     },
     selection: {
       explicit: "你指定了这个 Bot",
+      steve_selected: "Steve 选择了这个 Bot",
+      only_eligible: "当前唯一合格的 Bot",
       specialty: "匹配 Bot 专长",
       description: "匹配 Bot 职责说明",
       project_preference: "符合项目执行偏好",

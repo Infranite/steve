@@ -86,9 +86,14 @@ pub(super) fn describe() {
         "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
     );
     describe_counter!(
-        "steve_offer_preview_total",
+        "steve_dispatch_invalid_choice_total",
         Count,
-        "OFFER card Bot placement previews computed for inline answers. Label: result (placed, coordinator, unassigned)."
+        "Bot choices proposed by Steve that failed hard validation. Labels: source (offer, job), reason."
+    );
+    describe_counter!(
+        "steve_offer_bot_override_total",
+        Count,
+        "Owner Bot overrides on OFFER cards. Label: from (valid, invalid, none)."
     );
     describe_counter!(
         "steve_offer_action_total",

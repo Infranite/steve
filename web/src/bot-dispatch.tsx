@@ -215,7 +215,7 @@ export function PlacementWhy({ value, detail = false }: { value: PlacementExplan
     </div>
   }
   return <div className="min-w-0 break-words type-footnote text-muted-foreground" data-dispatch-reason={value.reason}>
-    <p>{t(`manage:dispatch.selection.${value.reason}`)}{value.matched.length > 0 && <> · {value.matched.join(" · ")}</>}
+    <p>{t(`manage:dispatch.selection.${value.reason}`)}{value.why && <> · {value.why}</>}{value.matched.length > 0 && <> · {value.matched.join(" · ")}</>}
       {value.fallback && <> · {reasonLabel(t, value.fallback)}</>}</p>
     {detail && skipped.length > 0 && <p>{t("manage:dispatch.skipped", { reasons: skipped.map(r => reasonLabel(t, r)).join(" · ") })}</p>}
   </div>
