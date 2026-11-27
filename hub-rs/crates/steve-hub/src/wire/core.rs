@@ -1234,6 +1234,8 @@ impl CoreDomain {
             .start("core.workspaces", || self.core.clone().watch_workspaces());
         self.jobs
             .start("core.stalls", || self.core.clone().watch_stalls());
+        self.jobs
+            .start("core.dispatch", || self.core.clone().watch_dispatch());
     }
 
     pub async fn create_item(&self, p: CreateItem) -> Result<Obj, crate::error::ApiError> {
@@ -1258,6 +1260,8 @@ impl CoreDomain {
             files: vec![],
             actor: Some(p.actor),
             requester: None,
+            placement_reason: None,
+            placement_why: None,
         };
         let rt = self.routed.clone();
         let result =

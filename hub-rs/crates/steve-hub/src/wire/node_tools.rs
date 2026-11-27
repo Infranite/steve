@@ -12,7 +12,7 @@ use steve_store::{
     tool_journal::{Intent, Journal},
 };
 
-use super::node_runtime::RESEARCH_GRANT;
+use super::node_runtime::{DISPATCH_GRANT, RESEARCH_GRANT};
 
 tokio::task_local! {
     // Only NodeTools installs this context, after checking the authenticated Node and ledger.
@@ -161,16 +161,15 @@ fn session_lister(store: &Store, node: &NodeId, session: &SessionId) -> ApiResul
     authorize_steve_session(store, session, true, true).map(session_caller)
 }
 
-/// A research job of this Node (grant [`RESEARCH_GRANT`]) and its thread run: the job attempt must
-/// be the one the Hub froze, its run of the job's workspace. Fresh calls (`active`) also need the
-/// attempt live (not cancelled, finished or unknown) and its thread run still `running`, as the
-/// in-process run's token is valid only while the run is (thread-routing §7.4).
-pub(crate) fn authorize_research(
+/// A job of this Node: either a research job ([`RESEARCH_GRANT`]) bound to a live thread run,
+/// or an async Bot-dispatch think job ([`DISPATCH_GRANT`]) that sees only `steve_bots_list` and
+/// `steve_nodes_list` for its workspace.
+fn authorize_job(
     store: &Store,
     node: &NodeId,
     exec: &ExecutionRef,
     active: bool,
-) -> ApiResult<ThreadTask> {
+) -> ApiResult<Caller> {
     let ExecutionRef::Job { job, attempt } = exec else {
         return Err(denied());
     };
@@ -179,14 +178,7 @@ pub(crate) fn authorize_research(
         .map_err(internal)?
         .ok_or_else(denied)?;
     let spec = row.spec;
-    let steve_tools = matches!(&spec.work, JobWork::Research(r) if r.steve_tools);
-    if row.execution != *exec
-        || row.kind != "research"
-        || !steve_tools
-        || spec.job != *job
-        || spec.run.attempt != *attempt
-        || spec.run.policy.tools.as_str() != RESEARCH_GRANT
-    {
+    if row.execution != *exec || spec.job != *job || spec.run.attempt != *attempt {
         return Err(denied());
     }
     if active
@@ -194,6 +186,19 @@ pub(crate) fn authorize_research(
             || row.job_state != "open"
             || matches!(row.state.as_str(), "finished" | "unknown"))
     {
+        return Err(denied());
+    }
+    if row.kind == "think"
+        && spec.run.policy.tools.as_str() == DISPATCH_GRANT
+        && matches!(&spec.work, JobWork::Think(t) if t.steve_tools)
+    {
+        return Ok(Caller::Dispatch {
+            workspace: row.workspace,
+            job_id: job.as_str().to_owned(),
+        });
+    }
+    let steve_tools = matches!(&spec.work, JobWork::Research(r) if r.steve_tools);
+    if row.kind != "research" || !steve_tools || spec.run.policy.tools.as_str() != RESEARCH_GRANT {
         return Err(denied());
     }
     let task_id = row.run.as_deref().ok_or_else(denied)?;
@@ -206,15 +211,17 @@ pub(crate) fn authorize_research(
     {
         return Err(denied());
     }
-    Ok(run)
+    Ok(Caller::Research(run))
 }
 
-/// Who a Steve tool call is for: a session's turn, or a research job's thread run.
+/// Who a Steve tool call is for: a session's turn, a research job's thread run, or an async
+/// Bot-dispatch think job.
 #[derive(Clone)]
 pub enum Caller {
     Session(Session),
     DependencyManagement(Session),
     Research(ThreadTask),
+    Dispatch { workspace: String, job_id: String },
 }
 
 impl Caller {
@@ -222,6 +229,7 @@ impl Caller {
         match self {
             Caller::Session(s) | Caller::DependencyManagement(s) => (&s.id, &s.workspace_id),
             Caller::Research(r) => (&r.id, &r.workspace_id),
+            Caller::Dispatch { workspace, job_id } => (job_id.as_str(), workspace.as_str()),
         }
     }
     fn permits(&self, name: &str) -> bool {
@@ -270,6 +278,20 @@ pub trait Service: Send + Sync {
         let _ = (run, name, args);
         Err(super::research_mcp::REFUSED.into())
     }
+    /// The tools an async Bot-dispatch think job sees: only `steve_bots_list` and `steve_nodes_list`.
+    async fn dispatch_catalog(&self) -> Vec<ToolDescriptor> {
+        vec![]
+    }
+    /// Runs a read-only dispatch inspection tool for `workspace`; anything else is refused.
+    async fn dispatch_call(
+        &self,
+        workspace: &str,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<String, String> {
+        let _ = (workspace, name, args);
+        Err(super::research_mcp::REFUSED.into())
+    }
 }
 #[async_trait]
 impl Service for ToolService {
@@ -300,6 +322,17 @@ impl Service for ToolService {
         args: serde_json::Value,
     ) -> Result<String, String> {
         super::research_mcp::call_tool(&self.extra, run, name, args).await
+    }
+    async fn dispatch_catalog(&self) -> Vec<ToolDescriptor> {
+        super::research_mcp::dispatch_descriptors()
+    }
+    async fn dispatch_call(
+        &self,
+        workspace: &str,
+        name: &str,
+        args: serde_json::Value,
+    ) -> Result<String, String> {
+        super::research_mcp::dispatch_call(&self.extra, workspace, name, &args).await
     }
 }
 pub struct NodeTools {
@@ -353,6 +386,7 @@ impl NodeTools {
                 .filter(|t| caller.permits(&t.name))
                 .collect(),
             Caller::Research(r) => service.research_catalog(r).await,
+            Caller::Dispatch { .. } => service.dispatch_catalog().await,
         };
         let digest = digest_of(&tools)?;
         Ok(Catalog {
@@ -386,14 +420,12 @@ impl NodeTools {
         .await
     }
 }
-/// [`authorize`] for a turn, [`authorize_research`] for a job.
+/// [`authorize`] for a turn, [`authorize_job`] for a research or dispatch job.
 fn caller(store: &Store, node: &NodeId, exec: &ExecutionRef, active: bool) -> ApiResult<Caller> {
     match exec {
         ExecutionRef::Turn { .. } => authorize_session(store, node, exec, active, true)
             .map(|(s, _, gated)| session_caller((s, gated))),
-        ExecutionRef::Job { .. } => {
-            authorize_research(store, node, exec, active).map(Caller::Research)
-        }
+        ExecutionRef::Job { .. } => authorize_job(store, node, exec, active),
     }
 }
 /// A session's caller: only dependency management while the item gate holds it.
@@ -544,6 +576,9 @@ impl HubTools for NodeTools {
                                     .await
                             }
                             Caller::Research(r) => service.research_call(r, &q.name, q.args).await,
+                            Caller::Dispatch { workspace, .. } => {
+                                service.dispatch_call(&workspace, &q.name, q.args).await
+                            }
                         }
                     },
                 )

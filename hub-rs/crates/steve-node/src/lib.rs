@@ -2821,6 +2821,14 @@ impl JobExecutor for LocalNode {
         let (r, fresh) = self.accept("start_job", &c, |t| {
             let j = &c.body;
             j.check()?;
+            if matches!(&j.work, JobWork::Think(t) if t.steve_tools)
+                && self.0.tools_url.lock().unwrap().is_none()
+            {
+                return Err(Error::new(
+                    Code::Unsupported,
+                    "this node serves no Steve tools",
+                ));
+            }
             if !self.0.cfg.acp.adapters.contains_key(&j.run.choice.harness) {
                 return Err(Error::new(
                     Code::Unsupported,
@@ -4718,6 +4726,12 @@ impl Discovery for LocalNode {
                     && self.0.cfg.ceiling.jobs
                 {
                     f.push(FEATURE_RESEARCH_JOBS.into());
+                }
+                if self.0.cfg.capacity.jobs > 0
+                    && self.0.cfg.ceiling.jobs
+                    && self.0.tools_url.lock().unwrap().is_some()
+                {
+                    f.push(FEATURE_THINK_STEVE_TOOLS.into());
                 }
                 if self.0.remover.get().is_some() {
                     f.push(FEATURE_NODE_REMOVE.into());

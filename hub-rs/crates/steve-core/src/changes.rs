@@ -661,12 +661,12 @@ fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
         .collect();
     for p in &PURPOSES {
         let c = m.custom(ws, p.key);
+        let label = crate::models::purpose_label(p.key);
+        let desc = crate::models::purpose_desc(p.key);
         fs.push(FieldSpec {
             key: format!("{}.harness", p.key),
             label: format!(
-                "{}（{}）· 由谁来做：跟随 Steve（现在是 {}）或指定 harness",
-                p.label,
-                p.desc,
+                "{label}（{desc}）· 由谁来做：跟随 Steve（现在是 {}）或指定 harness",
                 crate::models::Choice {
                     harness: steve.runs_on.clone(),
                     models: steve.models.clone(),
@@ -688,17 +688,14 @@ fn model_fields(m: &crate::models::Models, ws: &str) -> Vec<FieldSpec> {
         let c = c.unwrap_or_default();
         fs.push(FieldSpec {
             key: p.key.into(),
-            label: format!(
-                "{} · 模型，按顺序逗号分隔，留空为该 harness 的默认",
-                p.label
-            ),
+            label: format!("{label} · 模型，按顺序逗号分隔，留空为该 harness 的默认"),
             ty: "text".into(),
             values: None,
             current: json!(c.models.join(",")),
         });
         fs.push(FieldSpec {
             key: format!("{}.effort", p.key),
-            label: format!("{} · 推理强度", p.label),
+            label: format!("{label} · 推理强度"),
             ty: "enum".into(),
             values: Some(effort_labels.clone()),
             current: json!(crate::models::effort_label(c.effort.unwrap_or_default())),

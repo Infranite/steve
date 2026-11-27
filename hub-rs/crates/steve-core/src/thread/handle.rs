@@ -811,7 +811,7 @@ impl Core {
                 } else {
                     r.goal.clone()
                 };
-                d.offer = Some(crate::gateway::Offer { title, goal });
+                d.offer = Some(crate::gateway::Offer::new(title, goal));
             }
         }
         if let Some(g) = det_guard {
@@ -924,7 +924,7 @@ impl Core {
                         } else {
                             r.goal.clone()
                         };
-                        info.offer = Some(crate::gateway::Offer { title, goal });
+                        info.offer = Some(crate::gateway::Offer::new(title, goal));
                     }
                     return self
                         .execute_inline(task, lease, stop, conv, text, &files, info, t0)
@@ -985,6 +985,8 @@ impl Core {
             title: js_head(text, 24).to_string(),
             goal: text.to_string(),
             bot: None,
+            placement_reason: None,
+            placement_why: None,
             project: info.project.clone(),
             tags: vec![],
             files: files.to_vec(),
@@ -1013,7 +1015,7 @@ impl Core {
                     return Ok(());
                 }
                 metrics::counter!("steve_gateway_handoffs_total").increment(1);
-                let reply_text = Self::unplaced_reply(&item).unwrap_or_else(|| {
+                let reply_text = self.unplaced_reply(&item).unwrap_or_else(|| {
                     handoff::handed_off(
                         &item.id,
                         &self.bot_name(&item),
@@ -1333,6 +1335,8 @@ impl Core {
             title: r.title.clone(),
             goal,
             bot,
+            placement_reason: None,
+            placement_why: None,
             project: r.project.clone(),
             tags: tag_ids.clone(),
             files: files.to_vec(),
@@ -1383,7 +1387,7 @@ impl Core {
             }
             format!(" 标签：{}。", names.join("、"))
         };
-        let head = Self::unplaced_reply(&item).unwrap_or_else(|| match &named {
+        let head = self.unplaced_reply(&item).unwrap_or_else(|| match &named {
             Some(b) => format!("按你指定的，交给 {} Bot 了。", b.name),
             None => format!("好，交给 {} 了，做完请你验收。", self.bot_name(&item)),
         });

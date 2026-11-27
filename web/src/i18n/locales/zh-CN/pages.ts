@@ -75,6 +75,7 @@ export default {
       preview_other: "保存前核对 {{count}} 项用途分配",
       actual_other: "查看 {{count}} 项用途实际使用的模型",
       advanced: "高级：逐项覆盖",
+      chat: "跟随对话",
       override: "单独覆盖",
       exceptions_other: "仍有 {{count}} 项单独覆盖：{{purposes}}。可通过“配置整套模型”一并替换，也可在高级选项中管理。",
     },

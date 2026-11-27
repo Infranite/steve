@@ -242,7 +242,8 @@ impl Conn {
             .map(|home| crate::managed::prefix_lock(home, false))
             .transpose()
             .map_err(RpcError::msg)?;
-        let mut cmd = adapter_command(&sp, prefix.as_ref());
+        let mut cmd = adapter_command(&sp, prefix.as_ref())
+            .map_err(|e| RpcError::msg(format!("spawn {} {e}", sp.program.display())))?;
         let mut child = match cmd.spawn() {
             Ok(child) => child,
             Err(e) => {
@@ -580,8 +581,22 @@ impl Conn {
     }
 }
 
-fn adapter_command(sp: &Spawn, prefix: Option<&crate::managed::PrefixLock>) -> Command {
-    let mut cmd = Command::new(&sp.program);
+fn adapter_command(
+    sp: &Spawn,
+    prefix: Option<&crate::managed::PrefixLock>,
+) -> std::io::Result<Command> {
+    let child_path = steve_runtime::process::effective_path(
+        sp.clean_env,
+        sp.env
+            .iter()
+            .map(|(k, v)| (k.as_os_str(), Some(v.as_os_str()))),
+    );
+    let program = steve_runtime::process::resolve_program(
+        sp.program.as_os_str(),
+        child_path.as_deref(),
+        Some(sp.cwd.as_path()),
+    )?;
+    let mut cmd = Command::new(&program);
     if let Some(lease) = prefix {
         let fd = lease.inherit_fd();
         unsafe {
@@ -621,7 +636,7 @@ fn adapter_command(sp: &Spawn, prefix: Option<&crate::managed::PrefixLock>) -> C
     {
         cmd.env_remove(key);
     }
-    cmd
+    Ok(cmd)
 }
 
 async fn read_adapter_stdout(
@@ -991,6 +1006,58 @@ sys.stdin.readline()
             .await
             .unwrap();
         assert!(dir.path().join("clean").exists());
+    }
+
+    #[test]
+    fn adapter_command_resolves_bare_program_strictly_against_child_path() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let tool = dir.path().join("fake-adapter");
+        std::fs::write(&tool, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let make_spawn = |program: &str, clean_env: bool, env: Vec<(OsString, OsString)>| Spawn {
+            program: program.into(),
+            args: vec![],
+            cwd: dir.path().into(),
+            env,
+            log_tag: "test".into(),
+            clean_env,
+            prefix: None,
+            harness: None,
+        };
+
+        let custom_env = vec![("PATH".into(), dir.path().as_os_str().to_os_string())];
+        let cmd = adapter_command(&make_spawn("fake-adapter", true, custom_env.clone()), None)
+            .expect("bare program in child PATH must resolve");
+        assert_eq!(cmd.as_std().get_program(), tool.as_os_str());
+
+        let err = adapter_command(&make_spawn("sh", true, custom_env.clone()), None)
+            .expect_err("must not fall back to parent PATH when child PATH lacks program");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            err.to_string().contains("sh")
+                && err.to_string().contains(&dir.path().display().to_string()),
+            "{err}"
+        );
+
+        let err = adapter_command(&make_spawn("sh", false, custom_env), None)
+            .expect_err("explicit child PATH override must shadow parent PATH");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            err.to_string().contains("sh")
+                && err.to_string().contains(&dir.path().display().to_string()),
+            "{err}"
+        );
+
+        let err = adapter_command(&make_spawn("sh", true, vec![]), None)
+            .expect_err("clean_env without PATH must fail closed");
+        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            err.to_string().contains("sh") && err.to_string().contains("empty"),
+            "{err}"
+        );
     }
 }
 

@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::LazyLock;
 use steve_store::{DispatchClaim, ReceiptDispatch, thread};
-use steve_types::PlacementReason;
+use steve_types::{PlacementBlocked, PlacementBlocker, PlacementReason, PlacementRejection};
 
 /// Typed lifecycle state stored in `messages.meta.offer.state`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,9 +38,11 @@ struct OfferMeta {
     #[serde(default)]
     bot: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    why: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     reason: Option<PlacementReason>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    matched: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rejected: Option<PlacementRejection>,
     state: OfferState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     item: Option<String>,
@@ -48,19 +50,18 @@ struct OfferMeta {
     folded: Option<bool>,
 }
 
-fn record_offer_preview(result: &'static str) {
-    thread_local! {
-        static PREVIEW_TOTAL: std::cell::RefCell<
-            std::collections::HashMap<&'static str, metrics::Counter>,
-        > = std::cell::RefCell::new(std::collections::HashMap::new());
-    }
-    PREVIEW_TOTAL.with(|cache| {
-        cache
-            .borrow_mut()
-            .entry(result)
-            .or_insert_with(|| metrics::counter!("steve_offer_preview_total", "result" => result))
-            .increment(1);
-    });
+fn record_dispatch_invalid_choice(source: &'static str, reason: PlacementRejection) {
+    let reason_code = reason.as_str();
+    metrics::counter!(
+        "steve_dispatch_invalid_choice_total",
+        "source" => source,
+        "reason" => reason_code
+    )
+    .increment(1);
+}
+
+fn record_offer_bot_override(from: &'static str) {
+    metrics::counter!("steve_offer_bot_override_total", "from" => from).increment(1);
 }
 
 fn record_offer_action(action: &'static str, bot_override: &'static str) {
@@ -122,6 +123,8 @@ pub(crate) struct ThreadItem<'a> {
     pub title: String,
     pub goal: String,
     pub bot: Option<String>,
+    pub placement_reason: Option<PlacementReason>,
+    pub placement_why: Option<String>,
     pub project: Option<String>,
     pub tags: Vec<String>,
     pub files: Vec<FileRef>,
@@ -161,110 +164,45 @@ impl Core {
         Ok((ids, names))
     }
 
-    fn preview_offer_placement(
+    fn validate_offer_bot(
         &self,
         ws: &str,
-        title: &str,
-        goal: &str,
+        bot_id: &str,
         project: Option<&str>,
-        tag_names: &[String],
-    ) -> Result<Option<steve_types::BotPlacement>> {
-        let db = self.store();
-        let team = db
-            .store()
-            .read(|r| steve_store::bot_dispatch::selected(r, ws, None))?;
-        let project_opt = Some(project.map(str::to_owned));
-        let make_req = || crate::placement::DispatchRequest {
-            workspace: ws,
-            bot: None,
-            harness: None,
-            model: None,
-            effort: None,
-            team: team.as_ref(),
-            project: &project_opt,
-            title,
-            goal,
-            tags: tag_names,
-            required_specialties: &[],
-            node: None,
-            required_nodes: None,
-        };
-        let default_model = |rt_id: &str| self.models().agent_model(ws, rt_id);
-        match crate::placement::preview(db, self.rt(), make_req(), default_model) {
-            Ok((placement, _)) => {
-                record_offer_preview("placed");
-                Ok(Some(placement))
-            }
-            Err(CoreError::Placement(blocked)) => {
-                let policy = db
-                    .store()
-                    .read(|r| steve_store::bot_dispatch::no_executor_policy(r, ws))?;
-                if policy != steve_types::NoExecutorPolicy::Steve {
-                    record_offer_preview("unassigned");
-                    return Ok(None);
-                }
-                match crate::placement::preview_coordinator(
-                    db,
-                    self.rt(),
-                    make_req(),
-                    default_model,
-                    blocked,
-                    steve_types::CoordinatorDeferSource::Setting,
-                ) {
-                    Ok((placement, _)) => {
-                        record_offer_preview("coordinator");
-                        Ok(Some(placement))
-                    }
-                    Err(CoreError::Placement(_)) => {
-                        record_offer_preview("unassigned");
-                        Ok(None)
-                    }
-                    Err(e) => Err(e),
-                }
-            }
-            Err(e) => Err(e),
-        }
-    }
-
-    fn validate_explicit_offer_bot(
-        &self,
-        ws: &str,
-        explicit_bot: &str,
-        title: &str,
-        goal: &str,
-        project: Option<&str>,
-        tag_names: &[String],
-    ) -> Result<()> {
+        reason: PlacementReason,
+        why: Option<String>,
+    ) -> Result<steve_types::BotPlacement> {
         let db = self.store();
         let team = db
             .store()
             .read(|r| steve_store::bot_dispatch::selected(r, ws, None))?;
         let project_opt = Some(project.map(str::to_owned));
         let default_model = |rt_id: &str| self.models().agent_model(ws, rt_id);
-        crate::placement::preview(
+        let (placement, _) = crate::placement::check_bot(
             db,
             self.rt(),
-            crate::placement::DispatchRequest {
+            &crate::placement::DispatchRequest {
                 workspace: ws,
-                bot: Some(explicit_bot),
+                bot: Some(bot_id),
                 harness: None,
                 model: None,
                 effort: None,
                 team: team.as_ref(),
                 project: &project_opt,
-                title,
-                goal,
-                tags: tag_names,
                 required_specialties: &[],
                 node: None,
                 required_nodes: None,
+                allow_main: reason != PlacementReason::SteveSelected,
             },
             default_model,
+            reason,
+            why,
         )?;
-        Ok(())
+        Ok(placement)
     }
 
-    /// `meta.offer` of an answer: the work, where and by whom it would be done, `open`.
+    /// `meta.offer` of an answer: validates Steve's chosen Bot without silently swapping, or fills
+    /// the sole eligible executor when Steve omitted `bot`.
     pub(crate) fn offer_meta(
         &self,
         ws: &str,
@@ -272,18 +210,86 @@ impl Core {
         project: Option<&str>,
         tag_ids: &[String],
     ) -> Result<Value> {
-        let (tags, tag_names) = self.resolve_offer_tags(ws, tag_ids)?;
-        let preview = self.preview_offer_placement(ws, &o.title, &o.goal, project, &tag_names)?;
+        let (tags, _tag_names) = self.resolve_offer_tags(ws, tag_ids)?;
+        let (bot, why, reason, rejected) = if let Some(chosen) = o.bot.as_deref() {
+            match self.validate_offer_bot(
+                ws,
+                chosen,
+                project,
+                PlacementReason::SteveSelected,
+                o.why.clone(),
+            ) {
+                Ok(placement) => (
+                    Some(placement.explanation.bot.as_str().to_owned()),
+                    placement.explanation.why,
+                    Some(PlacementReason::SteveSelected),
+                    None,
+                ),
+                Err(CoreError::Placement(blocked)) => {
+                    record_dispatch_invalid_choice("offer", blocked.reason);
+                    (
+                        Some(chosen.to_owned()),
+                        o.why.clone(),
+                        None,
+                        Some(blocked.reason),
+                    )
+                }
+                Err(e) => return Err(e),
+            }
+        } else {
+            let db = self.store();
+            let team = db
+                .store()
+                .read(|r| steve_store::bot_dispatch::selected(r, ws, None))?;
+            let project_opt = Some(project.map(str::to_owned));
+            let default_model = |rt_id: &str| self.models().agent_model(ws, rt_id);
+            let assessed = crate::placement::eligible(
+                db,
+                self.rt(),
+                &crate::placement::DispatchRequest {
+                    workspace: ws,
+                    bot: None,
+                    harness: None,
+                    model: None,
+                    effort: None,
+                    team: team.as_ref(),
+                    project: &project_opt,
+                    required_specialties: &[],
+                    node: None,
+                    required_nodes: None,
+                    allow_main: false,
+                },
+                default_model,
+            )?;
+            match assessed.candidates.as_slice() {
+                [] => (
+                    None,
+                    None,
+                    None,
+                    Some(
+                        assessed
+                            .primary_rejection
+                            .unwrap_or(PlacementRejection::NoCandidates),
+                    ),
+                ),
+                [only] => (
+                    Some(only.bot.id.clone()),
+                    None,
+                    Some(PlacementReason::OnlyEligible),
+                    None,
+                ),
+                _ => (None, None, None, None),
+            }
+        };
         let offer = OfferMeta {
             title: o.title.clone(),
             goal: o.goal.clone(),
             project: project.map(str::to_owned),
             tags,
-            bot: preview
-                .as_ref()
-                .map(|p| p.explanation.bot.as_str().to_owned()),
-            reason: preview.as_ref().map(|p| p.explanation.reason),
-            matched: preview.map(|p| p.explanation.matched).unwrap_or_default(),
+            bot,
+            why,
+            reason,
+            rejected,
             state: OfferState::Open,
             item: None,
             folded: None,
@@ -485,6 +491,8 @@ impl Core {
                     goal: n.goal,
                     title: n.title,
                     bot: n.bot,
+                    placement_reason: n.placement_reason,
+                    placement_why: n.placement_why,
                     project: Some(n.project),
                     source: Some(if n.start {
                         ("对话".into(), "chat".into())
@@ -538,7 +546,7 @@ impl Core {
         } else {
             space
         };
-        let blocked = Self::unplaced_reply(item);
+        let blocked = self.unplaced_reply(item);
         let id = self.store().message_add_in(
             ws,
             &space,
@@ -555,14 +563,26 @@ impl Core {
         Ok(id)
     }
 
-    pub(super) fn unplaced_reply(item: &Item) -> Option<String> {
-        item.bot_id.is_none().then(|| {
-            format!(
-                "已做成事项 {}。{}",
-                item.id,
-                steve_i18n::t!("core.thread.choose_execution_bot")
-            )
-        })
+    pub(crate) fn unplaced_reply(&self, item: &Item) -> Option<String> {
+        if item.bot_id.is_some() {
+            return None;
+        }
+        let dispatching = self
+            .store()
+            .store()
+            .read(|r| steve_store::bot_dispatch::is_dispatching(r, &item.id))
+            .unwrap_or(false);
+        if dispatching {
+            return Some(steve_i18n::t!(
+                "core.thread.dispatching_execution_bot",
+                id = item.id
+            ));
+        }
+        Some(format!(
+            "已做成事项 {}。{}",
+            item.id,
+            steve_i18n::t!("core.thread.choose_execution_bot")
+        ))
     }
 
     /// “Steve 开发 Bot” / “Steve” for an item's bot.
@@ -668,17 +688,63 @@ impl Core {
                 dispatch_ref_id: None,
             });
         }
-        let (tags, tag_names) = self.resolve_offer_tags(ws, &offer.tags)?;
-        if let Some(explicit_bot) = bot_override {
-            self.validate_explicit_offer_bot(
+        let (tags, _tag_names) = self.resolve_offer_tags(ws, &offer.tags)?;
+        let override_from = bot_override.map(|_| {
+            if offer.rejected.is_some() {
+                "invalid"
+            } else if offer.bot.is_some() {
+                "valid"
+            } else {
+                "none"
+            }
+        });
+        let (chosen_bot, chosen_reason, chosen_why) = if let Some(explicit_bot) = bot_override {
+            self.validate_offer_bot(
                 ws,
                 explicit_bot,
-                &offer.title,
-                &offer.goal,
                 offer.project.as_deref(),
-                &tag_names,
+                PlacementReason::Explicit,
+                None,
             )?;
-        }
+            (
+                Some(explicit_bot.to_owned()),
+                Some(PlacementReason::Explicit),
+                None,
+            )
+        } else if let Some(rej) = offer.rejected
+            && offer.bot.is_some()
+        {
+            // Never silently swap a rejected Steve choice: owner must pick another Bot.
+            let rejected = offer
+                .bot
+                .as_ref()
+                .map(|b| PlacementBlocker {
+                    bot: Some(b.clone().into()),
+                    reason: rej,
+                })
+                .into_iter()
+                .collect();
+            return Err(CoreError::Placement(PlacementBlocked {
+                reason: rej,
+                rejected,
+            }));
+        } else if let Some(selected_bot) = offer.bot.as_deref() {
+            let reason = offer.reason.unwrap_or(PlacementReason::SteveSelected);
+            self.validate_offer_bot(
+                ws,
+                selected_bot,
+                offer.project.as_deref(),
+                reason,
+                offer.why.clone(),
+            )?;
+            (
+                Some(selected_bot.to_owned()),
+                Some(reason),
+                offer.why.clone(),
+            )
+        } else {
+            (None, None, None)
+        };
         let from_question = self
             .store()
             .store()
@@ -696,7 +762,9 @@ impl Core {
             origin: &origin,
             title: offer.title.clone(),
             goal: offer.goal.clone(),
-            bot: bot_override.map(String::from),
+            bot: chosen_bot,
+            placement_reason: chosen_reason,
+            placement_why: chosen_why,
             project: offer.project.clone(),
             tags: tags.clone(),
             files: m
@@ -719,7 +787,8 @@ impl Core {
         offer.tags = tags;
         offer.bot = item.bot_id.clone();
         offer.reason = initial.as_ref().map(|p| p.explanation.reason);
-        offer.matched = initial.map(|p| p.explanation.matched).unwrap_or_default();
+        offer.why = initial.as_ref().and_then(|p| p.explanation.why.clone());
+        offer.rejected = None;
         meta.insert("offer".into(), serde_json::to_value(&offer)?);
         meta.remove("chat");
         meta.insert("promoted".into(), json!(item.id));
@@ -735,6 +804,9 @@ impl Core {
             });
         }
         record_offer_action("take", override_label);
+        if let Some(from) = override_from {
+            record_offer_bot_override(from);
+        }
         self.store().store().write(|w| {
             thread::update_receipt_outcome(
                 w,

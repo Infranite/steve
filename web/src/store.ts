@@ -23,7 +23,7 @@ import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, PlacementReason, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, PlacementReason, PlacementRejection, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onEntityView, onViewKinds, messageView, messageViews, openDecisions, resetViews, settle, settled, subscribeItemScope, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork, useItemView, useSessionView, useViewGroup } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 import { itemDisplayStatusOf, itemState } from "./item-state"
@@ -65,6 +65,7 @@ export type Item = {
   rel?: Rel
   dependencyWait?: RItemDetail["dependency_wait"]
   dispatch?: RItemDetail["dispatch"]
+  dispatching?: boolean
   placement?: PlacementExplanation
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
@@ -94,7 +95,7 @@ export type ItemCardState = { item: string; state: string; at?: number; text?: s
   build?: { text: string; at?: number } }
 export type Offer = {
   title: string; goal: string; project?: string | null; bot?: string | null
-  reason?: PlacementReason | null; matched?: string[]; tags?: string[]
+  why?: string | null; reason?: PlacementReason | null; rejected?: PlacementRejection | null; tags?: string[]
   state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean
 }
 /** a key moment of an item made from the conversation, posted back to it (§5.2) */
@@ -561,7 +562,8 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
   const snooze = () => i.snooze && i.snooze.until > Date.now() ? i.snooze : undefined
   const ss = () => itemSessions(i.id)
   const act = () => itemWork(i.id).active
-  const lines = det ? withDecisionNotes(det.timeline, det.decisions) : []
+  const visibleTimeline = det ? det.timeline.filter((t) => !t.kind.startsWith("deferred_")) : []
+  const lines = det ? withDecisionNotes(visibleTimeline, det.decisions) : []
   const replies = det ? repliesOf(lines, ss().map((s) => s.id)) : new Map<number, Reply>()
   /* a session and a comment's reply show below the lines written while they ran (ST-42) */
   const started = (t: (typeof lines)[number]) => t.kind === "session" && t.session_id && t.text.startsWith("开始会话") ? t.session_id : null
@@ -574,7 +576,7 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
   lines.forEach((t, n) => {
     const sid = started(t)
     /* [8] is the moment itself, for the page's day headings; [9] is the Hub actor id */
-    const row: any[] = sid ? ["sys", i18n.t("core:sessionStarted"), tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via, t.id] : ["sys", t.text, tm(t.ts)]
+    const row: any[] = sid ? ["sys", i18n.t("core:sessionStarted"), tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via, t.id] : t.kind === "dispatch" ? ["dispatch", t.text, tm(t.ts)] : ["sys", t.text, tm(t.ts)]
     row[8] = t.ts
     row[9] = t.actor
     tl.push(row)
@@ -587,6 +589,7 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     dependencyWait: det?.dependency_wait,
     dispatch: det?.dispatch,
+    dispatching: !!i.waits?.includes("dispatching"),
     placement: i.placement,
     get wait() { const d = decisionsForItem(i.id)[0]; return d ? waitOf(d) : undefined },
     get waits() { return itemWork(i.id).decisions.map(waitOf) }, get ss() { return ss().map((s) => s.id) }, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5], a.delivery_id]) : [], anns: det?.annotations ?? [],

@@ -26,6 +26,8 @@ pub struct Extra {
     pub tools: super::modules::Tools,
     /// The Hub's connections to the library's MCP servers.
     pub library: std::sync::Arc<super::library_mcp::LibraryMcp>,
+    /// Live Node and harness facts for Steve's read-only dispatch inspection tools.
+    pub dispatch_facts: Option<super::research_mcp::DispatchFacts>,
 }
 
 /// Which module answers a tool name.

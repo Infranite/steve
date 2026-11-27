@@ -43,10 +43,8 @@ export default {
     },
     selection: {
       explicit: "你指定了这个 Bot",
-      specialty: "匹配 Bot 专长",
-      description: "匹配 Bot 职责说明",
-      project_preference: "符合项目执行偏好",
-      stable_order: "按通用度、Team 顺序与执行节点优先级选定",
+      steve_selected: "Steve 选择了这个 Bot",
+      only_eligible: "当前唯一合格的 Bot",
       coordinator_deferred: "Steve 自己做",
       existing_assignment: "使用事项已指派的 Bot",
       handoff_quota_exhausted: "额度不足自动交接",
@@ -63,6 +61,7 @@ export default {
       rejected: "候选 Bot 未入选原因",
       assignLabel: "指定一个 Bot 立即开工",
       assignAction: "指定并开工",
+      retryDispatch: "让 Steve 重新派发",
       later: "晚点再说（由 Steve 自己做）",
       laterHint: "选择后，这些事项由 Steve 自己执行，并将工作空间设置「无人可接时」改为「Steve 自己做」，之后无人可接的事项不再发卡询问；随时可在设置改回。",
       proposalAction: "确认新建并开工",
@@ -72,6 +71,8 @@ export default {
     "reason": {
       no_candidates: "所选范围内没有可承接此请求的已启用 Bot。",
       specialty: "这个 Bot 缺少必需的专长。",
+      dispatch_failed: "Steve 未能完成执行 Bot 选择（模型或本机 Node 不可用）。",
+      invalid_choice: "Steve 选择的 Bot 未通过硬校验。",
 
       "preferred": "选择允许范围内首个合格节点。",
       "fallback": "回退到允许范围内的备选节点。",
@@ -92,6 +93,26 @@ export default {
       "bot": "Bot 已停用或不再属于当前工作空间。",
       "local": "本机 Node 不能运行这个会话（目录、权限模式或事项状态不符）。",
       "bind_failed": "未能绑定限定范围内的节点，请检查 Bot 和设备设置后重试。"
+    },
+    timeline: {
+      queued: "正在由 Steve 安排执行 Bot",
+      selected: "Steve 选择由 {{bot}} 执行",
+      selectedWhy: "Steve 选择由 {{bot}} 执行：{{why}}",
+      noCandidates: "Steve 判断当前没有合适的执行 Bot，等待你指定",
+      noCandidatesWhy: "Steve 判断当前没有合适的执行 Bot：{{why}}",
+      coordinatorDeferred: "无合适执行 Bot，改由 {{bot}} 自己执行",
+      invalidChoice: "Steve 选择的 {{bot}} 未通过校验（{{reason}}），等待你处理",
+      failed: "Steve 未能完成执行 Bot 选择：{{error}}",
+      failedDetail: "Steve 未能完成执行 Bot 选择（{{error}}）：{{detail}}",
+      retryAssigned: "重新派发并交给 {{bot}} 执行",
+      retryQueued: "已交由 Steve 重新选择执行 Bot",
+    },
+    errors: {
+      invalid_response: "返回格式无效",
+      model_call_failed: "模型调用失败",
+      prepare_failed: "准备派发上下文失败",
+      settle_failed: "写入派发结果失败",
+      internal_panic: "派发任务异常中断",
     }
   },
   bot: {

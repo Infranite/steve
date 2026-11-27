@@ -365,6 +365,8 @@ impl Core {
             title: r.title.clone(),
             goal: r.goal.clone(),
             bot: self.named_bot(ws, &om.text)?.map(|b| b.id),
+            placement_reason: None,
+            placement_why: None,
             project: r.project.clone(),
             tags: r.tag_ids.clone(),
             files: files_of(&om, "files"),

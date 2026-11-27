@@ -272,10 +272,7 @@ impl ResearchAdapter {
         };
         ResearchOutcome {
             text: out.answer,
-            offer: out.offer.map(|o| steve_core::gateway::Offer {
-                title: o.title,
-                goal: o.goal,
-            }),
+            offer: out.offer,
             end,
             model: out.model,
             session: out.session,

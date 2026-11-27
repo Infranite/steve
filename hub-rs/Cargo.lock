@@ -5730,6 +5730,7 @@ dependencies = [
  "libc",
  "serde_json",
  "steve-harness-spec",
+ "steve-runtime",
  "tempfile",
  "tokio",
  "tracing",
@@ -6242,7 +6243,6 @@ name = "steve-research"
 version = "0.1.0"
 dependencies = [
  "base64 0.23.1",
- "regex",
  "serde",
  "serde_json",
  "steve-confine",

@@ -344,6 +344,7 @@ async fn model_settings() {
             "route",
             "chat",
             "research",
+            "dispatch",
             "title",
             "extract",
             "disclosure",

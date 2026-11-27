@@ -1348,10 +1348,7 @@ impl Core {
             out.offer.clone().or_else(|| info.offer.clone())
         };
         if out.end == RunEnd::Budget && offer.is_none() {
-            offer = Some(Offer {
-                title: js_head(&format!("继续深入：{text}"), 24).to_string(),
-                goal: text.to_string(),
-            });
+            offer = Some(Offer::new(js_head(&format!("继续深入：{text}"), 24), text));
         }
         let first = (*lock(&sink.first_text)).or(out.first_text_ms);
         drop(sink);

@@ -319,6 +319,9 @@ struct Ran {
     usage: Vec<UsageReport>,
 }
 
+/// Exact read-only Steve MCP tools permitted during a dispatch Think job (`ThinkJob::steve_tools`).
+const DISPATCH_STEVE_TOOLS: &[&str] = &["steve_bots_list", "steve_nodes_list"];
+
 /// The think job as a one-shot ACP call. The prompt's stable head goes as the session's system
 /// prompt where the adapter takes one; without tools the harness's own tools are off where it
 /// declares how.
@@ -370,6 +373,26 @@ async fn acp_think(
         &inner.cfg.acp.user_home,
         &properties.outer_sandbox_args,
     );
+    let exec = ExecutionRef::Job {
+        job: spec.job.clone(),
+        attempt: spec.run.attempt.clone(),
+    };
+    let mcp_servers = if think.steve_tools {
+        let Some(url) = inner.tools_url.lock().unwrap().clone() else {
+            return failed(OneShotError::Failed(
+                "Node tools server unavailable for think job".into(),
+            ));
+        };
+        let token = inner.tools.job_token(&exec);
+        json!([{
+            "type": "http",
+            "name": "steve",
+            "url": url,
+            "headers": [{ "name": "Authorization", "value": format!("Bearer {token}") }]
+        }])
+    } else {
+        json!([])
+    };
     let req = crate::acp_job::Request {
         cfg: &inner.cfg.acp,
         harness: &spec.run.choice.harness,
@@ -381,7 +404,7 @@ async fn acp_think(
         tools_off: think.tools == ThinkToolMode::None,
         mode: PermissionMode::Plan,
         prompt,
-        mcp_servers: json!([]),
+        mcp_servers,
         wrap: Some(&wrap),
         timeout: Duration::from_millis((spec.run.limits.deadline.0 - now()).max(0) as u64),
         prefix: spec.run.attempt.as_str(),
@@ -389,8 +412,18 @@ async fn acp_think(
         max_output_bytes: spec.run.limits.max_output_bytes,
         on_activity: None,
         emit_thoughts: false,
+        allow_steve_mcp_tools: if think.steve_tools {
+            DISPATCH_STEVE_TOOLS
+        } else {
+            &[]
+        },
     };
-    match crate::acp_job::run_cancellable(req, spawned, &event, stop_execution.notified()).await {
+    let ran =
+        crate::acp_job::run_cancellable(req, spawned, &event, stop_execution.notified()).await;
+    if think.steve_tools {
+        inner.tools.revoke_job(&exec);
+    }
+    match ran {
         Ok(out) => Ran {
             reply: Ok(out.text),
             stop_reason: out.stop_reason,
@@ -496,6 +529,17 @@ fn record_think_event(
                 .j
                 .events(vec![(Subject::Execution(exec), progress)], None)
             {
+                event_failed(inner, broken, &error);
+            }
+            inner.wake.notify_one();
+        }
+        tool @ EventBody::ToolChanged { .. } if matches!(&spec.work, JobWork::Think(t) if t.steve_tools) =>
+        {
+            let exec = ExecutionRef::Job {
+                job: spec.job.clone(),
+                attempt: spec.run.attempt.clone(),
+            };
+            if let Err(error) = inner.j.events(vec![(Subject::Execution(exec), tool)], None) {
                 event_failed(inner, broken, &error);
             }
             inner.wake.notify_one();

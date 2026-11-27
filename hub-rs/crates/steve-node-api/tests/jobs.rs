@@ -50,6 +50,7 @@ fn think_with_file() -> JobSpec {
     j.work = JobWork::Think(ThinkJob {
         instructions: Some("你是 Steve。".into()),
         tools: ThinkToolMode::ReadAttached,
+        steve_tools: false,
     });
     j
 }
@@ -163,6 +164,7 @@ fn job_wire_names_are_steves() {
         JobWork::Think(ThinkJob {
             instructions: None,
             tools: ThinkToolMode::None,
+            steve_tools: false,
         })
         .kind(),
         JobKind::Think
@@ -224,6 +226,7 @@ async fn a_malformed_job_is_refused_before_anything_runs() {
     j.work = JobWork::Think(ThinkJob {
         instructions: None,
         tools: ThinkToolMode::None,
+        steve_tools: false,
     });
     cases.push(("file without read_attached", j));
     for bad in [

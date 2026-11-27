@@ -16,7 +16,7 @@ export type RunState = "running" | "needs-you" | "paused"
 
 const LANE: Record<StateKind, Lane | null> = {
   proposed: "needs", asking: "needs",
-  working: "running", queued: "running", idle: "running", closing: "running",
+  dispatching: "running", working: "running", queued: "running", idle: "running", closing: "running",
   paused: "paused", blocked: "paused",
   done: "done", dropped: null, failed: null,
 }

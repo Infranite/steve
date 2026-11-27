@@ -26,7 +26,7 @@ use serde_json::{Value, json};
 
 use steve_node_api::{
     Epoch, EventBody, GatewayPhase, PermissionDecision, PermissionMode, Role, TimeoutPhase,
-    ToolCategory, UsageReport,
+    ToolCategory, ToolOrigin, UsageReport,
 };
 use tokio::sync::mpsc;
 
@@ -104,6 +104,10 @@ pub struct Request<'a> {
     pub on_activity: Option<&'a (dyn Fn() + Send + Sync)>,
     /// Whether root `Role::Thought` updates are forwarded via `on_event` (off for internal jobs).
     pub emit_thoughts: bool,
+    /// Exact read-only Steve MCP tool names (strictly `ToolOrigin::Steve` + `ToolCategory::Steve`,
+    /// never harness or external tools) that may be approved once when an adapter asks
+    /// `session/request_permission` in `PermissionMode::Plan`. Empty for all other one-shot calls.
+    pub allow_steve_mcp_tools: &'a [&'static str],
 }
 
 pub struct Outcome {
@@ -319,6 +323,25 @@ fn incoming(
             }
             progress.advance(GatewayPhase::Responding, on_event);
             let asked = permission::asked(norm, &id, &params);
+            if !req.allow_steve_mcp_tools.is_empty()
+                && asked.fact.origin == ToolOrigin::Steve
+                && asked.fact.category == ToolCategory::Steve
+                && req
+                    .allow_steve_mcp_tools
+                    .contains(&asked.fact.name.as_str())
+            {
+                metrics::counter!(
+                    "steve_permission_oneshot_allowed_total",
+                    "harness" => req.harness.to_string(),
+                    "tool" => asked.fact.name.clone(),
+                )
+                .increment(1);
+                conn.respond(
+                    id,
+                    permission::answer(&asked, Some(PermissionDecision::AllowOnce)),
+                );
+                return Ok(());
+            }
             let category = tool_category_label(asked.fact.category);
             metrics::counter!(
                 "steve_permission_refused_total",
@@ -745,8 +768,12 @@ async fn open_job_session(
                 },
             }),
         },
-        req.cfg
-            .session_meta_with_mode(req.harness, req.tools_off, Some(req.mode)),
+        req.cfg.session_meta_for_request(
+            req.harness,
+            req.tools_off,
+            Some(req.mode),
+            req.allow_steve_mcp_tools,
+        ),
         &reports,
     );
     drive_open(conn, rx, opening, req.on_activity, prior_tokens).await
@@ -866,6 +893,7 @@ for line in sys.stdin:
             max_output_bytes: 16 << 20,
             on_activity: None,
             emit_thoughts: false,
+            allow_steve_mcp_tools: &[],
         }
     }
 
@@ -1803,5 +1831,125 @@ for line in sys.stdin:
         let leaked = leaked.lock().unwrap();
         assert_eq!(leaked.len(), 1);
         assert!(matches!(leaked[0], EventBody::SubtaskChanged { .. }));
+    }
+
+    #[tokio::test]
+    async fn allow_steve_mcp_tools_approves_only_named_steve_tools_and_refuses_all_others() {
+        let temp = tempfile::tempdir().unwrap();
+        let answers_path = temp.path().join("allow-answers.jsonl");
+        let cfg_allow = adapter(
+            temp.path(),
+            &format!(
+                r#"        for idx, tool in enumerate(['mcp_steve_steve_bots_list', 'mcp__steve__steve_nodes_list']):
+            send({{'jsonrpc':'2.0','id':f'perm-{{idx}}','method':'session/request_permission','params':{{'sessionId':'acp-session','toolCall':{{'toolCallId':f'tc-{{idx}}','name':tool,'kind':'other','status':'pending','rawInput':{{}}}},'options':[{{'optionId':'yes','kind':'allow_once'}},{{'optionId':'no','kind':'reject_once'}}]}}}})
+            reply_line = sys.stdin.readline()
+            with open({answers_path:?}, 'a') as f:
+                f.write(reply_line)
+        chunk('{{"bot":"dev","why":"ok"}}')"#,
+                answers_path = answers_path.to_str().unwrap(),
+            ),
+            true,
+        );
+        let mut req = request(&cfg_allow, temp.path());
+        req.allow_steve_mcp_tools = &["steve_bots_list", "steve_nodes_list"];
+        let out = run(req, &|_| true, &|_| {}).await.unwrap();
+        assert_eq!(out.text, r#"{"bot":"dev","why":"ok"}"#);
+        let answers: Vec<Value> = std::fs::read_to_string(&answers_path)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0]["result"]["outcome"]["optionId"], "yes");
+        assert_eq!(answers[1]["result"]["outcome"]["optionId"], "yes");
+
+        // Without the allowlist, even steve_bots_list must be refused.
+        let denied_default = run(request(&cfg_allow, temp.path()), &|_| true, &|_| {}).await;
+        assert!(matches!(denied_default, Err(OneShotError::ToolRefused)));
+
+        // Non-allowlisted Steve tool, external MCP tool, title-only spoof, and Read must all be
+        // refused even when allow_steve_mcp_tools is populated.
+        for (label, tool_call_json) in [
+            (
+                "other_steve_tool",
+                r#"{'toolCallId':'tc','name':'mcp__steve__steve_deliver','kind':'other','status':'pending','rawInput':{}}"#,
+            ),
+            (
+                "external_mcp",
+                r#"{'toolCallId':'tc','name':'mcp__other__steve_bots_list','kind':'other','status':'pending','rawInput':{}}"#,
+            ),
+            (
+                "title_spoof",
+                r#"{'toolCallId':'tc','title':'mcp_steve_steve_bots_list','kind':'other','status':'pending','rawInput':{}}"#,
+            ),
+            (
+                "harness_read",
+                r#"{'toolCallId':'tc','name':'Read','kind':'read','status':'pending','rawInput':{'file_path':'a.txt'}}"#,
+            ),
+        ] {
+            let sub = tempfile::tempdir().unwrap();
+            let ans = sub.path().join("ans.json");
+            let cfg_deny = adapter(
+                sub.path(),
+                &format!(
+                    r#"        send({{'jsonrpc':'2.0','id':'perm','method':'session/request_permission','params':{{'sessionId':'acp-session','toolCall':{tool_call_json},'options':[{{'optionId':'yes','kind':'allow_once'}},{{'optionId':'no','kind':'reject_once'}}]}}}})
+        reply_line = sys.stdin.readline()
+        if reply_line:
+            with open({ans:?}, 'w') as f:
+                f.write(reply_line)
+        time.sleep(0.1)
+        chunk('must not pass')"#,
+                    ans = ans.to_str().unwrap(),
+                ),
+                true,
+            );
+            let mut req_deny = request(&cfg_deny, sub.path());
+            req_deny.allow_steve_mcp_tools = &["steve_bots_list", "steve_nodes_list"];
+            let res = run(req_deny, &|_| true, &|_| {}).await;
+            assert!(
+                matches!(res, Err(OneShotError::ToolRefused)),
+                "{label} must be refused, got {:?}",
+                res.err()
+            );
+            if let Ok(raw) = std::fs::read_to_string(&ans) {
+                let msg: Value = serde_json::from_str(&raw).unwrap();
+                assert_eq!(msg["result"]["outcome"]["optionId"], "no", "{label}");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oneshot_injects_declarative_steve_mcp_allow_into_session_new_and_load_meta() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = adapter(
+            temp.path(),
+            "        chunk(json.dumps(opened_params.get('_meta')))",
+            true,
+        );
+        let peer = cfg.adapters["neutral-test"].clone();
+        cfg.adapters.insert("claude-code".into(), peer);
+        for resume in [None, Some("acp-session")] {
+            let mut req = request(&cfg, temp.path());
+            req.harness = "claude-code";
+            req.resume = resume;
+            req.allow_steve_mcp_tools = &["steve_bots_list", "steve_nodes_list"];
+            let out = run(req, &|_| true, &|_| {}).await.unwrap();
+            let meta: Value = serde_json::from_str(&out.text).unwrap();
+            assert_eq!(
+                meta.pointer("/claudeCode/options/settings/permissions/allow"),
+                Some(&json!([
+                    "mcp__steve__steve_bots_list",
+                    "mcp__steve__steve_nodes_list"
+                ])),
+                "resume={resume:?} meta={meta}"
+            );
+            assert!(
+                meta.pointer("/claudeCode/options/settings/permissions/deny")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| !a.is_empty()),
+                "protected_deny must be preserved alongside allow: {meta}"
+            );
+            assert_eq!(meta.pointer("/claudeCode/options/tools"), Some(&json!([])));
+        }
     }
 }

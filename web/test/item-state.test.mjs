@@ -21,3 +21,11 @@ test("lifecycle states", () => {
 test("the cycle shows as closing without a session, including during delivery verification", () => {
   assert.equal(itemState({ st: "run", phase: "closing" }, false).kind, "closing")
 })
+
+test("an unassigned item awaiting async Steve bot dispatch shows as dispatching with move steve", () => {
+  const s = itemState({ st: "run", dispatching: true }, false)
+  assert.equal(s.kind, "dispatching")
+  assert.equal(s.tone, "run")
+  assert.equal(s.move, "steve")
+  assert.equal(itemDisplayStatusOf(s), "run")
+})

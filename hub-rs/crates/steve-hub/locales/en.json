@@ -26,6 +26,8 @@
   "hub.dispatch.bot": "The Bot is disabled or is no longer in this workspace.",
   "hub.dispatch.local": "The Hub’s local Node cannot run this session.",
   "hub.dispatch.bind_failed": "The scoped Node binding could not be committed; retry after checking the Bot and Device settings.",
+  "hub.dispatch.dispatch_failed": "Steve could not complete Bot dispatch (model or local Node unavailable).",
+  "hub.dispatch.invalid_choice": "The Bot Steve selected did not pass hard eligibility validation.",
   "hub.error.invalid": "Invalid parameters: %{fields}",
   "hub.error.list_sep": ", ",
   "hub.not_found.item": "No such item",

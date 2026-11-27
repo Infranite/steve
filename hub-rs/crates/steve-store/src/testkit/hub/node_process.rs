@@ -592,3 +592,115 @@ pub fn break_thread_recovery(path: &Path) -> Result<()> {
         .execute_batch("ALTER TABLE thread_reply_tasks RENAME TO thread_reply_tasks_gone")?;
     Ok(())
 }
+
+pub fn dispatch_jobs(path: &Path) -> Result<Vec<(String, String)>> {
+    let db = super::inspect_database(path)?;
+    let mut q = db.prepare(
+        "SELECT job_id, state FROM runtime_jobs WHERE kind='think' AND purpose='dispatch' ORDER BY created, rowid",
+    )?;
+    Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn dispatch_job_trace(path: &Path) -> Result<Vec<String>> {
+    let db = super::inspect_database(path)?;
+    let mut q = db.prepare(
+        "SELECT j.job_id, j.state, a.attempt_id, a.model, a.state, COALESCE(a.completion, '')
+         FROM runtime_jobs j
+         LEFT JOIN runtime_job_attempts a ON a.job_id = j.job_id
+         WHERE j.kind='think' AND j.purpose='dispatch'
+         ORDER BY j.created, a.ordinal",
+    )?;
+    Ok(q.query_map([], |r| {
+        Ok(format!(
+            "job={} ({}) attempt={} model={} state={} completion={}",
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, Option<String>>(2)?.unwrap_or_default(),
+            r.get::<_, Option<String>>(3)?.unwrap_or_default(),
+            r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+            r.get::<_, String>(5)?,
+        ))
+    })?
+    .collect::<rusqlite::Result<_>>()?)
+}
+
+inspect!(
+    pending_item_dispatch_jobs() -> i64,
+    "SELECT COUNT(*) FROM item_dispatch_jobs"
+);
+
+text!(
+    item_bot_id(id: &str),
+    "SELECT bot_id FROM items WHERE id=?1"
+);
+
+pub fn item_initial_placement(
+    path: &Path,
+    item: &str,
+) -> Result<Option<(Option<String>, Option<String>)>> {
+    let db = super::inspect_database(path)?;
+    Ok(db
+        .query_row(
+            "SELECT fact, blocked FROM bot_placements WHERE item_id=?1 AND session_id IS NULL ORDER BY seq DESC LIMIT 1",
+            [item],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok())
+}
+
+pub fn item_placement_wait_blocked(path: &Path, item: &str) -> Result<Option<String>> {
+    let db = super::inspect_database(path)?;
+    Ok(db
+        .query_row(
+            "SELECT blocked FROM item_placement_waits WHERE item_id=?1",
+            [item],
+            |r| r.get(0),
+        )
+        .ok())
+}
+
+pub fn item_timeline_lines(path: &Path, item: &str) -> Result<Vec<String>> {
+    let db = super::inspect_database(path)?;
+    let mut q = db.prepare(
+        "SELECT actor || ': ' || text FROM timeline WHERE item_id=?1 ORDER BY ts, rowid",
+    )?;
+    Ok(q.query_map([item], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?)
+}
+
+pub fn tool_journal_calls_for_holder(
+    path: &Path,
+    holder: &str,
+) -> Result<Vec<(String, String, String)>> {
+    if !path.is_file() {
+        return Ok(vec![]);
+    }
+    let db = super::inspect_database(path)?;
+    let mut q = db.prepare(
+        "SELECT name, state, COALESCE(json_extract(result, '$.status'), '')
+         FROM calls
+         WHERE session=?1
+         ORDER BY created, rowid",
+    )?;
+    Ok(
+        q.query_map([holder], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<rusqlite::Result<_>>()?,
+    )
+}
+
+pub fn tool_journal_all_calls(path: &Path) -> Result<Vec<(String, String, String, String)>> {
+    if !path.is_file() {
+        return Ok(vec![]);
+    }
+    let db = super::inspect_database(path)?;
+    let mut q = db.prepare(
+        "SELECT session, name, state, COALESCE(json_extract(result, '$.status'), '')
+         FROM calls
+         ORDER BY created, rowid",
+    )?;
+    Ok(
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<rusqlite::Result<_>>()?,
+    )
+}

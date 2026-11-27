@@ -75,22 +75,37 @@ pub(super) fn describe() {
     describe_histogram!(
         "steve_bot_selection_seconds",
         Seconds,
-        "Time to assess and rank one Bot dispatch request."
+        "Time to validate one Bot placement request."
     );
     describe_counter!(
         "steve_bot_selection_total",
         Count,
-        "Completed Bot placement selections by winning reason. Label: reason."
+        "Completed Bot placement validations by reason. Label: reason."
     );
     describe_counter!(
         "steve_bot_selection_blocked_total",
         Count,
         "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
     );
+    describe_histogram!(
+        "steve_dispatch_job_duration_seconds",
+        Seconds,
+        "Duration of one async Steve Bot-selection Think job. Label: outcome (selected, invalid_choice, failed, cancelled)."
+    );
     describe_counter!(
-        "steve_offer_preview_total",
+        "steve_dispatch_job_total",
         Count,
-        "OFFER card Bot placement previews computed for inline answers. Label: result (placed, coordinator, unassigned)."
+        "Completed async Steve Bot-selection Think jobs. Label: outcome (selected, invalid_choice, failed, cancelled)."
+    );
+    describe_counter!(
+        "steve_dispatch_invalid_choice_total",
+        Count,
+        "Bot choices proposed by Steve that failed hard validation. Labels: source (offer, job), reason."
+    );
+    describe_counter!(
+        "steve_offer_bot_override_total",
+        Count,
+        "Owner Bot overrides on OFFER cards. Label: from (valid, invalid, none)."
     );
     describe_counter!(
         "steve_offer_action_total",
@@ -110,7 +125,7 @@ pub(super) fn describe() {
     describe_counter!(
         "steve_no_executor_decisions_settled_total",
         Count,
-        "Workspace-scoped no-executor decision cards settled. Label: choice (assign_bot, confirm_proposal, later, dismiss, supersede)."
+        "Workspace-scoped no-executor decision cards settled. Label: choice (assign_bot, confirm_proposal, retry_dispatch, later, dismiss, supersede)."
     );
     describe_counter!(
         "steve_coordinator_self_executions_total",
@@ -546,6 +561,16 @@ pub(super) fn describe() {
         "steve_acp_classifier_unavailable_total",
         Count,
         "Tool calls denied or turns stopped because a harness auto-mode classifier returned no safety verdict. Labels: harness, kind (denied, stopped)."
+    );
+    describe_counter!(
+        "steve_permission_oneshot_allowed_total",
+        Count,
+        "One-shot ACP permission requests allowed for explicitly allowlisted read-only Steve MCP tools. Labels: harness, tool."
+    );
+    describe_counter!(
+        "steve_permission_refused_total",
+        Count,
+        "One-shot ACP permission requests refused without interactive approval. Labels: surface, harness, category."
     );
     describe_counter!(
         "steve_node_ingest_commits_total",
@@ -1072,6 +1097,11 @@ pub(super) fn describe() {
         "steve_process_group_kills_total",
         Count,
         "Subprocess process-group SIGKILLs issued before reaping. Labels: operation, reason (timeout, pipe_drain, post_exit, output_limit, cancelled, error)."
+    );
+    describe_counter!(
+        "steve_process_program_resolve_failures_total",
+        Count,
+        "Subprocess executable path resolutions that failed before spawn. Labels: reason (empty_program, empty_path, not_found, permission_denied, not_absolute, cwd_error)."
     );
     describe_counter!(
         "steve_supervisor_step_total",

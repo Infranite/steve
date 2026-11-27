@@ -543,32 +543,23 @@ fn spawn(home: &Path) -> std::io::Result<()> {
     let systemd =
         std::env::var_os("INVOCATION_ID").is_some() && Path::new("/usr/bin/systemd-run").exists();
     let mut cmd = if systemd {
-        let mut c = std::process::Command::new("/usr/bin/systemd-run");
+        let mut c = steve_runtime::process::DetachedCommand::new("/usr/bin/systemd-run");
         c.args(["--user", "--scope", "--collect", "--quiet"])
             .arg(format!("--unit=steve-local-node-{}", std::process::id()))
             .arg(&exe);
         c
     } else {
-        std::process::Command::new(&exe)
+        steve_runtime::process::DetachedCommand::new(&exe)
     };
-    cmd.arg("--local-node")
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
-    #[cfg(unix)]
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: setsid only, between fork and exec
-        unsafe {
-            cmd.pre_exec(|| {
-                libc::setsid();
-                Ok(())
-            });
-        }
-    }
-    let child = cmd.spawn()?;
+    cmd.arg("--local-node");
+    let pid = steve_runtime::process::spawn_detached(
+        &cmd,
+        steve_runtime::process::DetachedStdio::Null,
+        steve_runtime::process::DetachedStdio::File(&log),
+        steve_runtime::process::DetachedStdio::File(&log),
+    )?;
     tracing::info!(
-        pid = child.id(),
+        pid,
         exe = %exe.display(),
         "started the local Node in a process of its own"
     );

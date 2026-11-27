@@ -412,6 +412,45 @@ async fn a_remote_node_runs_no_jobs_and_nothing_is_sent() {
     assert!(fake.log().iter().all(|(m, _)| *m != "start_job"));
 }
 
+#[tokio::test]
+async fn a_colocated_node_without_think_steve_tools_refuses_dispatch_job_before_wire() {
+    let fake = FakeNode::new("n1");
+    fake.set_features(vec![]);
+    let w = wire(fake.clone(), 1);
+    w.remote.set_colocated(true);
+    // Prime capabilities cache first so we can verify zero frames go out on the refused start_job.
+    let caps = w.remote.probe(true).await.unwrap();
+    assert!(caps.supports_jobs());
+    assert!(!caps.supports_think_steve_tools());
+
+    let mut spec = job("j_disp", "a_disp", "think");
+    if let JobWork::Think(ref mut t) = spec.work {
+        t.steve_tools = true;
+    }
+    let before = w.hub_conn.frames_written();
+    let e = w
+        .remote
+        .start_job(cmd("op_j_disp", spec.clone()))
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, Code::Unavailable);
+    assert!(
+        e.reason
+            .as_ref()
+            .is_some_and(|r| r.is(NodeReason::LocalNodeUpdating)),
+        "expected LocalNodeUpdating reason, got {e:?}"
+    );
+    assert_eq!(w.hub_conn.frames_written(), before, "nothing went out");
+    assert!(fake.log().iter().all(|(m, _)| *m != "start_job"));
+
+    // Once the colocated Node advertises think-steve-tools-v1, start_job goes through.
+    fake.set_features(vec![FEATURE_THINK_STEVE_TOOLS.into()]);
+    let caps = w.remote.probe(true).await.unwrap();
+    assert!(caps.supports_think_steve_tools());
+    w.remote.start_job(cmd("op_j_disp_ok", spec)).await.unwrap();
+    assert!(fake.log().iter().any(|(m, _)| *m == "start_job"));
+}
+
 /// A Hub-side link of `generation` to nobody in particular.
 fn hub_conn(generation: u64) -> Arc<Conn> {
     let (h, n) = pair();

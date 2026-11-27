@@ -1,19 +1,16 @@
-//! Turning the model's raw answer into what the thread shows: the `OFFER:` line lifted into an
-//! [`Offer`], `path:line` citations collected, and the end mark of a run that did not finish.
+//! Turning the model's raw answer into what the thread shows: the `OFFER:` line lifted via
+//! [`steve_core::gateway::split_offer`], `path:line` citations collected, and the end mark of a
+//! run that did not finish.
 
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::sync::LazyLock;
 
+pub use steve_core::gateway::{Offer, split_offer};
+
 pub const MARK_STOPPED: &str = "（已停下）";
 pub const MARK_BUDGET: &str = "（没读完就停了）";
 pub const MARK_VIOLATION: &str = "（本次查询在工具检查时停止，尚未完成。）";
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Offer {
-    pub title: String,
-    pub goal: String,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Citation {
@@ -24,27 +21,12 @@ pub struct Citation {
     pub read: bool,
 }
 
-static OFFER_LINE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?m)^\s*OFFER:\s*(\{.*\})\s*$").expect("static regex"));
 static BARE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"`:(\d+)(?:[-–](\d+))?`").expect("static regex"));
 static CITE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?:^|[\s(\[`'“\x22])((?:[\w.\-]+/)*[\w.\-]*\.[A-Za-z0-9]+):(\d+)(?:[-–](\d+))?")
         .expect("static regex")
 });
-
-pub fn split_offer(raw: &str) -> (String, Option<Offer>) {
-    let mut offer = None;
-    for c in OFFER_LINE.captures_iter(raw) {
-        if let Ok(o) = serde_json::from_str::<Offer>(&c[1])
-            && !o.title.trim().is_empty()
-        {
-            offer = Some(o);
-        }
-    }
-    let text = OFFER_LINE.replace_all(raw, "");
-    (text.trim_end().to_string(), offer)
-}
 
 pub fn citations(text: &str, files_read: &[String]) -> Vec<Citation> {
     let mut out: Vec<Citation> = Vec::new();
@@ -110,8 +92,5 @@ pub fn with_mark(text: &str, mark: &str) -> String {
 
 pub fn deeper_offer(question: &str) -> Offer {
     let q: String = question.trim().chars().take(40).collect();
-    Offer {
-        title: format!("继续深入：{q}"),
-        goal: question.trim().to_string(),
-    }
+    Offer::new(format!("继续深入：{q}"), question.trim())
 }

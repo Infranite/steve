@@ -30,6 +30,7 @@ require_mcp_http = false
 mode_meta = {}
 executable_env = "CLAUDE_CODE_EXECUTABLE"
 protected_deny = {"wrapper" = ["claudeCode", "options", "settings", "permissions", "deny"], "tools" = ["Read", "Edit"], "abs_prefix" = "/", "dir_suffix" = "/**"}
+steve_mcp_allow = {"wrapper" = ["claudeCode", "options", "settings", "permissions", "allow"], "prefix" = "mcp__steve__"}
 brand_mark = "anthropic"
 model_strip_prefixes = ["claude-"]
 history_prefix = "cc"
@@ -776,6 +777,7 @@ blind_set_mode = false
 native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
+mcp_http = true
 mode_meta = {}
 mode_args = {"full_access" = ["--dangerously-skip-permissions"]}
 state_settings = "antigravity_settings"
