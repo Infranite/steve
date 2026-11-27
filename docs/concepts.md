@@ -55,7 +55,7 @@ Steve does not simulate automatic approvals or rewrite your harness configuratio
 | --- | --- | --- |
 | Claude Code | `auto` | `bypassPermissions` |
 | Codex | `agent` (workspace-write with automatic reviewer) | `agent-full-access` (runs outside Steve's sandbox, `nested_sandbox = false`) |
-| Antigravity CLI | Pending #610 (以 #610 的结论为准) | Pending #610 (以 #610 的结论为准) |
+| Antigravity CLI | `auto` (inside Steve's sandbox its own terminal sandbox cannot start; its classifier lets safe commands run and asks before risky ones) | `--dangerously-skip-permissions` (still inside Steve's sandbox) |
 | goose | `smart_approve` | `auto` |
 | Mistral Vibe | `smart-approve` | `auto-approve` |
 | Pi | Unsupported | Native (`full_access_only`, requires Bot configured for `full_access`) |

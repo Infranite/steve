@@ -1230,7 +1230,7 @@ async fn maintenance_allows_nested_work_only_in_an_already_admitted_task() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn admitted_blocking_workers_can_finish_nested_async_work() {
     let t = with_steve();
-    let permit = t.store.try_activity("yolo").unwrap();
+    let permit = t.store.try_activity("steve").unwrap();
     t.store.maintenance_set(true).unwrap();
     let store = t.store.clone();
     tokio::task::spawn_blocking(move || {

@@ -1229,7 +1229,7 @@ async fn a_trigger_reply_that_needs_approval_is_a_draft() {
     assert_eq!(status(&h, &m), "draft");
     checked(&h).await;
     let q = inspect::decisions::decision_question(h.env.store(), &r.decision_id.unwrap()).unwrap();
-    // a reply that promises something says so on its card (and YOLO never sends it)
+    // a reply that promises something says so on its card (and nothing sends it without you)
     assert_eq!(
         q[0],
         format!("以你本人发到「李雷」{}", steve_channels::outbound::COMMITS)
@@ -2615,7 +2615,7 @@ async fn a_queued_message_whose_connection_is_gone_fails_once() {
 }
 
 /// Prod 2026-11-02, case A: someone @'s you with banter ("哥， 你去年也是这么说的"). The composer
-/// says there's nothing to reply: no draft on your account, nothing for YOLO to send.
+/// says there's nothing to reply: no draft on your account, nothing to send.
 #[tokio::test]
 async fn banter_on_your_account_is_not_drafted() {
     let h = setup().await;
@@ -3615,8 +3615,7 @@ async fn a_tried_message_is_not_sent_again_past_its_window_by_any_path() {
 }
 
 /// SEND_DELAY: a bot's draft you approve waits 3 s (it speaks as itself and can be recalled), your own
-/// account 10 s, and each account can set its own window (0–60 s, `null` back to the default). YOLO's
-/// approval came after its own cooling-off: out at once.
+/// account 10 s, and each account can set its own window (0–60 s, `null` back to the default).
 /// How long a card about your own account stays open unanswered is the account's setting: none by
 /// default, 1 hour to 30 days, never on a bot's account.
 #[tokio::test(flavor = "multi_thread")]
@@ -5959,7 +5958,7 @@ async fn own_draft(
 }
 
 /// The check runs once after the draft is written. When it fails, the draft is unchecked, not a
-/// leak; the card says “检查没跑完”, never “可能泄露”, and YOLO does not send it.
+/// leak; the card says “检查没跑完”, never “可能泄露”, and it is not sent without you.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_check_that_did_not_finish_is_not_a_leak() {
     let h = setup().await;

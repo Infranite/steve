@@ -116,7 +116,7 @@ fn a_registered_dependency_wait_is_not_a_stall() {
 }
 
 /// An agent that stops waiting for something only you can do is yours: Steve does not continue it
-/// (it would only take the step as done), and YOLO meets hard limit 7 on the card.
+/// (it would only take the step as done), and the card waits for you.
 #[test]
 fn an_agent_waiting_for_your_own_action_is_not_continued() {
     let k = kit(2);
