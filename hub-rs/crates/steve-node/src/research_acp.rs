@@ -752,6 +752,25 @@ mod tests {
             sandbox_mode(&preferred, &plain).unwrap(),
             r::SandboxMode::Auto
         );
+        // Built-in Codex runs inside Steve's read-only OS sandbox (`nested_sandbox = true`,
+        // `self_read_only = false`), following the nested path rather than `SandboxMode::Off`.
+        let codex = steve_harness_spec::spec("codex", None).properties;
+        assert!(codex.nested_sandbox && !codex.self_read_only);
+        assert_eq!(
+            sandbox_mode(&preferred, &codex).unwrap(),
+            r::SandboxMode::Auto
+        );
+        if steve_confine::available() {
+            assert_eq!(
+                sandbox_mode(&required, &codex).unwrap(),
+                r::SandboxMode::Required
+            );
+        } else {
+            assert_eq!(
+                sandbox_mode(&required, &codex).unwrap_err().code,
+                Code::Unsupported
+            );
+        }
         assert_eq!(
             sandbox_mode(
                 &SandboxRequirement::Required {

@@ -74,8 +74,8 @@ managed_by_default = true
 brand_substrings = ["codex", "openai"]
 [adapters.properties]
 read_attached = true
-self_read_only = true
-nested_sandbox = false
+self_read_only = false
+nested_sandbox = true
 state = {"env" = "CODEX_HOME", "default" = ".codex", "import" = ["config.toml"], "context" = ["AGENTS.md", "AGENTS.override.md", "skills/*", "prompts"], "login" = {"files" = ["auth.json"], "renew" = ["auth.json.lock", ".auth-*"], "settings" = "config.toml", "entries" = ["model_provider", "model_providers", "forced_login_method", "forced_chatgpt_workspace_id", "chatgpt_base_url", "openai_base_url"]}}
 native_approval = "ask_owner"
 modes = {"plan" = "read-only", "ask" = "read-only", "accept_edits" = "workspace-write", "auto" = "agent", "full_access" = "agent-full-access"}

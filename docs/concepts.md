@@ -54,7 +54,7 @@ Steve does not simulate automatic approvals or rewrite your harness configuratio
 | Harness | Auto | Full access |
 | --- | --- | --- |
 | Claude Code | `auto` | `bypassPermissions` |
-| Codex | `agent` (workspace-write with automatic reviewer) | `agent-full-access` (runs outside Steve's sandbox, `nested_sandbox = false`) |
+| Codex | `agent` (inside Steve's sandbox its inner Seatbelt cannot start; `auto_review` auto-approves safe escalated commands and denies/escalates risky ones) | `agent-full-access` (skips inner sandbox, 0 prompts; still inside Steve's sandbox) |
 | Antigravity CLI | `auto` (inside Steve's sandbox its own terminal sandbox cannot start; its classifier lets safe commands run and asks before risky ones) | `--dangerously-skip-permissions` (still inside Steve's sandbox) |
 | goose | `smart_approve` | `auto` |
 | Mistral Vibe | `smart-approve` | `auto-approve` |
