@@ -510,7 +510,11 @@ async fn reprobe_after_upgrade(
         st.node_harnesses.invalidate(node_id);
     }
     let _ = tokio::time::timeout(Duration::from_secs(30), node.probe(true)).await;
-    if let Ok(Ok(report)) = tokio::time::timeout(NODE_RPC_TIMEOUT, node.harness_updates(true)).await
+    // `run_planned_upgrade` already refreshed the Node's check cache before persisting `Succeeded`.
+    // Read the settled report without kicking off an async `fresh=true` check that would flip
+    // `checking=true` in the stored snapshot and suppress concurrent auto-upgrade passes.
+    if let Ok(Ok(report)) =
+        tokio::time::timeout(NODE_RPC_TIMEOUT, node.harness_updates(false)).await
         && report.node.as_str() == node_id
     {
         let (s, n, at) = (store.clone(), node_id.to_string(), crate::nodes::now());

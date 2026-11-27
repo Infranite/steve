@@ -1,6 +1,7 @@
 use super::*;
 use crate::{NodeConfig, PolicyCeiling, Storage};
 use std::collections::BTreeMap;
+use std::sync::atomic::AtomicBool;
 use steve_runtime::testkit::{eventually_sync, on_timeout};
 
 #[path = "../../tests/fixtures/harness_updates.rs"]
@@ -1012,6 +1013,47 @@ for spec in args:
     assert_eq!(
         after.harnesses[0].components[0].state,
         ComponentUpdateState::Current
+    );
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fresh_check_during_inflight_sweep_queues_follow_up_pass() {
+    let f = Fixture::new("coalesce", "1.0.0", "1.0.0", "2.0.0");
+    let hold = f.dir.path().join("view-hold");
+    let started = f.dir.path().join("view-started");
+    let latest_file = f.dir.path().join("latest");
+    // Read `latest` before pausing on `view-hold` so the in-flight sweep captures "2.0.0" while
+    // a concurrent `harness_updates(true)` advances `latest` to "3.0.0".
+    fixture::executable(
+        &f.dir.path().join("npm"),
+        &format!(
+            "#!/bin/sh\nv=$(cat '{}')\ntouch '{}'\nwhile [ -f '{}' ]; do sleep .01; done\nprintf '\"%s\"\\n' \"$v\"\n",
+            latest_file.display(),
+            started.display(),
+            hold.display()
+        ),
+    );
+    f.mark("view-hold");
+    let n = f.node();
+    let first = n.harness_updates(true).await.unwrap();
+    assert!(first.checking);
+    eventually_sync(
+        on_timeout(|| async { "in-flight check sweep started (view-started file missing)".into() }),
+        || started.exists(),
+    )
+    .await;
+    std::fs::write(&latest_file, "3.0.0").unwrap();
+    let during = n.harness_updates(true).await.unwrap();
+    assert!(during.checking);
+    f.unmark("view-hold");
+    let report = checked(&n).await;
+    assert!(
+        report.harnesses[0]
+            .components
+            .iter()
+            .all(|c| c.latest.as_deref() == Some("3.0.0")),
+        "queued fresh check must observe latest 3.0.0 after in-flight sweep completes: {report:?}"
     );
     n.shutdown().await;
 }

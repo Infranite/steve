@@ -1343,7 +1343,8 @@ fn process_executable_path(pid: u32) -> Option<PathBuf> {
     }
     #[cfg(target_os = "linux")]
     {
-        canonical(&PathBuf::from(format!("/proc/{pid}/exe"))).ok()
+        let link = fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+        Some(canonical(&link).unwrap_or(link))
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
@@ -1375,11 +1376,60 @@ fn process_start_time_us(pid: u32) -> Option<u64> {
                 .saturating_add(info.pbi_start_tvusec),
         )
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "linux")]
+    {
+        // Field 22 of /proc/<pid>/stat (after the comm field in parentheses) is starttime in
+        // clock ticks since boot; combine with /proc/stat `btime` into epoch microseconds.
+        let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let rest = stat.get(stat.rfind(')')? + 2..)?;
+        let ticks: u64 = rest.split_whitespace().nth(19)?.parse().ok()?;
+        let boot_secs: u64 = fs::read_to_string("/proc/stat")
+            .ok()?
+            .lines()
+            .find_map(|line| line.strip_prefix("btime "))?
+            .trim()
+            .parse()
+            .ok()?;
+        let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) };
+        if hz <= 0 {
+            return None;
+        }
+        let ticks_us = u128::from(ticks)
+            .saturating_mul(1_000_000)
+            .checked_div(u128::from(hz as u64))?;
+        let boot_us = u128::from(boot_secs).saturating_mul(1_000_000);
+        u64::try_from(boot_us.saturating_add(ticks_us)).ok()
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     {
         let _ = pid;
         None
     }
+}
+
+/// Returns true when `pid` no longer exists or has already exited as an unreaped zombie.
+/// `kill(pid, 0)` still succeeds on zombies, so polling it alone would stall for the full
+/// `ORPHAN_PROBE_TERM_GRACE` when the process is an unreaped child (for instance in tests).
+fn process_gone_or_zombie(pid: u32) -> bool {
+    if let Ok(exited) = steve_runtime::process::exited_unreaped(pid, true) {
+        return exited;
+    }
+    let pid_t = pid as libc::pid_t;
+    let exists = unsafe { libc::kill(pid_t, 0) } == 0
+        || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
+    if !exists {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat"))
+            && let Some(rest) = stat.rfind(')').and_then(|i| stat.get(i + 2..))
+            && matches!(rest.as_bytes().first(), Some(b'Z' | b'X'))
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn reap_orphan_probe(
@@ -1426,17 +1476,22 @@ fn reap_orphan_probe(
     unsafe {
         libc::kill(-pgid, libc::SIGTERM);
     }
-    let deadline = Instant::now() + ORPHAN_PROBE_TERM_GRACE;
-    while Instant::now() < deadline {
-        let alive = unsafe { libc::kill(pid_t, 0) } == 0
-            || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM);
-        if !alive {
+    let term_deadline = Instant::now() + ORPHAN_PROBE_TERM_GRACE;
+    while Instant::now() < term_deadline {
+        if process_gone_or_zombie(pid) {
             return;
         }
         std::thread::sleep(ORPHAN_PROBE_POLL_INTERVAL);
     }
     unsafe {
         libc::kill(-pgid, libc::SIGKILL);
+    }
+    let kill_deadline = Instant::now() + PROBE_KILL_REAP_TIMEOUT;
+    while Instant::now() < kill_deadline {
+        if process_gone_or_zombie(pid) {
+            return;
+        }
+        std::thread::sleep(ORPHAN_PROBE_POLL_INTERVAL);
     }
 }
 
@@ -3796,13 +3851,14 @@ exit 0
         );
     }
 
-    #[test]
-    fn review593_re_b_orphan_probe_pid_reaped_on_recovery() {
-        let (dir, _ext_dir, ext_candidate, plist_path, _orig_p, runtime, _svc) =
-            macos_012_fixture(false);
-        let home = dir.path();
-        // Spawn an orphan process-group-leader child simulating a probe Hub left behind after SIGKILL.
-        let mut orphan = Command::new("/bin/sleep")
+    /// Spawns `/bin/sleep 30` in its own process group and waits until its process group,
+    /// executable path, and kernel start timestamp are observable. On Linux, `vfork` returns as
+    /// soon as `exec_mmap` replaces the child's address space (before `setup_new_exec` restores
+    /// `dumpable`), so `/proc/<pid>/exe` can transiently fail with `EACCES` right after `spawn()`.
+    fn spawn_observable_sleep() -> (Child, Option<PathBuf>, Option<u64>) {
+        const ORPHAN_IDENTITY_READY_TIMEOUT: Duration = Duration::from_secs(2);
+        const ORPHAN_IDENTITY_READY_POLL: Duration = Duration::from_millis(10);
+        let mut child = Command::new("/bin/sleep")
             .arg("30")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -3810,9 +3866,72 @@ exit 0
             .process_group(0)
             .spawn()
             .unwrap();
+        let pid = child.id();
+        let expected_sleep_exe =
+            canonical(Path::new("/bin/sleep")).unwrap_or_else(|_| PathBuf::from("/bin/sleep"));
+        let ready_deadline = Instant::now() + ORPHAN_IDENTITY_READY_TIMEOUT;
+        let (exe, start_us) = loop {
+            let pgid_ready = unsafe { libc::getpgid(pid as libc::pid_t) } == pid as libc::pid_t;
+            let exe = process_executable_path(pid);
+            let start = process_start_time_us(pid);
+            let start_ready =
+                !cfg!(any(target_os = "macos", target_os = "linux")) || start.is_some();
+            if pgid_ready && exe.as_deref() == Some(expected_sleep_exe.as_path()) && start_ready {
+                break (exe, start);
+            }
+            if Instant::now() >= ready_deadline {
+                break (exe, start);
+            }
+            std::thread::sleep(ORPHAN_IDENTITY_READY_POLL);
+        };
+        if exe.as_deref() != Some(expected_sleep_exe.as_path())
+            || (cfg!(any(target_os = "macos", target_os = "linux")) && start_us.is_none())
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+            panic!(
+                "orphan /bin/sleep (pid {pid}) identity was not observable: exe={exe:?}, expected={}, start_us={start_us:?}",
+                expected_sleep_exe.display()
+            );
+        }
+        (child, exe, start_us)
+    }
+
+    #[test]
+    fn reap_orphan_probe_terminates_matching_child_without_zombie_stall() {
+        let (mut orphan, orphan_exe, orphan_start_us) = spawn_observable_sleep();
         let orphan_pid = orphan.id();
-        let orphan_exe = process_executable_path(orphan_pid);
-        let orphan_start_us = process_start_time_us(orphan_pid);
+        let started = Instant::now();
+        reap_orphan_probe(
+            orphan_pid,
+            orphan_exe.as_deref(),
+            orphan_start_us,
+            Path::new("/nonexistent/bin/steve-hub"),
+        );
+        let elapsed = started.elapsed();
+        let exited = orphan.try_wait().unwrap().is_some();
+        if !exited {
+            let _ = orphan.kill();
+            let _ = orphan.wait();
+        }
+        assert!(
+            exited,
+            "matching orphan child (pid {orphan_pid}) must be terminated"
+        );
+        assert!(
+            elapsed < ORPHAN_PROBE_TERM_GRACE,
+            "reap_orphan_probe must return promptly once child becomes zombie (took {elapsed:?})"
+        );
+    }
+
+    #[test]
+    fn review593_re_b_orphan_probe_pid_reaped_on_recovery() {
+        let (dir, _ext_dir, ext_candidate, plist_path, _orig_p, runtime, _svc) =
+            macos_012_fixture(false);
+        let home = dir.path();
+        // Spawn an orphan process-group-leader child simulating a probe Hub left behind after SIGKILL.
+        let (mut orphan, orphan_exe, orphan_start_us) = spawn_observable_sleep();
+        let orphan_pid = orphan.id();
         let old_hub = fs::canonicalize(home.join("releases/0.12.0")).unwrap();
         let old_manifest = json_file(&old_hub.join("release.json")).unwrap();
         let staged = crate::service::stage_release_bundle(
