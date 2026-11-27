@@ -16,7 +16,7 @@ import { actorSeed, avatarSrc, formatActorName, resolveActor, type Actor } from 
 export type ActorAvatarProps = {
   /** Pre-built Actor object (person, bot, system, org, or team). */
   actor?: Actor
-  /** Actor id (`usr_*`, `"me"`, bot id, `"yolo"`, `"system"`), resolved against workspace members & bots. */
+  /** Actor id (`usr_*`, `"me"`, bot id, `"system"`), resolved against workspace members & bots. */
   actorId?: string | null
   /** Fallback name when resolving by `actorId`. */
   name?: string

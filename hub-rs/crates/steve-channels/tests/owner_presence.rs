@@ -1,5 +1,5 @@
 //! Owner presence and the per-space reply setting, on your own account (synthetic chats): a reply in
-//! your name is not drafted, opened, approved by YOLO, retried by YOLO or sent once you answered the
+//! your name is not drafted, opened, approved, retried or sent once you answered the
 //! chat yourself, or while you are chatting there; your own message closes what Steve still had
 //! waiting about older messages; one sender's run of messages is answered once; and `reply_as_you`
 //! (`draft` / `record` / `off`) is decided in code before any model reads a message.
@@ -480,7 +480,7 @@ async fn your_own_message_closes_older_drafts_and_cards() {
     assert!(h.fake.sent.lock().unwrap().is_empty());
 }
 
-// ---------------------------------------------------------------- gate 3: YOLO
+// ---------------------------------------------------------------- gate 3: your approval
 
 #[tokio::test(flavor = "multi_thread")]
 async fn what_you_approve_yourself_still_goes() {
@@ -500,7 +500,7 @@ async fn what_you_approve_yourself_still_goes() {
 // ---------------------------------------------------------------- a busy group
 
 /// A busy group: two people @ you a few seconds apart and others talk; you answer one of them by
-/// quoting their message. Only that one is yours now; the other's draft stays for you (or YOLO) to
+/// quoting their message. Only that one is yours now; the other's draft stays for you to
 /// decide, where the old rule (anything you said within the window) closed both.
 #[tokio::test(flavor = "multi_thread")]
 async fn in_a_busy_group_answering_one_person_leaves_the_others_draft() {
@@ -534,7 +534,7 @@ async fn in_a_busy_group_answering_one_person_leaves_the_others_draft() {
     push(&h, &me, to_li).await;
     assert_eq!(status(&h, &li_draft), "discarded", "the one you answered");
     assert_eq!(status(&h, &han_draft), "draft", "not the other one");
-    // YOLO, judging again once its disclosure check is done, still may approve it
+    // once its disclosure check is done, the draft's card is still yours to approve
     checked(&h).await;
     let card: String = inspect::messages::message_decision_id(h.env.store(), &han_draft).unwrap()
         [0]

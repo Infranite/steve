@@ -144,7 +144,7 @@ test("avatarSrc prefers Hub-uploaded files, allows safe URLs, and blocks unsafe 
   assert.equal(hasUploadedAvatar({ url: "https://cdn.example.test/a.png" }), false)
 })
 
-test("resolveActor resolves person, legacy me, bots, yolo, and system consistently", () => {
+test("resolveActor resolves person, legacy me, bots, and system consistently", () => {
   const ctx = { me: ME, members: [ME, MEMBER_A, MEMBER_B], bots: BOTS, systemName: "系统" }
 
   const byUser = resolveActor("usr_owner", ctx)
@@ -168,10 +168,10 @@ test("resolveActor resolves person, legacy me, bots, yolo, and system consistent
   assert.equal(codeBot.botId, "code")
   assert.equal(codeBot.name, "开发 Bot")
 
-  const yolo = resolveActor("yolo", ctx)
-  assert.equal(yolo.kind, "bot")
-  assert.equal(yolo.botId, "steve")
-  assert.equal(yolo.name, "Steve")
+  const steveBot = resolveActor("steve", ctx)
+  assert.equal(steveBot.kind, "bot")
+  assert.equal(steveBot.botId, "steve")
+  assert.equal(steveBot.name, "Steve")
 
   const sys = resolveActor("system", ctx)
   assert.equal(sys.kind, "system")

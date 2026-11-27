@@ -22,7 +22,7 @@ import {
  *
  * Steve: the composer's behaviour (the marked text, the #/@// menus, drafts, uploads, sending) stays Steve's own; this
  * file draws the card around it. The demo's voice input, approval modes, folder picker, app connections and model
- * picker are left out: Steve has no speech-to-text, its autonomy is the Hub-wide YOLO setting, a session's harness and
+ * picker are left out: Steve has no speech-to-text, its permissions live in the workspace settings, a session's harness and
  * model are fixed when it starts (shown as a quiet label), and integrations live in their own settings.
  */
 

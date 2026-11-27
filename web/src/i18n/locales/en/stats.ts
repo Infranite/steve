@@ -335,7 +335,7 @@ export default {
     wait: "Waiting on you",
     decisions_one: "{{count}} decision",
     decisions_other: "{{count}} decisions",
-    waitDef: "The union of the times cards needing you stayed open (YOLO-handled ones excluded).",
+    waitDef: "The union of the times cards needing you stayed open (automatically settled ones excluded).",
     reworks: "Reworks",
     noVerdict: "Not judged yet",
     firstPass: "Accepted on first delivery",

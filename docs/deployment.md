@@ -1503,27 +1503,32 @@ Everything that belongs to a session's own turn (`steve_update`, `steve_ask`, `s
 
 Cursor takes the same without `type` in `~/.cursor/mcp.json`. Claude Desktop starts local commands from `claude_desktop_config.json`, so it reaches the Hub through `mcp-remote` (Node.js): `{"command": "npx", "args": ["-y", "mcp-remote", "https://<hub>/mcp", "--header", "Authorization:${STEVE_AUTH}"], "env": {"STEVE_AUTH": "Bearer stt_…"}}`. Claude Code: `claude mcp add --transport http steve https://<hub>/mcp --header "Authorization: Bearer stt_…"`. A client on another machine needs the Hub to listen beyond loopback, or a public address with HTTPS from your own reverse proxy (see the setup above). `GET /api/capabilities/steve` answers the built-in definitions (with schemas, annotations and `core` flags), default core names and addresses: `{tools, core, outside, outside_core, endpoints: [{url, kind}], agent_card, a2a}`. `outside` describes the full outside-client allowlist; `outside_core` names its three base tools, with search/call added to its default MCP list.
 
-### Native harness approval
+### Workspace permissions
 
-The workspace owner can enable **More → Native approval (YOLO)**. By default it is off and permissions that reach Steve open a decision card for the owner. When it is on, the Node requests the supported adapter's native auto mode through ACP. Steve does not inspect commands or ask a model to decide them. Plan and read-only sessions are not widened, and adapters that do not declare native approval are shown as unsupported. The switch does not override the Node owner's ceiling.
+The workspace owner configures **Settings → Workspace → Permissions** (also available under **More → Permissions**) across three levels: **Ask** (default), **Auto**, and **Full access**.
 
-| Harness | ACP mode used for YOLO |
-| --- | --- |
-| Claude Code | `auto`, not `bypassPermissions` |
-| Codex | `agent`, workspace-write with Codex's automatic reviewer; not the unsandboxed `agent-full-access` |
-| goose | `smart_approve` |
-| Mistral Vibe | `smart-approve` |
-| Other built-ins | Not supported |
+- **Ask (`ask`)**: Sessions use the harness's asking mode, and any ACP permission request that reaches Steve opens an owner decision card.
+- **Auto (`auto`)**: The Node requests the adapter's native auto mode only when declared in its harness spec (`native_approval` + `modes.auto`). Adapters without a native auto declaration stay on `ask` and report `unsupported` — Steve never simulates auto-approval.
+- **Full access (`full_access`)**: The Node requests the adapter's declared full-access mode (`modes.full_access`, `mode_args.full_access`, or `mode_meta.full_access`). Switching to **Full access** requires confirming a risk notice in the UI (`confirmed: true` on `PUT /api/permission-policy`): the harness will no longer ask before commands, can modify or delete anything it can write to and use the network, Steve's sandbox still blocks Steve's own files, and self-sandboxed harnesses with `nested_sandbox = false` (derived from the harness spec) run outside Steve's sandbox and can still access those files.
 
-A trusted custom `harness.json` declaration sets `properties.modes.auto` to its native mode id and `properties.native_approval` to `ask_owner` or `reject` for any remaining ACP permission requests. Neither fallback auto-approves a request. An alias of the asking or full-access mode is not a native-auto declaration. An adapter version that declines a mode is reported as refused, not applied.
+| Harness | Auto | Full access |
+| --- | --- | --- |
+| Claude Code | `auto` | `bypassPermissions` |
+| Codex | `agent` (workspace-write with automatic reviewer) | `agent-full-access` (`nested_sandbox = false`, outside Steve's sandbox) |
+| Antigravity CLI | `auto` (inside Steve's sandbox its own terminal sandbox cannot start; its classifier lets safe commands run and asks before risky ones) | `--dangerously-skip-permissions` (still inside Steve's sandbox) |
+| goose | `smart_approve` | `auto` |
+| Mistral Vibe | `smart-approve` | `auto-approve` |
+| Pi | Unsupported | Native (`full_access_only`, requires Bot configured for `full_access`) |
+| Gemini CLI, GitHub Copilot CLI, Qwen Code, Kimi Code, Grok Build, Factory Droid, CodeBuddy Code, Qoder CLI | Unsupported | Declared `modes.full_access` / `mode_meta.full_access` |
+| OpenCode, Kilo Code, Cursor, Kiro CLI | Unsupported | Unsupported |
 
-An active turn keeps its mode until it ends; the new mode is sent before the next turn or on the next open. `GET /api/approval-policy` reads the mode, actor and revision; `PUT` requires the current revision and owner. `GET /api/approval-policy/sessions/<id>` shows support and applied/desired mode facts. Statistics count logical turns that ran in auto, distinct sessions in those turns, requests that reached Steve by resolver and result, and agent question cards. Questions still wait for the owner.
+A trusted custom `harness.json` declaration sets `properties.modes.auto` and `properties.native_approval` (`ask_owner` or `reject`) to opt into **Auto**, and sets `properties.modes.full_access`, `properties.mode_args.full_access`, or `properties.mode_meta.full_access` to declare **Full access**. Neither fallback auto-approves an ACP prompt, and an alias of `modes.ask` is not treated as a distinct auto or full-access mode. Plan and read-only sessions are never widened, and a Node owner's ceiling (`PolicyCeiling`) still caps every session on that Node. An adapter version or Node ceiling that declines a mode is reported as `refused`, not applied.
 
-This changes only harness permission prompts. It does not grant Steve tool permissions, enable publishing, change Vault sensitivity or approve personal sends. Keep external service, Git host and financial credentials out of harness accounts and execution environments; no harness setting can enforce a boundary against ambient credentials you explicitly make available to it. Use Steve's scoped tools and credentials for external operations.
+An active turn keeps its mode until it ends; the new mode is sent before the next turn or on the next open. `GET /api/permission-policy` reads the mode, actor, revision, discovered Node harnesses' Auto / Full access support, and spec-derived unconfined harness names; `PUT /api/permission-policy` requires the current revision, workspace owner, and `confirmed: true` when switching to `full_access`. `GET /api/permission-policy/sessions/<id>` reports the active policy level, whether the session's harness is `applied`, `pending`, `unsupported`, or `refused`, and the applied/desired/refusal facts. Metrics export active sessions (`steve_permission_sessions`) and logical turns (`steve_permission_turns_total`) by `mode` (`ask`, `auto`, `full_access`), full-access risk confirmations (`steve_permission_full_access_confirmations_total`), requests reaching Steve (`steve_approval_requests_total`), and agent questions (`steve_approval_questions_total`).
+
+This changes only harness permission prompts. It does not grant Steve tool permissions, enable publishing, change Vault sensitivity, bypass design gates, or approve personal sends. Keep external service, Git host and financial credentials out of harness accounts and execution environments; no harness setting can enforce a boundary against ambient credentials you explicitly make available to it. Use Steve's scoped tools and credentials for external operations.
 
 For GitHub projects, an agent commits locally and uses `steve_github_open_pr` to request a managed push and PR. If an existing PR needs a branch update and there is no managed tool for it, the agent hands that step to the owner rather than using shell credentials.
-
-A database backup is required before upgrading from Steve's former YOLO policy. Existing switches, overrides, automatic actions and the old API are removed; the new switch starts off. Already recorded decisions and external results remain historical facts. Unsent old auto-approved messages are not sent by the upgrade.
 
 ## Appearance and themes
 

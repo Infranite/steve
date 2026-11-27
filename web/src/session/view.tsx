@@ -1,4 +1,4 @@
-import { SessionApproval } from "@/approval"
+import { SessionPermission } from "@/approval"
 import { useEffect, useRef, useState } from "react"
 import { cn } from "cn"
 import { ArrowRightLeftIcon, DownloadIcon, LockIcon, MoreHorizontalIcon, PanelRightIcon, PencilIcon, SquareIcon, TrashIcon, XIcon } from "lucide-react"
@@ -148,7 +148,7 @@ export default function SessionView({ k, s }: { k: string; s?: Sess }) {
                 {device
                   ? <a href={"#/devices/nodes/" + encodeURIComponent(device.id)} className="hover:text-foreground" data-runtime-device>{t("views:session.runsOn", { device: device.name })}</a>
                   : s.node ? <span data-runtime-device>{t("views:session.runsOn", { device: s.node })}</span> : null}
-                <SessionApproval id={k} showApplied={false} />
+                <SessionPermission id={k} showApplied={false} />
                 <span>{t("views:session.effortLabel")} <span className="text-muted-foreground" data-session-effort-mapping>{formatEffortMapping(t, s.effortMapping, s.h, s.reasoningEffort)}</span></span>
                 {/* a reported context is the composer's ring; that nothing is reported is said here */}
                 {!s.ro && !s.contextKnown && <span data-session-ctx-unreported>{t("views:session.ctxLabel")} <span className="text-muted-foreground">{t("views:session.unreported")}</span></span>}

@@ -81,7 +81,10 @@ pub use wait::{WaitContract, WaitKind, WaitLimits, WaitOwner, WaitTimeoutAction}
 mod r#gen;
 
 pub use automation::AutomationEvent;
-pub use autonomy::{ApprovalMode, ApprovalPolicy, AutonomyEvent};
+pub use autonomy::{
+    ApprovalMode, ApprovalPolicy, AutonomyEvent, PermissionHarnessSupport, PermissionPolicyView,
+    SessionPermissionStatus, SessionPermissionView,
+};
 pub use channels::ChannelsEvent;
 pub use config::{ConfigEvent, ConfigReason};
 pub use devices::DevicesEvent;

@@ -26,7 +26,7 @@ const core = {
   throughput: { created: sum(created), created_by_source: {}, done: sum(done), dropped: 1, drop_rate: 0.14, wip: 7, delivered: 7, delivered_auto: 2, delivered_manual: 5, net: 2 },
   time: { lead: P(5 * H, 20 * H), cycle: P(3 * H, 9 * H), first_deliver: P(2 * H, 6 * H), wait: P(1.5 * H, 8 * H), agent: P(2 * H, 5 * H), other: P(1 * H, 3 * H), releases: 4, released: 3, release_success_rate: 0.75, not_released: 0, accept_to_release: P(H / 4, H) },
   quality: { first_pass: 0.66, first_pass_n: 6, reworks: 2, reworks_per_done: 0.33, fails: { stall: 1, error: 2, restart: 0, release: 1, other: 0 }, stalled_then_done: 0, rollbacks: 0, release_unknown: 0, turn_error_rate: 0.017, reopened: 0 },
-  human: { decisions: 14, by_kind: {}, response: P(H / 3, 2 * H), response_by_kind: {}, expired: 1, approval: { sessions: 3, turns: 8, permissions: 2, questions: 5, permissions_by_resolver: { ask_owner: { allowed: 1, expired: 1 } } }, messages: 9, per_done: 2.3 },
+  human: { decisions: 14, by_kind: {}, response: P(H / 3, 2 * H), response_by_kind: {}, expired: 1, approval: { sessions: 3, turns: 8, by_mode: { ask: { sessions: 2, turns: 5 }, auto: { sessions: 1, turns: 2 }, full_access: { sessions: 1, turns: 1 } }, permissions: 2, questions: 5, permissions_by_resolver: { ask_owner: { allowed: 1, expired: 1 } } }, messages: 9, per_done: 2.3 },
   agents: { turns: 120, turn_ms: P(4 * 60000, 12 * 60000), tools: 900, tool_error_rate: 0.013, tool_kinds: {}, retries: 1, retry_success: 1, gateway_fallbacks: 0, gateway_failed: 0, permissions: 5, interrupted: 0, cancelled: 1, tokens_per_turn: 50000, tools_per_turn: 7.5 },
   per_item: { tokens: P(800000, 2_000_000), est_p50: 2, est_avg: 2.6, est_top: [] },
   delivery: {

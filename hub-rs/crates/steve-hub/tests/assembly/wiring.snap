@@ -30,8 +30,6 @@ api DELETE /vault/items/x
 api DELETE /vault/items/x/fields/x
 api GET /accounts
 api GET /accounts/x
-api GET /approval-policy
-api GET /approval-policy/sessions/x
 api GET /attr-defs
 api GET /bots/x/capabilities
 api GET /bots/x/flows
@@ -135,6 +133,8 @@ api GET /parties/x/memories
 api GET /parties/x/timeline
 api GET /passkeys
 api GET /people/x/holdings
+api GET /permission-policy
+api GET /permission-policy/sessions/x
 api GET /personas
 api GET /personas/x
 api GET /plugins
@@ -313,7 +313,6 @@ api POST /vault/items/x/fields/x/reveal/start
 api POST /vault/items/x/grants
 api POST /vault/recover
 api POST /vault/rotate
-api PUT /approval-policy
 api PUT /bots/x/capabilities/x/x
 api PUT /bots/x/tool-pins/x/x
 api PUT /calendar/sources/x/ics
@@ -326,6 +325,7 @@ api PUT /kb/notes/x
 api PUT /kb/steward
 api PUT /mail/drafts/x
 api PUT /me/notification-policy
+api PUT /permission-policy
 api PUT /stats/prices
 api PUT /stats/tz
 api PUT /stewards/x/x

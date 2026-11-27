@@ -104,7 +104,7 @@ export function partyActor(p: {
   }
 }
 
-/** Resolve any Hub actor identifier (`usr_*`, `"me"`, bot id, `"yolo"`, `"system"`, `"hub"`) to an Actor. */
+/** Resolve any Hub actor identifier (`usr_*`, `"me"`, bot id, `"system"`, `"hub"`) to an Actor. */
 export function resolveActor(rawId: string | null | undefined, ctx: ActorResolveContext): Actor {
   const id = (rawId ?? "").trim()
   const systemLabel = ctx.systemName ?? "System"
@@ -114,10 +114,6 @@ export function resolveActor(rawId: string | null | undefined, ctx: ActorResolve
   if (id === "me") {
     if (ctx.me) return memberActor(ctx.me, true)
     return { kind: "person", id: "me", name: ctx.fallbackName || "Me", isMe: true }
-  }
-  if (id === "yolo") {
-    const steve = ctx.bots?.steve
-    return { kind: "bot", id: "steve", botId: "steve", name: steve?.n ?? "Steve" }
   }
   const member = ctx.members?.find((m) => m.user_id === id || (m.party_id != null && m.party_id === id))
   if (member) return memberActor(member, ctx.me?.user_id === member.user_id)

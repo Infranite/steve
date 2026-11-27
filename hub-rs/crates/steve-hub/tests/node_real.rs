@@ -20,7 +20,7 @@
 //! 2. a Steve tool call (read-only) goes through ToolService, with its row in the host journal;
 //! 3. a Bash permission card answered allow_once runs; a second one rejected does not;
 //! 4. a cancel mid-turn ends the turn;
-//! 5. a permission-mode change at idle (YOLO on: `default` → `auto`) is configured on the
+//! 5. a permission-mode change at idle (Auto: `default` → `auto`) is configured on the
 //!    Node and the next edit asks nothing; the Bot's model and effort reach the harness with the
 //!    open. Pending: a model/effort change at idle, which has no Hub trigger yet (see the case);
 //! 6. a release (the Hub stopped at idle) then a reopen continues the same conversation;
@@ -780,16 +780,17 @@ async fn a_mode_change_at_idle_configures_the_node_session() {
     let r = Real::start_as(Home::fake(), "ask").await;
     let sid = r.item("A7 mode @say first-A7").await;
     r.turn_over(&sid, 1, "first turn").await;
-    let mode_url = format!("/api/approval-policy/sessions/{sid}");
+    let mode_url = format!("/api/permission-policy/sessions/{sid}");
     r.c.ok(
         "PUT",
-        "/api/approval-policy",
-        json!({"mode":"harness_auto","revision":0}),
+        "/api/permission-policy",
+        json!({"mode":"auto","revision":0}),
     )
     .await;
     r.configure_over(&sid, "auto").await;
     let applied = r.c.ok("GET", &mode_url, Value::Null).await;
-    assert_eq!(applied["status"], "on", "{applied}");
+    assert_eq!(applied["policy"], "auto", "{applied}");
+    assert_eq!(applied["status"], "applied", "{applied}");
     assert_eq!(applied["applied"], "auto", "{applied}");
     assert_eq!(applied["native_id"], "auto", "{applied}");
     let seq = r.seq(&sid);
@@ -797,17 +798,65 @@ async fn a_mode_change_at_idle_configures_the_node_session() {
     r.turn_over(&sid, 2, "after configure").await;
     assert!(r.said(&sid, seq, "second-A7") > 0);
     let stats = r.c.ok("GET", "/api/stats/summary", Value::Null).await;
-    assert_eq!(stats["human"]["approval"]["sessions"], 1, "{stats}");
-    assert_eq!(stats["human"]["approval"]["turns"], 1, "{stats}");
+    assert_eq!(
+        stats["human"]["approval"]["by_mode"]["ask"]["turns"], 1,
+        "{stats}"
+    );
+    assert_eq!(
+        stats["human"]["approval"]["by_mode"]["auto"]["turns"], 1,
+        "{stats}"
+    );
+    assert_eq!(
+        stats["human"]["approval"]["by_mode"]["auto"]["sessions"], 1,
+        "{stats}"
+    );
+    // Full access requires explicit risk confirmation.
+    let (status, _) =
+        r.c.call(
+            "PUT",
+            "/api/permission-policy",
+            Some(json!({"mode":"full_access","revision":1})),
+        )
+        .await;
+    assert_eq!(
+        status, 400,
+        "full_access without confirmation must be rejected"
+    );
     r.c.ok(
         "PUT",
-        "/api/approval-policy",
-        json!({"mode":"ask_owner","revision":1}),
+        "/api/permission-policy",
+        json!({"mode":"full_access","revision":1,"confirmed":true}),
+    )
+    .await;
+    r.configure_over(&sid, "full_access").await;
+    let applied = r.c.ok("GET", &mode_url, Value::Null).await;
+    assert_eq!(applied["policy"], "full_access", "{applied}");
+    assert_eq!(applied["status"], "applied", "{applied}");
+    assert_eq!(applied["applied"], "full_access", "{applied}");
+    assert_eq!(applied["native_id"], "bypassPermissions", "{applied}");
+    let seq = r.seq(&sid);
+    r.c.say(&sid, "A7 mode @say third-A7").await;
+    r.turn_over(&sid, 3, "after full_access configure").await;
+    assert!(r.said(&sid, seq, "third-A7") > 0);
+    let stats = r.c.ok("GET", "/api/stats/summary", Value::Null).await;
+    assert_eq!(
+        stats["human"]["approval"]["by_mode"]["full_access"]["turns"], 1,
+        "{stats}"
+    );
+    assert_eq!(
+        stats["human"]["approval"]["by_mode"]["full_access"]["sessions"], 1,
+        "{stats}"
+    );
+    r.c.ok(
+        "PUT",
+        "/api/permission-policy",
+        json!({"mode":"ask","revision":2}),
     )
     .await;
     r.configure_over(&sid, "ask").await;
     let applied = r.c.ok("GET", &mode_url, Value::Null).await;
-    assert_eq!(applied["status"], "off", "{applied}");
+    assert_eq!(applied["policy"], "ask", "{applied}");
+    assert_eq!(applied["status"], "applied", "{applied}");
     assert_eq!(applied["applied"], "ask", "{applied}");
     let log = std::fs::read_to_string(r.h.fake.as_ref().unwrap()).unwrap();
     let sent_modes: Vec<_> = log
@@ -817,15 +866,15 @@ async fn a_mode_change_at_idle_configures_the_node_session() {
         .filter_map(|m| m["params"]["modeId"].as_str().map(str::to_owned))
         .collect();
     assert!(
-        sent_modes.ends_with(&["auto".into(), "default".into()]),
+        sent_modes.ends_with(&["auto".into(), "bypassPermissions".into(), "default".into()]),
         "{sent_modes:?}"
     );
 
     r.c.ok("POST", &format!("/api/sessions/{sid}/end"), Value::Null)
         .await;
     let ended = r.c.ok("GET", &mode_url, Value::Null).await;
-    assert_eq!(ended["status"], "off", "{ended}");
-    assert_eq!(ended["native_id"], "auto", "{ended}");
+    assert_eq!(ended["status"], "applied", "{ended}");
+    assert!(ended["native_id"].is_null(), "{ended}");
     assert!(ended["target"].is_null(), "{ended}");
 }
 
@@ -845,8 +894,8 @@ async fn an_adapter_without_native_auto_reports_unsupported_and_keeps_asking() {
     let r = Real::start_on(home).await;
     r.c.ok(
         "PUT",
-        "/api/approval-policy",
-        json!({"mode":"harness_auto","revision":0}),
+        "/api/permission-policy",
+        json!({"mode":"auto","revision":0}),
     )
     .await;
     let sid = r.item("Ask-only adapter @say first").await;
@@ -855,10 +904,11 @@ async fn an_adapter_without_native_auto_reports_unsupported_and_keeps_asking() {
     let mode =
         r.c.ok(
             "GET",
-            &format!("/api/approval-policy/sessions/{sid}"),
+            &format!("/api/permission-policy/sessions/{sid}"),
             Value::Null,
         )
         .await;
+    assert_eq!(mode["policy"], "auto", "{mode}");
     assert_eq!(mode["status"], "unsupported", "{mode}");
     assert_eq!(mode["target"], "ask", "{mode}");
     assert_eq!(mode["applied"], "ask", "{mode}");
@@ -1078,8 +1128,8 @@ async fn a_change_at_idle_applies_and_the_bots_model_reaches_the_harness() {
     // at idle: the mode change goes to the Node now, not with a later open
     r.c.ok(
         "PUT",
-        "/api/approval-policy",
-        json!({"mode":"harness_auto","revision":0}),
+        "/api/permission-policy",
+        json!({"mode":"auto","revision":0}),
     )
     .await;
     r.configure_over(&sid, "auto").await;

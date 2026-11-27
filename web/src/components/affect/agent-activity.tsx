@@ -4,7 +4,7 @@
 /*
  * Activity – what was done, in a single file.
  * Not a log of API calls: every row is one thing done, said as a sentence, with the time, a mark for what kind of
- * thing it was, what it was done to and who did it, by a coloured dot (a Bot on its own, YOLO for you, you).
+ * thing it was, what it was done to and who did it, by a coloured dot (a Bot on its own, approved for you, you).
  * Grouped by day under quiet heads with a count. A row opens under itself: what exactly happened and why it could.
  * A run of the same thing folded into one row opens into its steps.
  * Filter by who, or search. The keyboard: J / K (↑ ↓) move from row to row, Enter opens, / searches.

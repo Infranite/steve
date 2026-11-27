@@ -1719,7 +1719,7 @@ async fn your_own_account_writes_like_you_not_like_a_bot() {
         .as_str()
         .unwrap()
         .to_string();
-    // your verdicts on earlier drafts as you: rejected, edited, approved unchanged, approved by YOLO
+    // your verdicts on earlier drafts as you: rejected, edited, approved unchanged, decided by Steve
     let verdict = |id, space, draft, result| seed::messages::Verdict {
         id,
         space,
@@ -1747,8 +1747,8 @@ async fn your_own_account_writes_like_you_not_like_a_bot() {
             verdict(
                 "v4",
                 &dev,
-                "YOLO 否掉的",
-                r#"{"choice":"no","decided_by":"yolo"}"#,
+                "Steve 否掉的",
+                r#"{"choice":"no","decided_by":"steve"}"#,
             ),
             verdict(
                 "v5",
@@ -1804,7 +1804,7 @@ async fn your_own_account_writes_like_you_not_like_a_bot() {
         "{style}"
     );
     assert!(style.contains("以句号结尾的占 0%"), "{style}");
-    // your verdicts: rejected as it was, edited as you sent it; not a test click, not YOLO's, not
+    // your verdicts: rejected as it was, edited as you sent it; not a test click, not Steve's, not
     // another space's long analysis
     assert!(
         p.contains(compose::H_REJECTED) && p.contains("- 收到，这次要把问题出在哪一步查清楚"),
@@ -1815,7 +1815,7 @@ async fn your_own_account_writes_like_you_not_like_a_bot() {
         "{p}"
     );
     assert!(
-        !p.contains("测试点一下") && !p.contains("YOLO 否掉的") && !p.contains("一大段分析"),
+        !p.contains("测试点一下") && !p.contains("Steve 否掉的") && !p.contains("一大段分析"),
         "{p}"
     );
     assert!(

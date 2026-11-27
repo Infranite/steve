@@ -310,7 +310,7 @@ async fn work_from_a_chat_becomes_an_item_only_when_the_host_allows_it() {
         .unwrap()
         .unwrap();
     assert_eq!(ti.origin_message_id, mid);
-    // someone else asked: a proposal that waits for you, from a source YOLO doesn't take for yours
+    // someone else asked: a proposal that waits for you, from a source Steve doesn't take for yours
     let it = k.db().item(&id).unwrap().unwrap();
     assert_eq!(it.source.1, "chat_proposal");
     assert!(

@@ -678,7 +678,7 @@ fn note_tag_changes(
 
 /// `PUT /items/{id}/design-gate {on}` (Q1): a delivery of the item waits for the owner to confirm the
 /// design before any implementation. Only the instance's owner switches it, from the page or the API;
-/// no Bot, MCP tool or YOLO has a way to write it.
+/// no Bot, MCP tool, or relaxed permission level has a way to write it.
 pub async fn design_gate(
     State(st): State<AppState>,
     Extension(c): Extension<Ctx>,

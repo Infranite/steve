@@ -831,6 +831,9 @@ fn expected_migration_changes(path: &Path, v_before: i64) -> MigrationChanges {
         changes.create_table("chan_reply_sources", 0);
     }
 
+    // 147: Three-level workspace permissions (`ask`, `auto`, `full_access`) and `approval_turns.mode`
+    // (no table/row count change).
+
     changes
 }
 

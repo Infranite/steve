@@ -25,6 +25,7 @@ import { Card as ACard, CardHeader } from "@/components/affect/card-clean"
 import { Badge } from "@/components/affect/badge-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
 import { AutonomyChoice } from "@/components/affect/agent-permissions"
+import { PermissionPolicyPanel } from "@/approval"
 import {
   st, botName, formatBotName, ownsBot, PRO, ACC, PERM, permModes, runtimeName, defaultHarness, saveBot, makeBot, draftBot, deleteBot, removeBotFromWorkspace, dupBot, addMem, editMem, delMem, setBotWorkspaces, tag, tagLabel, tagDesc, tagUses, TAG_CATS, KIND_CAT, DOMAIN_CATS, isKind, kindTags, makeTag, saveTag, deleteTag, mergeTag, setTags, it,
   setSetting, toast, emit, closedSt, type ExecutionSurface,
@@ -684,6 +685,7 @@ function WorkspacePane() {
     </Panel></Section>
     <Section label={t("manage:ws.desc")}>
       <TextArea minRows={3} maxRows={10} value={d} aria-label={t("manage:ws.desc")} placeholder={t("manage:ws.descPlaceholder")} hint={t("manage:ws.descHint")} error={unsaved && d.trim() !== w.description ? unsaved : undefined} onChange={(e) => setD(e.target.value)} onBlur={save} onKeyDown={keys(() => setD(w.description))} data-ws-desc /></Section>
+    <Section label={t("core:approval.title")}><PermissionPolicyPanel /></Section>
     <Section label={t("manage:ws.here")}><Panel>
       <Row icon={<Tile I={FolderIcon} />} title={t("manage:ws.projects", { count: st.projects.length })} onClick={() => go("#/projects")}><Chevron /></Row>
       <Row icon={<Tile I={BotIcon} />} title={t("manage:ws.bots", { count: Object.keys(st.bots).length })} onClick={() => go("#/bots")}><Chevron /></Row>

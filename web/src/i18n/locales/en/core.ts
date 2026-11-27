@@ -206,18 +206,52 @@ export default {
     tagMerged: "Merged “{{from}}” into “{{into}}”",
   },
   approval: {
-    "title": "Native approval (YOLO)",
-    "description": "Supported harnesses review their own tools. Agent questions and Steve’s external actions still need their usual authorization.",
-    "on": "Native approval: on",
-    "off": "Native approval: off",
-    "unsupported": "Native approval: unsupported by this harness",
+    "title": "Permissions",
+    "description": "Plan and read-only sessions never widen. Agent questions, Steve tools, vault secrets, personal sends, and design decisions still wait for the owner.",
+    "ownerOnly": "Only the workspace owner can change this.",
+    "levels": {
+      "ask": {
+        "name": "Ask",
+        "text": "Harnesses use their ask mode; permission requests reaching Steve open a decision card."
+      },
+      "auto": {
+        "name": "Auto",
+        "text": "Uses each supported harness's native auto mode; unsupported harnesses keep asking."
+      },
+      "full_access": {
+        "name": "Full access",
+        "text": "Uses each harness's declared full-access mode without command prompts."
+      }
+    },
+    "tableHarness": "Discovered harness",
+    "supported": "Supported",
+    "notSupported": "Unsupported",
+    "outsideSandboxTag": "Own sandbox",
+    "harnessesEmpty": "No harnesses discovered on Nodes yet.",
+    "confirm": {
+      "title": "Switch permissions to Full access?",
+      "desc": "Review the risks before removing command prompts for this workspace.",
+      "proceed": "Switch to Full access",
+      "noPrompts": "The harness will no longer ask before running any command.",
+      "writeAndNetwork": "It can modify or delete anything it has write access to, and it can use the network.",
+      "steveSandbox": "Steve's sandbox still blocks access to Steve's own files.",
+      "outsideSandboxNamed": "Harnesses with their own sandbox that run outside Steve's sandbox ({{harnesses}}) can still access those files.",
+      "outsideSandboxGeneric": "Harnesses with their own sandbox that run outside Steve's sandbox can still access those files."
+    },
+    "status": {
+      "applied": "Permissions: {{level}} · Applied",
+      "pending": "Permissions: {{level}} · Pending",
+      "unsupported": "Permissions: {{level}} · Unsupported",
+      "refused": "Permissions: {{level}} · Refused"
+    },
     "applied": "Applied: {{mode}}",
     "pending": "Pending: {{mode}}",
     "unreported": "not reported",
     "refused": "Change refused: {{reason}}",
-    "stats": "Native approval",
-    "sessions": "Sessions with native approval turns",
-    "turns": "Native approval turns",
+    "stats": "Permissions",
+    "sessions": "Sessions",
+    "turns": "Turns",
+    "modeSummary": "{{sessions}} sessions · {{turns}} turns",
     "permissions": "Permissions received by Steve",
     "questions": "Agent questions",
     "resolver": {
@@ -627,7 +661,7 @@ export default {
     designImplement: "Implement this design",
     designKeep: "Keep the design only",
     designRevise: "Revise the design",
-    designGateNote: "Design confirmation is on for this item: whether to implement is your decision, and YOLO won't answer for you.",
+    designGateNote: "Design confirmation is on for this item: whether to implement is your decision, and automatic permissions won't bypass it.",
     answer: "Answer",
     submitting: "Submitting…",
     needsYou: "Needs you",

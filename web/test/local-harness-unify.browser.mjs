@@ -73,7 +73,7 @@ try {
     }
     if (p === "/api/system/models") return route.fulfill({ json: { harness: "claude-code", name: "Claude Code", source: "fixture", default: "claude-opus-4-6", families: ["Claude"], models: [{ id: "claude-opus-4-6", label: "Claude Opus 4.6", family: "Claude", via: null, note: null, efforts: [] }] } })
     if (p === "/api/items/ST-42") return route.fulfill({ json: { id: "ST-42", source: ["对话", "chat"], cwd: "/tmp/acme-api", branch: "steve/st-42", plan: [], goalsList: [{ version: 1, text: "补齐客户端限流", created: now - 60_000 }], planRounds: [], timeline: [], artifacts: [], decisions: [], dependents: [], annotations: [] } })
-    if (p === "/api/approval-policy/sessions/ses_1") return route.fulfill({ json: { session_id: "ses_1", status: "on", target: "auto", applied: "auto", desired: "auto", native_id: "bypassPermissions", refused: "sandbox policy forbids yolo", unknown: false, released: false } })
+    if (p === "/api/permission-policy/sessions/ses_1") return route.fulfill({ json: { policy: "full_access", status: "refused", target: "full_access", applied: "auto", desired: null, native_id: "bypassPermissions", refused: "node ceiling forbids full_access", unknown: false, released: false } })
     if (p === "/api/sessions/ses_1/events") return route.fulfill({ json: { events: [], next: null } })
     if (p === "/api/sessions/ses_1/queued") return route.fulfill({ json: [] })
     if (p === "/api/sessions/ses_1/resume") return route.fulfill({ json: { harness: "claude-code", id: "sess_9f2a1b3c4d", cwd: "/tmp/acme-api", cwd_exists: true, command: "claude --resume sess_9f2a1b3c4d", transcript: null } })
@@ -160,7 +160,7 @@ try {
   assert.equal(rtText.split("Studio Mac mini").length - 1, 1, "Node name appears once in runtime strip")
   assert.equal(await runtimeBar.locator("[data-native-id]").count(), 0, "NativeIdLine moved out of main runtime strip")
   await runtimeBar.locator("[data-approval-refused]").waitFor()
-  assert.match(await runtimeBar.locator("[data-approval-refused]").innerText(), /sandbox policy forbids yolo/, "refusal reason visible inline")
+  assert.match(await runtimeBar.locator("[data-approval-refused]").innerText(), /node ceiling forbids full_access/, "refusal reason visible inline")
   await page.locator("[data-runtime-toggle]").click()
   await page.locator('[data-session-runtime-meta] [data-native-id="sess_9f2a1b3c4d"]').waitFor()
 

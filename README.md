@@ -22,7 +22,7 @@ English · [简体中文](README.zh-CN.md)
 
 - **One chat for all your coding agents** — Coordinate Claude Code, Codex, Antigravity CLI (`agy`), Gemini CLI, Copilot, OpenCode, Cursor, Pi, and 10 more CLIs from one thread.
 - **Isolated worktrees with real delivery records** — Every task runs in its own git branch with a tracked goal, plan, check evidence, and reviewable outputs.
-- **One inbox for every human decision** — Reviews, questions, secret grants, and PR merges land in **Decisions**, with hard safety limits even in YOLO mode.
+- **One inbox for every human decision** — Reviews, questions, secret grants, and PR merges land in **Decisions**, with hard safety limits at every permission level.
 - **Restarts and upgrades never interrupt active runs** — Your local runner stays alive across Hub updates, and you can pair extra Macs or Linux machines anytime.
 - **Your data and secrets stay on your own machines** — Local storage, automatic encrypted backups, and OS-keystore secrets, without ever editing your CLI configs.
 
@@ -74,15 +74,15 @@ See **[docs/architecture.md](docs/architecture.md)** for protocol, storage, proj
 - **Previewable outputs**: Open non-code deliverables in built-in viewers or publish immutable Hub preview links (`steve publish <file|folder>`) with revocable share tokens.
 - **Safe PR merging**: Agents open pull requests and never push to your default branch; Steve merges only after acceptance, green CI, and exact-commit approval ([details](docs/concepts.md#items-and-delivery-semantics)).
 
-### One Decisions inbox and native YOLO
+### One Decisions inbox and three-level Permissions
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/inbox-dark.webp">
   <img src="docs/assets/screenshots/inbox.webp" alt="Steve Decisions inbox consolidating delivery reviews, SHA-pinned PR merge approvals, agent questions, and drafts" width="100%">
 </picture>
 
 - **Single inbox**: Delivery reviews, PR merges, tool permissions, agent questions, secret grants, and outbound drafts land in **Decisions**, with snooze and 24-hour undo.
-- **Native harness approval (YOLO)**: Enables each supported CLI's own auto-approval mode (`claude-code`, `codex`, `goose`, `mistral-vibe`, `antigravity`) without simulating it elsewhere.
-- **Hard boundaries**: Questions, Steve tools, vault secrets, personal sends, design gates, and PR merges always require your confirmation ([details](docs/concepts.md#decisions-single-entry)).
+- **Workspace Permissions (`Ask` / `Auto` / `Full access`)**: Defaults to **Ask**; **Auto** enables each supported CLI's own native auto mode without simulating it elsewhere; **Full access** uses declared full-access modes behind an explicit risk confirmation.
+- **Hard boundaries**: Plan/read-only sessions never widen, Node ceilings hold, and questions, Steve tools, vault secrets, personal sends, design gates, and PR merges always require your confirmation ([details](docs/concepts.md#permissions)).
 
 ### Sessions, subagents, and handoff
 <picture>
@@ -118,26 +118,26 @@ See **[docs/architecture.md](docs/architecture.md)** for protocol, storage, proj
 
 **18 built-in ACP harnesses** ([`builtins.toml`](hub-rs/crates/steve-harness-spec/src/builtins.toml)) plus custom ACP adapters via `harness.json`.
 
-| Harness | ID | Installation | Native YOLO | Runtime adapter |
+| Harness | ID | Installation | Auto / Full access | Runtime adapter |
 |---|---|---|---|---|
-| **Claude Code** | `claude-code` | npm (`@agentclientprotocol/claude-agent-acp`) | Yes (`auto`) | Verified — subagents + cancel, bg tasks, CLI updates |
-| **Codex** | `codex` | npm (`@agentclientprotocol/codex-acp`) | Yes (`agent`) | Verified — subagents + cancel, rollout usage, CLI updates |
-| **Antigravity CLI** | `antigravity` | `PATH` (`agy`) | Yes (`auto`) | Verified — subagents, bg tasks, workflows, `agy update` |
-| **Kimi Code** | `kimi-code` | npm (`@moonshot-ai/kimi-code`) | — | Verified — subagents, bg tasks, CLI updates |
-| **Pi** | `pi` | npm (`@openma/pi-acp` + `@earendil-works/pi-coding-agent`) | Full-access only | Verified — optional `pi-subagents`, CLI updates |
-| **Gemini CLI** | `gemini` | npm (`@google/gemini-cli`) | — | Generic ACP |
-| **GitHub Copilot CLI** | `github-copilot-cli` | npm (`@github/copilot`) | — | Generic ACP |
-| **OpenCode** | `opencode` | npm (`@opencode/cli`) | — | Generic ACP |
-| **Qwen Code** | `qwen-code` | npm (`@qwen-code/qwen-code`) | — | Generic ACP |
-| **goose** | `goose` | npm (`@aaif/goose-acp`) | Yes (`smart_approve`) | Generic ACP |
-| **Grok Build** | `grok-build` | npm (`@xai-official/grok`) | — | Generic ACP |
-| **Kilo Code** | `kilo` | npm (`@kilocode/cli`) | — | Generic ACP |
-| **Factory Droid** | `factory-droid` | npm (`droid`) | — | Generic ACP |
-| **CodeBuddy Code** | `codebuddy-code` | npm (`@tencent-ai/codebuddy-code`) | — | Generic ACP |
-| **Cursor** | `cursor` | `PATH` (`cursor-agent`) | — | Generic ACP |
-| **Kiro CLI** | `kiro` | `PATH` (`kiro-cli`) | — | Generic ACP |
-| **Mistral Vibe** | `mistral-vibe` | `PATH` (`vibe-acp`) | Yes (`smart-approve`) | Generic ACP |
-| **Qoder CLI** | `qoder` | `PATH` (`qodercli`) | — | Generic ACP |
+| **Claude Code** | `claude-code` | npm (`@agentclientprotocol/claude-agent-acp`) | `auto` / `bypassPermissions` | Verified — subagents + cancel, bg tasks, CLI updates |
+| **Codex** | `codex` | npm (`@agentclientprotocol/codex-acp`) | `agent` / `agent-full-access` | Verified — subagents + cancel, rollout usage, CLI updates |
+| **Antigravity CLI** | `antigravity` | `PATH` (`agy`) | Pending #610 | Verified — subagents, bg tasks, workflows, `agy update` |
+| **Kimi Code** | `kimi-code` | npm (`@moonshot-ai/kimi-code`) | — / `auto` | Verified — subagents, bg tasks, CLI updates |
+| **Pi** | `pi` | npm (`@openma/pi-acp` + `@earendil-works/pi-coding-agent`) | — / Full-access only | Verified — optional `pi-subagents`, CLI updates |
+| **Gemini CLI** | `gemini` | npm (`@google/gemini-cli`) | — / Supported | Generic ACP |
+| **GitHub Copilot CLI** | `github-copilot-cli` | npm (`@github/copilot`) | — / `autopilot` | Generic ACP |
+| **OpenCode** | `opencode` | npm (`@opencode/cli`) | — / — | Generic ACP |
+| **Qwen Code** | `qwen-code` | npm (`@qwen-code/qwen-code`) | — / Supported | Generic ACP |
+| **goose** | `goose` | npm (`@aaif/goose-acp`) | `smart_approve` / `auto` | Generic ACP |
+| **Grok Build** | `grok-build` | npm (`@xai-official/grok`) | — / Supported | Generic ACP |
+| **Kilo Code** | `kilo` | npm (`@kilocode/cli`) | — / — | Generic ACP |
+| **Factory Droid** | `factory-droid` | npm (`droid`) | — / `auto-high` | Generic ACP |
+| **CodeBuddy Code** | `codebuddy-code` | npm (`@tencent-ai/codebuddy-code`) | — / `fullAccess` | Generic ACP |
+| **Cursor** | `cursor` | `PATH` (`cursor-agent`) | — / — | Generic ACP |
+| **Kiro CLI** | `kiro` | `PATH` (`kiro-cli`) | — / — | Generic ACP |
+| **Mistral Vibe** | `mistral-vibe` | `PATH` (`vibe-acp`) | `smart-approve` / `auto-approve` | Generic ACP |
+| **Qoder CLI** | `qoder` | `PATH` (`qodercli`) | — / Supported | Generic ACP |
 
 ## Quick start
 
@@ -170,7 +170,7 @@ Open **http://127.0.0.1:8440** (or run `python3 ops/dev.py up` for Vite HMR on `
 | **Coordinator vs Worker Bot** | Steve routes, researches, and coordinates; tracked items run on worker Bots or Teams. |
 | **Item & Delivery** | Tracked work with its own git worktree, plan, tags, outputs, and verified closeout. |
 | **Decisions (`#/inbox`)** | Single inbox for reviews, PR merges, tool approvals, questions, secret grants, and reply drafts. |
-| **Native approval (YOLO)** | Uses each CLI's native auto-approval mode without weakening Steve-level gates. |
+| **Permissions** | Workspace-level Ask / Auto / Full access without weakening Steve-level gates or Node ceilings. |
 | **Same-Bot handoff** | Switches a Bot to its fallback `harness + model + effort` on quota or provider errors. |
 
 Full domain rules live in **[docs/concepts.md](docs/concepts.md)**.

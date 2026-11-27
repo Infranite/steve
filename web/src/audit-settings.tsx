@@ -1,8 +1,8 @@
 import { getItems, getItem } from "@/store"
 /* 设置 · 操作记录: what was changed in this workspace and by whom, newest first: the Hub's audit trail, for the
  * instance's owner, as the affectUI Activity list. An entry reads as a sentence (what · on what), with who did it (you,
- * a Bot on its own, YOLO for you, another member, the Hub) as a dot, grouped by day; the detail its writer kept (and,
- * for YOLO, why it could) opens under it. The filters (by who) and the search work on the pages read so far. An action this page has
+ * a Bot on its own, Steve, another member, the Hub) as a dot, grouped by day; the detail its writer kept opens under it.
+ * The filters (by who) and the search work on the pages read so far. An action this page has
  * no words for goes by its code. */
 import { useEffect, useMemo, useState } from "react"
 import { BotIcon, BrainIcon, CircleCheckIcon, ContactRoundIcon, FolderIcon, HistoryIcon, KeyRoundIcon, ListTodoIcon, LockIcon, SettingsIcon, SparklesIcon, WorkflowIcon } from "lucide-react"

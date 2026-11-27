@@ -22,7 +22,7 @@
 
 - **一个对话管住所有编码智能体** — 在同一条对话里协调 Claude Code、Codex、Antigravity CLI（`agy`）、Gemini CLI、Copilot、OpenCode、Cursor、Pi 等 18 种编码 CLI。
 - **每件事都有独立工作树与交付记录** — 每个事项跑在隔离的 git 分支里，保留目标、计划、检查证据与可审阅的产出。
-- **所有需要你拍板的事集中在一处** — 交付验收、智能体提问、密钥授权与 PR 合并统一收口到**待我决定**；开启原生免批（YOLO）也绝不越过安全边界。
+- **所有需要你拍板的事集中在一处** — 交付验收、智能体提问、密钥授权与 PR 合并统一收口到**待我决定**；任意权限档位下都绝不越过安全边界。
 - **Hub 重启升级不打断正在跑的活** — 本地执行节点独立运行，重启或升级 Hub 时进行中的任务不受影响，还能按需扩展到多台 Mac 和 Linux 机器。
 - **数据与密钥留在你自己的机器上** — 本地存储、自动加密备份与系统密钥库保险箱，且 Steve 从不改动你的编码 CLI 配置文件。
 
@@ -74,15 +74,15 @@ steve setup
 - **可直接审阅的产出**：非代码产出内置预览器查看，也可生成不可变 Hub 预览链接（`steve publish <文件或文件夹>`）与可撤销分享链接。
 - **安全的 PR 合并**：智能体只开 PR、不推默认分支；验收、CI 通过且人工确认精确提交后由 Steve 合并（[详情](docs/concepts.md#items-and-delivery-semantics)）。
 
-### 待我决定与原生免批（YOLO）
+### 待我决定与三档权限
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/screenshots/zh/inbox-dark.webp">
   <img src="docs/assets/screenshots/zh/inbox.webp" alt="Steve 待我决定页：集中呈现交付验收、精确提交 PR 合并审批、智能体提问与外发草稿" width="100%">
 </picture>
 
 - **人工决策单一入口**：验收、PR 合并审批、工具权限、智能体提问、密钥授权与外发草稿全部汇入**待我决定**，支持稍后提醒与 24 小时撤销。
-- **执行器原生免批（YOLO）**：仅对原生支持自动审批的 CLI（`claude-code`、`codex`、`goose`、`mistral-vibe`、`antigravity`）开启原生模式，绝不模拟免批。
-- **明确的安全红线**：智能体提问、Steve 工具、保险箱密钥、个人外发、方案门禁与 PR 合并始终需要人工确认（[详情](docs/concepts.md#decisions-single-entry)）。
+- **工作区权限（询问 / 自动 / 完全放开）**：默认**询问**；**自动**仅向声明原生自动审批的执行器开启原生模式，绝不模拟；**完全放开**使用执行器声明的完全放开模式，切换前需确认风险提示。
+- **明确的安全红线**：Plan 与只读会话永远不放宽，Node 权限上限继续生效；智能体提问、Steve 工具、保险箱密钥、个人外发、方案门禁与 PR 合并始终需要人工确认（[详情](docs/concepts.md#permissions)）。
 
 ### 会话、子代理与自动交接
 <picture>
@@ -118,26 +118,26 @@ steve setup
 
 内置 **18 种 ACP 编码执行器**（[`builtins.toml`](hub-rs/crates/steve-harness-spec/src/builtins.toml)），并支持通过 `harness.json` 接入自定义 ACP 适配器。
 
-| 执行器 | ID | 安装方式 | 原生免批（YOLO） | 运行时适配层 |
+| 执行器 | ID | 安装方式 | 权限（自动 / 完全放开） | 运行时适配层 |
 |---|---|---|---|---|
-| **Claude Code** | `claude-code` | npm（`@agentclientprotocol/claude-agent-acp`） | 支持（`auto`） | 已验证 — 子代理与取消、后台任务、CLI 升级 |
-| **Codex** | `codex` | npm（`@agentclientprotocol/codex-acp`） | 支持（`agent`） | 已验证 — 子代理与取消、rollout 用量、CLI 升级 |
-| **Antigravity CLI** | `antigravity` | `PATH`（`agy`） | 支持（`auto`） | 已验证 — 子代理、后台任务、工作流、`agy update` |
-| **Kimi Code** | `kimi-code` | npm（`@moonshot-ai/kimi-code`） | — | 已验证 — 子代理、后台任务、CLI 升级 |
-| **Pi** | `pi` | npm（`@openma/pi-acp` + `@earendil-works/pi-coding-agent`） | 仅完全访问 | 已验证 — 可选 `pi-subagents`、CLI 升级 |
-| **Gemini CLI** | `gemini` | npm（`@google/gemini-cli`） | — | 通用 ACP |
-| **GitHub Copilot CLI** | `github-copilot-cli` | npm（`@github/copilot`） | — | 通用 ACP |
-| **OpenCode** | `opencode` | npm（`@opencode/cli`） | — | 通用 ACP |
-| **Qwen Code** | `qwen-code` | npm（`@qwen-code/qwen-code`） | — | 通用 ACP |
-| **goose** | `goose` | npm（`@aaif/goose-acp`） | 支持（`smart_approve`） | 通用 ACP |
-| **Grok Build** | `grok-build` | npm（`@xai-official/grok`） | — | 通用 ACP |
-| **Kilo Code** | `kilo` | npm（`@kilocode/cli`） | — | 通用 ACP |
-| **Factory Droid** | `factory-droid` | npm（`droid`） | — | 通用 ACP |
-| **CodeBuddy Code** | `codebuddy-code` | npm（`@tencent-ai/codebuddy-code`） | — | 通用 ACP |
-| **Cursor** | `cursor` | `PATH`（`cursor-agent`） | — | 通用 ACP |
-| **Kiro CLI** | `kiro` | `PATH`（`kiro-cli`） | — | 通用 ACP |
-| **Mistral Vibe** | `mistral-vibe` | `PATH`（`vibe-acp`） | 支持（`smart-approve`） | 通用 ACP |
-| **Qoder CLI** | `qoder` | `PATH`（`qodercli`） | — | 通用 ACP |
+| **Claude Code** | `claude-code` | npm（`@agentclientprotocol/claude-agent-acp`） | `auto` / `bypassPermissions` | 已验证 — 子代理与取消、后台任务、CLI 升级 |
+| **Codex** | `codex` | npm（`@agentclientprotocol/codex-acp`） | `agent` / `agent-full-access` | 已验证 — 子代理与取消、rollout 用量、CLI 升级 |
+| **Antigravity CLI** | `antigravity` | `PATH`（`agy`） | 以 #610 的结论为准 | 已验证 — 子代理、后台任务、工作流、`agy update` |
+| **Kimi Code** | `kimi-code` | npm（`@moonshot-ai/kimi-code`） | — / `auto` | 已验证 — 子代理、后台任务、CLI 升级 |
+| **Pi** | `pi` | npm（`@openma/pi-acp` + `@earendil-works/pi-coding-agent`） | — / 仅完全放开 | 已验证 — 可选 `pi-subagents`、CLI 升级 |
+| **Gemini CLI** | `gemini` | npm（`@google/gemini-cli`） | — / 支持 | 通用 ACP |
+| **GitHub Copilot CLI** | `github-copilot-cli` | npm（`@github/copilot`） | — / `autopilot` | 通用 ACP |
+| **OpenCode** | `opencode` | npm（`@opencode/cli`） | — / — | 通用 ACP |
+| **Qwen Code** | `qwen-code` | npm（`@qwen-code/qwen-code`） | — / 支持 | 通用 ACP |
+| **goose** | `goose` | npm（`@aaif/goose-acp`） | `smart_approve` / `auto` | 通用 ACP |
+| **Grok Build** | `grok-build` | npm（`@xai-official/grok`） | — / 支持 | 通用 ACP |
+| **Kilo Code** | `kilo` | npm（`@kilocode/cli`） | — / — | 通用 ACP |
+| **Factory Droid** | `factory-droid` | npm（`droid`） | — / `auto-high` | 通用 ACP |
+| **CodeBuddy Code** | `codebuddy-code` | npm（`@tencent-ai/codebuddy-code`） | — / `fullAccess` | 通用 ACP |
+| **Cursor** | `cursor` | `PATH`（`cursor-agent`） | — / — | 通用 ACP |
+| **Kiro CLI** | `kiro` | `PATH`（`kiro-cli`） | — / — | 通用 ACP |
+| **Mistral Vibe** | `mistral-vibe` | `PATH`（`vibe-acp`） | `smart-approve` / `auto-approve` | 通用 ACP |
+| **Qoder CLI** | `qoder` | `PATH`（`qodercli`） | — / 支持 | 通用 ACP |
 
 ## 快速开始
 
@@ -170,7 +170,7 @@ STEVE_HOME="$HOME/.steve-dev" STEVE_DEV_LOGIN=1 STEVE_HOST=127.0.0.1 STEVE_PORT=
 | **协调者与工作 Bot** | Steve 负责路由、调研与协调，具体事项交由工作 Bot 或团队执行。 |
 | **事项与交付** | 拥有独立工作树、计划、标签、产出与收尾核验的可追踪工作单元。 |
 | **待我决定（`#/inbox`）** | 验收、PR 合并、工具权限、提问、密钥授权与外发草稿的唯一人工入口。 |
-| **原生免批（YOLO）** | 仅向支持原生自动审批的执行器下发原生模式，不放宽 Steve 层门禁。 |
+| **工作区权限** | 提供询问 / 自动 / 完全放开三档，不放宽 Steve 层门禁与 Node 上限。 |
 | **同 Bot 自动交接** | 额度或服务异常时保留 Bot 身份，仅切换其备选 `harness + model + effort`。 |
 
 完整领域规则见 **[docs/concepts.md](docs/concepts.md)**（英文）。

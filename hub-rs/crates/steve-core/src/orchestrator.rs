@@ -2509,7 +2509,7 @@ impl Tx<'_> {
         use crate::approval::{Outcome, Question, Request};
         // A question has its own policy on the same port.
         let resolution = crate::approval::resolve(
-            steve_types::ApprovalMode::AskOwner,
+            steve_types::ApprovalMode::Ask,
             None,
             Request::Question(Question {
                 text: question,
