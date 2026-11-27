@@ -475,6 +475,39 @@ where
         self.inner.insert(key, value).await;
     }
 }
+/// [`TtlCache`] for synchronous readers, such as code holding a store transaction, that must
+/// not await.
+#[derive(Clone)]
+pub struct SyncTtlCache<K, V> {
+    inner: moka::sync::Cache<K, V>,
+}
+
+impl<K, V> SyncTtlCache<K, V>
+where
+    K: Hash + Eq + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    pub fn new(max_capacity: u64, ttl: Duration) -> Self {
+        Self {
+            inner: moka::sync::Cache::builder()
+                .max_capacity(max_capacity)
+                .time_to_live(ttl)
+                .build(),
+        }
+    }
+
+    pub fn get<Q>(&self, key: &Q) -> Option<V>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: Hash + Eq + ?Sized,
+    {
+        self.inner.get(key)
+    }
+
+    pub fn insert(&self, key: K, value: V) {
+        self.inner.insert(key, value);
+    }
+}
 #[cfg(test)]
 #[path = "cache/tests.rs"]
 mod tests;

@@ -20,17 +20,18 @@
 
 #[cfg(test)]
 use serde_json::Value;
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Bounded timeout for async colocated Node `path_check` probes before entering Core's lock.
 const CWD_CHECK_TIMEOUT: Duration = Duration::from_secs(2);
-/// Short TTL for cached colocated Node `cwd_usable` results read inside Core's lock.
+/// How long a `cwd_usable` answer read inside Core's lock may be reused: long enough to cover
+/// one flush of queued messages after its prefetch, short enough that a directory removed since
+/// is noticed on the next attempt.
 const CWD_CACHE_TTL: Duration = Duration::from_secs(5);
-/// Hard cap on cached `cwd_usable` entries to prevent unbounded memory growth.
-const CWD_CACHE_MAX_ENTRIES: usize = 256;
+/// Distinct working directories remembered at once; one per active colocated session is plenty.
+const CWD_CACHE_MAX_ENTRIES: u64 = 256;
 
 use steve_node_api::*;
 use steve_store::{Read, Store, StoreError, node_sessions::placements};
@@ -168,7 +169,7 @@ pub struct Workspaces {
     rebuild: Mutex<()>,
     /// Bounded TTL cache of colocated Node `path_check` usability results populated asynchronously
     /// outside Core's lock so [`crate::wire::core::RoutedRuntime::cwd_usable`] never blocks on RPC.
-    cwd_cache: Mutex<HashMap<String, (bool, Instant)>>,
+    cwd_cache: steve_runtime::cache::SyncTtlCache<String, bool>,
 }
 
 /// Where a thing is, as the store says, before any Node is asked.
@@ -190,7 +191,10 @@ impl Workspaces {
             fleet,
             extra,
             rebuild: Mutex::new(()),
-            cwd_cache: Mutex::new(HashMap::new()),
+            cwd_cache: steve_runtime::cache::SyncTtlCache::new(
+                CWD_CACHE_MAX_ENTRIES,
+                CWD_CACHE_TTL,
+            ),
         })
     }
 
@@ -214,7 +218,7 @@ impl Workspaces {
         {
             Ok(Ok(resp)) => {
                 let usable = resp.exists && resp.is_dir && resp.writable;
-                self.record_cwd_usable(cwd, usable);
+                self.cwd_cache.insert(cwd.to_string(), usable);
                 usable
             }
             _ => true,
@@ -223,27 +227,7 @@ impl Workspaces {
 
     /// Non-blocking cache lookup for [`crate::wire::core::RoutedRuntime::cwd_usable`].
     pub fn cached_cwd_usable(&self, cwd: &str) -> Option<bool> {
-        let now = Instant::now();
-        let mut cache = self.cwd_cache.lock().unwrap_or_else(|e| e.into_inner());
-        let (usable, at) = *cache.get(cwd)?;
-        if now.saturating_duration_since(at) <= CWD_CACHE_TTL {
-            Some(usable)
-        } else {
-            cache.remove(cwd);
-            None
-        }
-    }
-
-    fn record_cwd_usable(&self, cwd: &str, usable: bool) {
-        let now = Instant::now();
-        let mut cache = self.cwd_cache.lock().unwrap_or_else(|e| e.into_inner());
-        if cache.len() >= CWD_CACHE_MAX_ENTRIES && !cache.contains_key(cwd) {
-            cache.retain(|_, (_, at)| now.saturating_duration_since(*at) <= CWD_CACHE_TTL);
-            if cache.len() >= CWD_CACHE_MAX_ENTRIES {
-                cache.clear();
-            }
-        }
-        cache.insert(cwd.to_string(), (usable, now));
+        self.cwd_cache.get(cwd)
     }
 
     /// The Node and the place of `what`.
