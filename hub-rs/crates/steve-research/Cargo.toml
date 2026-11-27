@@ -8,7 +8,6 @@ description = "Inline read-only research for the main thread: the run policy, th
 [dependencies]
 steve-confine = { path = "../steve-confine" }
 base64 = "=0.23.1"
-regex = "=1.13.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
 thiserror = "=2.0.21"

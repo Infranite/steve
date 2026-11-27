@@ -840,11 +840,31 @@ pub struct NewTag {
     pub description: String,
 }
 
+/// Maximum characters kept for an OFFER title.
+pub const MAX_OFFER_TITLE_CHARS: usize = 40;
+/// Maximum characters kept for Steve's one-sentence OFFER bot-selection rationale.
+pub const MAX_OFFER_WHY_CHARS: usize = 200;
+
 /// Work an answer or research run leads to; the user decides whether it becomes an item.
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Offer {
     pub title: String,
     pub goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+impl Offer {
+    pub fn new(title: impl Into<String>, goal: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            goal: goal.into(),
+            bot: None,
+            why: None,
+        }
+    }
 }
 
 /// The router's decision for a message.
@@ -1159,40 +1179,59 @@ pub fn strip_tag_note(reply: &str) -> String {
     TAG_NOTE.replace_all(reply, "").trim().to_string()
 }
 
-/// An `{title, goal}` object as an [`Offer`]; `None` without a title.
+/// An `{title, goal, bot?, why?}` object as an [`Offer`]; `None` without a title.
 pub fn offer_of(o: &Value) -> Option<Offer> {
     if !o.is_object() {
         return None;
     }
     let title = o.get("title").map(jstr).unwrap_or_default();
     let title = title.trim();
-    (!title.is_empty()).then(|| Offer {
-        title: js_head(title, 40).to_string(),
-        goal: match o.get("goal").map(jstr) {
-            Some(g) if !g.trim().is_empty() => g.trim().to_string(),
-            _ => title.to_string(),
-        },
+    if title.is_empty() {
+        return None;
+    }
+    let goal = match o.get("goal").map(jstr) {
+        Some(g) if !g.trim().is_empty() => g.trim().to_string(),
+        _ => title.to_string(),
+    };
+    let bot = o
+        .get("bot")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let why = o
+        .get("why")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| js_head(s, MAX_OFFER_WHY_CHARS).to_string());
+    Some(Offer {
+        title: js_head(title, MAX_OFFER_TITLE_CHARS).to_string(),
+        goal,
+        bot,
+        why,
     })
 }
 
-/// The answer without its closing `OFFER: {…}` line, and the offer it names.
+/// Lift standalone `OFFER: {…}` JSON lines from an answer, returning the cleaned text and the
+/// last valid [`Offer`]. Non-JSON lines and inline mentions of `OFFER:` stay untouched.
 pub fn split_offer(text: &str) -> (String, Option<Offer>) {
-    let t = text.trim_end();
-    let Some(at) = t.rfind("OFFER:") else {
-        return (t.to_string(), None);
-    };
-    let line_start = t[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    if !t[line_start..at].trim().is_empty() {
-        return (t.to_string(), None);
+    let mut offer = None;
+    let mut kept: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("OFFER:")
+            && let Some(parsed) = serde_json::from_str::<Value>(rest.trim())
+                .ok()
+                .as_ref()
+                .and_then(offer_of)
+        {
+            offer = Some(parsed);
+            continue;
+        }
+        kept.push(line);
     }
-    let offer = serde_json::from_str::<Value>(t[at + "OFFER:".len()..].trim())
-        .ok()
-        .as_ref()
-        .and_then(offer_of);
-    match offer {
-        Some(o) => (t[..line_start].trim_end().to_string(), Some(o)),
-        None => (t.to_string(), None),
-    }
+    (kept.join("\n").trim_end().to_string(), offer)
 }
 
 /// Validate a router reply against what exists; `None` when it is unusable (the caller falls back).
@@ -2433,13 +2472,7 @@ mod tests {
         assert_eq!(r.kind, "research");
         assert_eq!(r.confidence, 0.82);
         assert_eq!(r.signals, vec!["question", "lookup"]);
-        assert_eq!(
-            r.offer,
-            Some(Offer {
-                title: "修评论渲染".into(),
-                goal: "修评论渲染".into()
-            })
-        );
+        assert_eq!(r.offer, Some(Offer::new("修评论渲染", "修评论渲染")));
         let r = parse_route(&c, "x", r#"{"kind":"answer"}"#, false).unwrap();
         assert_eq!((r.kind.as_str(), r.confidence), ("answer", 0.5));
         let r = parse_route(
@@ -2502,10 +2535,13 @@ mod tests {
     #[test]
     fn an_offer_line_is_taken_off_the_answer() {
         let (t, o) = split_offer(
-            "结论在前。\n\n细节。\nOFFER: {\"title\":\"修评论\",\"goal\":\"让评论支持 markdown\"}\n",
+            "结论在前。\n\n细节。\nOFFER: {\"title\":\"修评论\",\"goal\":\"让评论支持 markdown\",\"bot\":\"dev\",\"why\":\"熟悉前端渲染\"}\n",
         );
         assert_eq!(t, "结论在前。\n\n细节。");
-        assert_eq!(o.unwrap().goal, "让评论支持 markdown");
+        let o = o.unwrap();
+        assert_eq!(o.goal, "让评论支持 markdown");
+        assert_eq!(o.bot.as_deref(), Some("dev"));
+        assert_eq!(o.why.as_deref(), Some("熟悉前端渲染"));
         let (t, o) = split_offer("说到 OFFER: 这个词");
         assert_eq!((t.as_str(), o), ("说到 OFFER: 这个词", None));
         let (t, o) = split_offer("答\nOFFER: 不是 JSON");

@@ -811,7 +811,7 @@ impl Core {
                 } else {
                     r.goal.clone()
                 };
-                d.offer = Some(crate::gateway::Offer { title, goal });
+                d.offer = Some(crate::gateway::Offer::new(title, goal));
             }
         }
         if let Some(g) = det_guard {
@@ -924,7 +924,7 @@ impl Core {
                         } else {
                             r.goal.clone()
                         };
-                        info.offer = Some(crate::gateway::Offer { title, goal });
+                        info.offer = Some(crate::gateway::Offer::new(title, goal));
                     }
                     return self
                         .execute_inline(task, lease, stop, conv, text, &files, info, t0)

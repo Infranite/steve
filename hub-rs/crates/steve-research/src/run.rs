@@ -1,8 +1,7 @@
-//! A research run's policy, shared by the Hub and the Node: its limits, the attempts it makes in
-//! order ([`plan`], [`drive`]), how it ended and what the thread shows of it ([`present`]). Each
-//! attempt runs as a one-shot ACP call on a Node (`steve-node`'s research jobs).
+//! A research run's policy on the Node: its limits, the attempts it makes in order ([`plan`],
+//! [`drive`]), and how it ended. Each attempt runs as a one-shot ACP call (`steve-node`'s
+//! research jobs).
 
-use crate::answer::{self, Citation, Offer};
 use crate::guard::Violation;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -223,7 +222,7 @@ impl RunStatus {
     }
 }
 
-/// The result of a run.
+/// The result of a run on the Node.
 #[derive(Debug, Clone)]
 pub struct ResearchOutcome {
     pub run_id: String,
@@ -232,11 +231,6 @@ pub struct ResearchOutcome {
     pub model: Option<String>,
     /// The adapter's session id, to continue the run with (`session/load`).
     pub session: Option<String>,
-    /// What the thread shows: the answer (or the part written before the end) without the `OFFER:` line,
-    /// with the end mark of a stopped, cut or violating run.
-    pub answer: String,
-    pub offer: Option<Offer>,
-    pub citations: Vec<Citation>,
     /// Files the run read successfully, relative to its cwd when inside it.
     pub files_read: Vec<String>,
     pub turns: u32,
@@ -244,8 +238,8 @@ pub struct ResearchOutcome {
     pub first_text_ms: Option<u64>,
     /// Whether the harness ran under the system sandbox.
     pub sandboxed: bool,
-    /// What the model wrote before the answer was shaped: the final turn's text, or the part
-    /// written until the end ([`present`] turns it into `answer`, `offer` and `citations`).
+    /// What the model wrote before the Hub shapes it: the final turn's text, or the part
+    /// written until the end.
     pub raw: String,
 }
 
@@ -257,9 +251,6 @@ impl ResearchOutcome {
             status: RunStatus::Failed(err.into()),
             model: None,
             session: None,
-            answer: String::new(),
-            offer: None,
-            citations: Vec::new(),
             files_read: Vec::new(),
             turns: 0,
             ms: 0,
@@ -369,29 +360,6 @@ pub async fn drive<R: AttemptRunner>(plans: &[AttemptPlan], runner: &mut R) -> S
         tracing::warn!(model = %p.model, error = %last_err, "research attempt failed, trying the next");
     }
     last_err
-}
-
-/// What the thread shows for a run that ended with `status` after writing `raw`: the answer without
-/// its `OFFER:` line and with the end mark of a stopped, cut or violating run, the offer (a cut run
-/// offers to go deeper into `question`) and the citations of the files it read.
-pub fn present(
-    status: &RunStatus,
-    raw: &str,
-    question: &str,
-    files_read: &[String],
-) -> (String, Option<Offer>, Vec<Citation>) {
-    let (mut text, mut offer) = answer::split_offer(raw);
-    match status {
-        RunStatus::Stopped => text = answer::with_mark(&text, answer::MARK_STOPPED),
-        RunStatus::Budget(_) => {
-            text = answer::with_mark(&text, answer::MARK_BUDGET);
-            offer = offer.or_else(|| Some(answer::deeper_offer(question)));
-        }
-        RunStatus::Violated(_) => text = answer::with_mark(&text, answer::MARK_VIOLATION),
-        _ => {}
-    }
-    let citations = answer::citations(&text, files_read);
-    (text, offer, citations)
 }
 
 #[cfg(test)]
