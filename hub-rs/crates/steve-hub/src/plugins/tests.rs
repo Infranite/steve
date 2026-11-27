@@ -258,3 +258,14 @@ async fn a_theme_plugin_is_installed_for_the_web_client_and_never_runs() {
     assert!(matches!(e, Refused::Rule(400, _)), "{e:?}");
     assert!(p.installed("themes", "broken").is_none());
 }
+
+#[test]
+fn plugins_normalizes_relative_steve_home_to_an_absolute_path() {
+    let p = Plugins::new(
+        Path::new("relative-steve-home-for-test"),
+        Some("off".into()),
+    )
+    .unwrap();
+    assert!(p.0.dir.is_absolute(), "{}", p.0.dir.display());
+    assert!(p.0.dir.ends_with("relative-steve-home-for-test/plugins"));
+}

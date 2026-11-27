@@ -571,7 +571,9 @@ fn verify(dir: &Path, want: &BuildIdentity) -> anyhow::Result<()> {
             meta.is_file() && meta.permissions().mode() & 0o111 != 0,
             "{name} is not an executable file"
         );
-        let out = std::process::Command::new(&bin)
+        let program = steve_runtime::process::resolve_program(bin.as_os_str(), None, None)
+            .with_context(|| format!("resolving {name}"))?;
+        let out = std::process::Command::new(&program)
             .arg("--build-info")
             .env_clear()
             .stdin(std::process::Stdio::null())
@@ -611,32 +613,22 @@ pub(crate) fn spawn_detached(home: &Path, args: &[&str], name: &str) -> std::io:
     let systemd =
         std::env::var_os("INVOCATION_ID").is_some() && Path::new("/usr/bin/systemd-run").exists();
     let mut cmd = if systemd {
-        let mut c = std::process::Command::new("/usr/bin/systemd-run");
+        let mut c = steve_runtime::process::DetachedCommand::new("/usr/bin/systemd-run");
         c.args(["--user", "--scope", "--collect", "--quiet"])
             .arg(format!("--unit=steve-node-{name}"))
             .arg(&exe);
         c
     } else {
-        std::process::Command::new(&exe)
+        steve_runtime::process::DetachedCommand::new(&exe)
     };
-    cmd.args(args)
-        .env("STEVE_HOME", home)
-        .stdin(std::process::Stdio::null())
-        .stdout(log.try_clone()?)
-        .stderr(log);
-    {
-        use std::os::unix::process::CommandExt;
-        // SAFETY: setsid only, between fork and exec
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    cmd.spawn().map(|_| ())
+    cmd.args(args).env("STEVE_HOME", home);
+    steve_runtime::process::spawn_detached(
+        &cmd,
+        steve_runtime::process::DetachedStdio::Null,
+        steve_runtime::process::DetachedStdio::File(&log),
+        steve_runtime::process::DetachedStdio::File(&log),
+    )
+    .map(|_| ())
 }
 
 /// What the switch does to the service, as `steve node stop|update|start` do it.

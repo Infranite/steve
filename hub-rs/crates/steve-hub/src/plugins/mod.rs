@@ -264,6 +264,7 @@ impl Plugins {
     /// `home` is `STEVE_HOME`; `first` the library a new installation starts with
     /// ([`LIBRARY_VAR`], else [`OFFICIAL_LIBRARY`]).
     pub fn new(home: &Path, first: Option<String>) -> Result<Plugins> {
+        let home = crate::config::resolve(home);
         let first = match first.as_deref().map(str::trim) {
             Some("off") | Some("") => None,
             Some(a) => Some(a.to_string()),
