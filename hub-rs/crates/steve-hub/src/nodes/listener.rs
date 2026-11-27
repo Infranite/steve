@@ -384,6 +384,8 @@ fn start_ordinary(
             Some(rt) => tokio::spawn(reconcile_again(rt, remote.clone(), conn.clone())),
             None => tokio::spawn(catch_up(svc.store.clone(), remote.clone(), conn.clone())),
         };
+    } else if let Some(rt) = svc.fleet.runtime_for(node.as_str()) {
+        rt.notify_linked();
     }
 }
 

@@ -1337,6 +1337,83 @@ async fn upgrade_only_node_skips_reconcile_until_normal_link() {
     norm_peer_conn.close(None, steve_node_wire::close::GOODBYE, "test done");
 }
 
+#[tokio::test]
+async fn notify_linked_wakes_initial_reconcile_without_waiting_for_five_second_tick() {
+    use steve_node_api::upgrade_v1;
+    use steve_node_wire::{Conn, ConnOptions, Handler, NodeServer, RemoteNode};
+
+    struct Noop;
+    #[async_trait]
+    impl Handler for Noop {
+        async fn handle(&self, _method: &str, _params: Value) -> ApiResult<Value> {
+            Ok(json!({}))
+        }
+    }
+
+    let (_dir, fake, original, seen) = retry_fixture();
+    let t0 = steve_store::now();
+    let clock = Arc::new(FakeClock::new(t0));
+    let remote = RemoteNode::new(NodeId::new("n_boot").unwrap());
+    let rt = NodeRuntime::with_clock(original.store.clone(), remote.clone(), seen, clock.clone());
+    let mut ledger = rt.subscribe_ledger();
+    rt.start();
+
+    // Let the initial reconcile attempt fail with `Unavailable` and park on the 5s retry sleep.
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        !rt.is_reconciled(),
+        "unlinked node must remain unreconciled before link attach"
+    );
+
+    let (hub_end, peer_end) = steve_node_wire::testkit::pair();
+    let peer_conn = Conn::spawn(
+        peer_end.sink,
+        peer_end.stream,
+        1,
+        NodeServer::new(fake),
+        ConnOptions {
+            heartbeat: Duration::from_secs(600),
+            dead_after: Duration::from_secs(600),
+            side: "n",
+            mode: upgrade_v1::Mode::Normal,
+        },
+    );
+    let hub_conn = Conn::spawn(
+        hub_end.sink,
+        hub_end.stream,
+        1,
+        Arc::new(Noop),
+        ConnOptions {
+            heartbeat: Duration::from_secs(600),
+            dead_after: Duration::from_secs(600),
+            side: "h",
+            mode: upgrade_v1::Mode::Normal,
+        },
+    );
+    assert!(remote.attach(hub_conn.clone(), false));
+    rt.notify_linked();
+
+    // Never advance `FakeClock`: reconciliation must wake immediately from `notify_linked` and
+    // publish a ledger revision when `reconciled` flips to true.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !rt.is_reconciled() {
+            ledger.changed().await.expect("ledger channel open");
+        }
+    })
+    .await
+    .expect("notify_linked must wake initial reconcile without waiting for the 5s timer");
+    assert_eq!(
+        clock.now(),
+        t0,
+        "FakeClock must not have advanced during event-driven reconciliation"
+    );
+
+    hub_conn.close(None, steve_node_wire::close::GOODBYE, "test done");
+    peer_conn.close(None, steve_node_wire::close::GOODBYE, "test done");
+}
+
 async fn start_reconciled_turn() -> (
     tempfile::TempDir,
     Arc<FakeNode>,

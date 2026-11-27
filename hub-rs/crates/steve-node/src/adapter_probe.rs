@@ -284,11 +284,47 @@ fn missing_command_diagnostic(
     }
 }
 
+/// Cached result of one Node adapter discovery pass: per-adapter ACP probes, the login-shell
+/// `PATH` diagnostic (when any adapter is missing), and the single shared Node.js runtime probe.
+#[derive(Clone, Default)]
+pub(crate) struct ProbeSnapshot {
+    pub(crate) adapters: HashMap<String, Probe>,
+    pub(crate) login_env: Option<LoginShellEnv>,
+    pub(crate) node_runtime: Option<crate::adapter_setup::NodeRuntimeProbe>,
+}
+
+async fn probe_adapters(cfg: &AcpConfig, cwd: &Path) -> HashMap<String, Probe> {
+    let ids: Vec<String> = cfg
+        .adapter_ids()
+        .into_iter()
+        .filter(|id| cfg.adapter_properties(id).probe_initialize)
+        .collect();
+    // the scratch sessions' directory: one of the Node's own, the same every time
+    let cwd = cwd.join("probe");
+    let _ = std::fs::create_dir_all(&cwd);
+    let mut set = tokio::task::JoinSet::new();
+    for id in ids {
+        let cfg = cfg.clone();
+        let cwd = cwd.clone();
+        set.spawn(async move {
+            let p = steve_acp::adapters::probe(&cfg, &id, &cwd, INITIALIZE).await;
+            (id, p)
+        });
+    }
+    let mut v = HashMap::new();
+    while let Some(r) = set.join_next().await {
+        if let Ok((id, p)) = r {
+            v.insert(id, p);
+        }
+    }
+    v
+}
+
 #[derive(Default)]
-pub(crate) struct AdapterProbes(tokio::sync::Mutex<Option<(Instant, HashMap<String, Probe>)>>);
+pub(crate) struct AdapterProbes(tokio::sync::Mutex<Option<(Instant, ProbeSnapshot)>>);
 
 impl AdapterProbes {
-    pub(crate) async fn cached(&self) -> HashMap<String, Probe> {
+    pub(crate) async fn cached(&self) -> ProbeSnapshot {
         self.0
             .lock()
             .await
@@ -296,17 +332,17 @@ impl AdapterProbes {
             .map(|(_, v)| v.clone())
             .unwrap_or_default()
     }
-    /// The next [`Self::get`] asks the adapters again.
+    /// The next [`Self::get_snapshot`] asks the adapters and host environment again.
     pub(crate) async fn forget(&self) {
         *self.0.lock().await = None;
     }
 
-    pub(crate) async fn get(
+    pub(crate) async fn get_snapshot(
         &self,
         cfg: &AcpConfig,
         cwd: &Path,
         fresh: bool,
-    ) -> HashMap<String, Probe> {
+    ) -> ProbeSnapshot {
         let mut last = self.0.lock().await;
         if !fresh
             && let Some((at, v)) = last.as_ref()
@@ -314,31 +350,57 @@ impl AdapterProbes {
         {
             return v.clone();
         }
-        let ids: Vec<String> = cfg
-            .adapter_ids()
-            .into_iter()
-            .filter(|id| cfg.adapter_properties(id).probe_initialize)
-            .collect();
-        // the scratch sessions' directory: one of the Node's own, the same every time
-        let cwd = cwd.join("probe");
-        let _ = std::fs::create_dir_all(&cwd);
-        let mut set = tokio::task::JoinSet::new();
-        for id in ids {
-            let cfg = cfg.clone();
-            let cwd = cwd.clone();
-            set.spawn(async move {
-                let p = steve_acp::adapters::probe(&cfg, &id, &cwd, INITIALIZE).await;
-                (id, p)
-            });
-        }
-        let mut v = HashMap::new();
-        while let Some(r) = set.join_next().await {
-            if let Ok((id, p)) = r {
-                v.insert(id, p);
+        let needs_node_runtime = cfg
+            .adapters
+            .keys()
+            .any(|id| !steve_harness_spec::components(id).is_empty());
+        let (adapters, node_runtime) = tokio::join!(probe_adapters(cfg, cwd), async {
+            if needs_node_runtime {
+                Some(crate::adapter_setup::probe_node_runtime(cfg).await)
+            } else {
+                None
             }
+        });
+        let any_adapter_missing = adapters
+            .values()
+            .any(|p| p.status == ProbeStatus::AdapterMissing);
+        let login_env = if any_adapter_missing {
+            probe_login_shell_env().await
+        } else {
+            None
+        };
+        let snapshot = ProbeSnapshot {
+            adapters,
+            login_env,
+            node_runtime,
+        };
+        *last = Some((Instant::now(), snapshot.clone()));
+        snapshot
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn get(
+        &self,
+        cfg: &AcpConfig,
+        cwd: &Path,
+        fresh: bool,
+    ) -> HashMap<String, Probe> {
+        if !fresh
+            && let Some((at, v)) = self.0.lock().await.as_ref()
+            && at.elapsed() < TTL
+        {
+            return v.adapters.clone();
         }
-        *last = Some((Instant::now(), v.clone()));
-        v
+        let adapters = probe_adapters(cfg, cwd).await;
+        *self.0.lock().await = Some((
+            Instant::now(),
+            ProbeSnapshot {
+                adapters: adapters.clone(),
+                login_env: None,
+                node_runtime: None,
+            },
+        ));
+        adapters
     }
 }
 
@@ -1054,5 +1116,82 @@ exec /bin/sh -c "$script"
         );
         assert_eq!(unexec_info.status, AdapterStatus::InitializeFailed);
         assert!(unexec_info.missing_command.is_none());
+    }
+
+    /// `get_snapshot` probes `node --version` once across all component-bearing harnesses and
+    /// serves cached subsequent `fresh = false` reads without spawning `node` again until
+    /// `forget()` or `fresh = true`.
+    #[tokio::test]
+    async fn probe_snapshot_probes_node_version_once_and_caches_subsequent_reads() {
+        let dir = tempfile::tempdir().unwrap();
+        let count_file = dir.path().join("node-calls.log");
+        let fake_node = dir.path().join("node");
+        write_exec(
+            &fake_node,
+            &format!(
+                "#!/bin/sh\nprintf 'x\\n' >> '{}'\nprintf 'v22.5.0\\n'\n",
+                count_file.display()
+            ),
+        );
+        let fake_npm = dir.path().join("npm");
+        write_exec(&fake_npm, "#!/bin/sh\nexit 0\n");
+
+        // Configure multiple built-in harnesses that declare managed npm components, each with
+        // an existing crashing adapter binary so `probe_adapters` reports `InitializeFailed`
+        // (not `AdapterMissing`, keeping this unit test independent of the host login shell).
+        let crashing = dir.path().join("crashing-adapter");
+        write_exec(&crashing, "#!/bin/sh\nexit 1\n");
+        let cfg = AcpConfig {
+            adapters: HashMap::from([
+                ("claude".into(), crashing.clone()),
+                ("codex".into(), crashing.clone()),
+                ("pi".into(), crashing),
+            ]),
+            declared: HashMap::new(),
+            node: fake_node,
+            claude_executable: "/usr/bin/false".into(),
+            claude_config_dir: None,
+            steve_home: dir.path().join("steve"),
+            codex_home: dir.path().join("codex"),
+            user_home: dir.path().to_path_buf(),
+            version: "test".into(),
+        };
+
+        let calls = || {
+            std::fs::read_to_string(&count_file)
+                .map(|s| s.lines().count())
+                .unwrap_or(0)
+        };
+        let probes = AdapterProbes::default();
+
+        let first = probes.get_snapshot(&cfg, dir.path(), false).await;
+        assert_eq!(
+            calls(),
+            1,
+            "node --version must run once across all component harnesses, not once per harness"
+        );
+        let node_runtime = first.node_runtime.as_ref().expect("node runtime probed");
+        let req = crate::adapter_setup::requirements_from(node_runtime, "claude");
+        assert!(
+            req.node_error.is_none() && req.npm_error.is_none(),
+            "fake node v22.5.0 + npm beside it should satisfy requirements: node={:?} npm={:?}",
+            req.node_error,
+            req.npm_error
+        );
+
+        let _cached = probes.get_snapshot(&cfg, dir.path(), false).await;
+        assert_eq!(
+            calls(),
+            1,
+            "cached fresh=false probe must not re-run node --version"
+        );
+
+        probes.forget().await;
+        let _after_forget = probes.get_snapshot(&cfg, dir.path(), false).await;
+        assert_eq!(
+            calls(),
+            2,
+            "forget() must invalidate cached node runtime probe"
+        );
     }
 }

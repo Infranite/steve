@@ -503,6 +503,9 @@ pub(crate) mod test_local_node {
         let remote = svc.fleet.remote(&node_id);
         assert!(remote.attach(hub_conn.clone(), false));
         svc.fleet.linked(&node_id, steve_node_api::PROTOCOL);
+        if let Some(rt) = svc.fleet.runtime_for(local_service::NODE_ID) {
+            rt.notify_linked();
+        }
 
         AttachedLocalNode {
             node: local,

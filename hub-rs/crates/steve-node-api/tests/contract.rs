@@ -1269,3 +1269,167 @@ fn a_worktree_target_is_optional_on_the_wire() {
     assert_eq!(serde_json::from_value::<PrepareKind>(v).unwrap(), at);
     assert_ne!(digest_of(&at).unwrap(), digest_of(&k).unwrap());
 }
+
+#[tokio::test]
+async fn recording_sink_contiguous_events_waits_for_missing_sequence_and_notifies_on_commit() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let sink = RecordingSink::default();
+    let commits = Arc::new(AtomicUsize::new(0));
+    let commits_cb = commits.clone();
+    sink.on_commit(move || {
+        commits_cb.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let stream = StreamId::new("session_gap_test").unwrap();
+    let epoch = Epoch::new("e1").unwrap();
+    let exec = exec_turn("s_1", "t_1", "a_1");
+    let ev1 = NodeEvent {
+        schema: EVENT_SCHEMA,
+        id: EventId::new("ev_1").unwrap(),
+        at: Timestamp(1_000),
+        cursor: Watermark {
+            stream: stream.clone(),
+            epoch: epoch.clone(),
+            seq: 1,
+        },
+        subject: Subject::Execution(exec.clone()),
+        body: EventBody::TextDelta {
+            message: "m1".into(),
+            block: "b1".into(),
+            utf8_offset: 0,
+            text: "cat:EPERM ".into(),
+        },
+    };
+    let ev2 = NodeEvent {
+        schema: EVENT_SCHEMA,
+        id: EventId::new("ev_2").unwrap(),
+        at: Timestamp(1_001),
+        cursor: Watermark {
+            stream,
+            epoch,
+            seq: 2,
+        },
+        subject: Subject::Execution(exec),
+        body: EventBody::AttemptEnded { completion: done() },
+    };
+
+    // Out-of-order seq=2 arrives before seq=1: held raw, excluded from contiguous prefix.
+    let ack2 = sink.commit(EventBatch { events: vec![ev2] }).await.unwrap();
+    assert!(ack2.durable.is_empty());
+    assert_eq!(sink.events().len(), 1);
+    assert!(sink.contiguous_events().is_empty());
+    assert_eq!(commits.load(Ordering::SeqCst), 1);
+
+    // Once seq=1 arrives, both events become contiguously visible in stream order.
+    let ack1 = sink.commit(EventBatch { events: vec![ev1] }).await.unwrap();
+    assert_eq!(ack1.durable.len(), 1);
+    assert_eq!(ack1.durable[0].seq, 2);
+    assert_eq!(sink.contiguous_events().len(), 2);
+    assert_eq!(commits.load(Ordering::SeqCst), 2);
+}
+
+#[tokio::test]
+async fn fake_node_delivers_concurrent_events_in_record_order() {
+    use std::sync::Mutex;
+    use std::task::{Poll, Waker};
+
+    #[derive(Default)]
+    struct Latch(Mutex<(bool, Option<Waker>)>);
+    impl Latch {
+        fn set(&self) {
+            let waker = {
+                let mut g = self.0.lock().unwrap();
+                g.0 = true;
+                g.1.take()
+            };
+            if let Some(w) = waker {
+                w.wake();
+            }
+        }
+        async fn wait(&self) {
+            std::future::poll_fn(|cx| {
+                let mut g = self.0.lock().unwrap();
+                if g.0 {
+                    Poll::Ready(())
+                } else {
+                    g.1 = Some(cx.waker().clone());
+                    Poll::Pending
+                }
+            })
+            .await;
+        }
+    }
+
+    struct SlowFirstCommit {
+        seen_seqs: Mutex<Vec<u64>>,
+        first_started: Latch,
+        release_first: Latch,
+    }
+
+    #[async_trait::async_trait]
+    impl EventSink for SlowFirstCommit {
+        async fn commit(&self, batch: EventBatch) -> ApiResult<EventAck> {
+            let seqs: Vec<u64> = batch.events.iter().map(|e| e.cursor.seq).collect();
+            let is_attempt_started = batch
+                .events
+                .iter()
+                .any(|e| matches!(e.body, EventBody::AttemptStarted));
+            if is_attempt_started {
+                self.first_started.set();
+                self.release_first.wait().await;
+            }
+            self.seen_seqs.lock().unwrap().extend(seqs);
+            let durable = batch.events.iter().map(|e| e.cursor.clone()).collect();
+            Ok(EventAck { durable })
+        }
+    }
+
+    let n = FakeNode::new("hub");
+    let sink = Arc::new(SlowFirstCommit {
+        seen_seqs: Mutex::new(vec![]),
+        first_started: Latch::default(),
+        release_first: Latch::default(),
+    });
+    n.connect(sink.clone());
+    ready(&n, "s_1").await;
+
+    let n_start = n.clone();
+    let start_task = tokio::spawn(async move {
+        n_start
+            .start_turn(cmd("op_t", turn("s_1", "t_1", "a_1", "hi")))
+            .await
+            .unwrap()
+    });
+    sink.first_started.wait().await;
+
+    let n_emit = n.clone();
+    let emit_task = tokio::spawn(async move {
+        n_emit
+            .emit(
+                Subject::Execution(exec_turn("s_1", "t_1", "a_1")),
+                EventBody::TextDelta {
+                    message: "m1".into(),
+                    block: "b1".into(),
+                    utf8_offset: 0,
+                    text: "hello".into(),
+                },
+            )
+            .await
+            .unwrap()
+    });
+    // Let emit_task reach FakeNode::deliver while AttemptStarted is still committing.
+    tokio::task::yield_now().await;
+    tokio::task::yield_now().await;
+    sink.release_first.set();
+
+    start_task.await.unwrap();
+    emit_task.await.unwrap();
+
+    let seqs = sink.seen_seqs.lock().unwrap().clone();
+    assert!(
+        seqs.windows(2).all(|w| w[0] < w[1]),
+        "FakeNode must deliver concurrent events strictly in record order, got {seqs:?}"
+    );
+    assert_eq!(n.unacked(), 0);
+}

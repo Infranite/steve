@@ -255,6 +255,9 @@ pub struct NodeRuntime {
     /// Shared with the workers, which wait on them without keeping the runtime alive.
     wake_send: Arc<tokio::sync::Notify>,
     wake_upkeep: Arc<tokio::sync::Notify>,
+    /// Wakes the initial startup reconcile loop as soon as a normal Node link attaches, avoiding
+    /// up to a 5-second sleep before the first reconciliation completes.
+    wake_reconcile: Arc<tokio::sync::Notify>,
     /// Bumped after every committed runtime write so ledger waiters wake immediately instead of polling SQLite.
     ledger_rev: tokio::sync::watch::Sender<u64>,
     holding: AtomicBool,
@@ -371,6 +374,7 @@ impl NodeRuntime {
             owner: uid("hub"),
             wake_send: Arc::new(tokio::sync::Notify::new()),
             wake_upkeep: Arc::new(tokio::sync::Notify::new()),
+            wake_reconcile: Arc::new(tokio::sync::Notify::new()),
             ledger_rev: tokio::sync::watch::channel(0).0,
             holding: AtomicBool::new(false),
             paused: AtomicBool::new(false),
@@ -537,6 +541,7 @@ impl NodeRuntime {
         // each worker holds the runtime only while it works, never while it waits: dropping the
         // last handle ends both. Nothing is sent before the Hub has reconciled with the Node.
         let (weak, wake) = (Arc::downgrade(self), self.wake_send.clone());
+        let wake_reconcile = self.wake_reconcile.clone();
         let clock = self.clock.clone();
         tokio::spawn(async move {
             // the Node links a moment after the Hub starts: the first try finding it not there is
@@ -548,7 +553,10 @@ impl NodeRuntime {
                 // ordinary reconciliation or spam retry warnings until it links normally.
                 if me.node.is_upgrade_only() {
                     drop(me);
-                    clock.sleep(Duration::from_secs(5)).await;
+                    tokio::select! {
+                        _ = clock.sleep(Duration::from_secs(5)) => {}
+                        _ = wake_reconcile.notified() => {}
+                    }
                     continue;
                 }
                 match me.reconcile().await {
@@ -557,6 +565,7 @@ impl NodeRuntime {
                             tracing::info!("node {}: reconciled, {n} changed", me.node_id);
                         }
                         me.reconciled.store(true, Ordering::SeqCst);
+                        me.ledger_rev.send_modify(|rev| *rev = rev.wrapping_add(1));
                         me.plan_waiting();
                         break;
                     }
@@ -571,7 +580,10 @@ impl NodeRuntime {
                     Err(e) => tracing::warn!("node {}: reconcile: {e}; trying again", me.node_id),
                 }
                 drop(me);
-                clock.sleep(Duration::from_secs(5)).await;
+                tokio::select! {
+                    _ = clock.sleep(Duration::from_secs(5)) => {}
+                    _ = wake_reconcile.notified() => {}
+                }
             }
             loop {
                 let Some(me) = weak.upgrade() else { return };
@@ -712,6 +724,16 @@ impl NodeRuntime {
     /// Register a wake signal notified whenever a logical turn completes on this Node.
     pub fn set_turn_end_notify(&self, notify: Arc<tokio::sync::Notify>) {
         let _ = self.on_turn_ended.set(notify);
+    }
+
+    /// Wake the initial startup reconcile loop as soon as a normal Node link attaches.
+    pub fn notify_linked(&self) {
+        self.wake_reconcile.notify_one();
+    }
+
+    /// Watch revisions bumped on every committed runtime write and reconciliation completion.
+    pub fn subscribe_ledger(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.ledger_rev.subscribe()
     }
 
     fn tell_end(&self, e: End) {

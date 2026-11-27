@@ -264,21 +264,27 @@ fn now_ms() -> i64 {
 
 /// Up and serving the full app, with its colocated service Node linked and reconciled.
 async fn serving(h: &Home) {
+    let client = reqwest::Client::new();
+    let url = format!("{}/healthz", h.base());
     let diagnostic = steve_runtime::testkit::on_timeout(|| async {
         format!("the Hub serves; log:\n{}", hub_log(h))
     });
-    eventually(diagnostic, || async {
-        let Ok(r) = reqwest::Client::new()
-            .get(format!("{}/healthz", h.base()))
-            .timeout(Duration::from_secs(2))
-            .send()
-            .await
-        else {
-            return false;
-        };
-        r.json::<Value>().await.is_ok_and(|v| {
-            v["ok"] == true && v["maintenance"] != true && v["node"]["reconciled"] == true
-        })
+    eventually(diagnostic, || {
+        let client = client.clone();
+        let url = url.clone();
+        async move {
+            let Ok(r) = client
+                .get(&url)
+                .timeout(Duration::from_secs(2))
+                .send()
+                .await
+            else {
+                return false;
+            };
+            r.json::<Value>().await.is_ok_and(|v| {
+                v["ok"] == true && v["maintenance"] != true && v["node"]["reconciled"] == true
+            })
+        }
     })
     .await;
 }
@@ -585,8 +591,16 @@ impl Real {
         let since = now_ms();
         let mut failed = None;
         let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+            let phase = node_process::binding_phase_by_session(&self.h.db_path(), &sid)
+                .ok()
+                .flatten();
+            let total_turns =
+                node_process::runtime_turns_count_by_session(&self.h.db_path(), &sid).ok();
+            let open_turns =
+                node_process::runtime_turns_count_by_session_not_finished(&self.h.db_path(), &sid)
+                    .ok();
             format!(
-                "{what}: turn {n} finishes; failed card: {:?}; Hub log:\n{}",
+                "{what}: turn {n} finishes (phase={phase:?}, turns={total_turns:?}, open={open_turns:?}); failed card: {:?}; Hub log:\n{}",
                 self.failed(sid, since),
                 hub_log(&self.h)
             )
