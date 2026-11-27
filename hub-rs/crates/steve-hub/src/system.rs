@@ -323,7 +323,7 @@ impl Runtimes {
         result.map(|_| ())
     }
 
-    fn invalidate(&self) {
+    pub(crate) fn invalidate(&self) {
         self.reports.invalidate_local();
     }
     pub async fn get(&self, fresh: bool) -> Value {
@@ -455,6 +455,7 @@ fn rows(cfg: &Config, harnesses: Option<&[steve_node_api::HarnessCapability]>) -
                         id: c.id.into(), name: c.name.into(), package: c.package.into(), version: None, path: None, status: steve_node_api::ComponentStatus::Unknown, detected: None,
                     }).collect(),
                     can_install: false,
+                    blocked_reason: None,
                     reason: Some("The Node is disconnected, has not probed yet, or is too old to report component setup".into()),
                     help: Some("Connect or update the local Node and refresh discovery; separate Nodes are installed by their operator".into()), error: None,
                 })

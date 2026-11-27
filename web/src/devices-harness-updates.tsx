@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react"
-import { DownloadIcon } from "lucide-react"
+import { ChevronRightIcon, DownloadIcon, LockIcon } from "lucide-react"
 import { api } from "@/api"
 import { IntegrationRow, IntegrationSection } from "@/components/affect/integration-settings-clean"
 import { Badge } from "@/components/affect/badge-clean"
@@ -8,6 +8,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { Switch } from "@/components/ui/switch"
 import { useDevices } from "@/devices-data"
 import { useT } from "@/i18n"
+import type { NodeTab } from "@/node-detail-model"
 import { st, useStore } from "@/store"
 import {
   availableUpgradableHarnesses,
@@ -265,6 +266,57 @@ export function NodeAutoUpgradeBar({ state }: { state: NodeHarnessUpdatesState }
   )
 }
 
+/** Single shared explanation whenever a Node's `policy.json` (`"exec": false`) blocks adapter installs or upgrades. */
+export function ExecDeniedNotice({
+  local = false,
+  context = "upgrade",
+  onOpenTab,
+}: {
+  local?: boolean
+  context?: "install" | "upgrade"
+  onOpenTab?: (tab: NodeTab) => void
+}) {
+  const t = useT()
+  return (
+    <div
+      className="flex flex-col gap-1.5 rounded-md border border-border/70 bg-muted/40 px-3 py-2 type-footnote"
+      data-harness-blocked-reason="exec_denied"
+    >
+      <div className="flex items-start gap-1.5 font-medium text-foreground">
+        <LockIcon className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+        <span>
+          {t(
+            context === "install"
+              ? "devices:harnessUpdates.execDenied.installTitle"
+              : "devices:harnessUpdates.execDenied.upgradeTitle",
+          )}
+        </span>
+      </div>
+      <p className="text-muted-foreground">
+        {t(
+          local
+            ? "devices:harnessUpdates.execDenied.detailLocal"
+            : "devices:harnessUpdates.execDenied.detailRemote",
+        )}
+      </p>
+      {onOpenTab && (
+        <div>
+          <Button
+            size="xs"
+            variant="ghost"
+            className="h-auto px-0 py-0.5 text-blue hover:bg-transparent hover:underline"
+            onClick={() => onOpenTab("access")}
+            data-open-access-policy
+          >
+            {t("devices:harnessUpdates.execDenied.openAccess")}
+            <ChevronRightIcon className="size-3.5" aria-hidden />
+          </Button>
+        </div>
+      )}
+    </div>
+  )
+}
+
 /** Compact on-card upgrade bar: shown only when an upgrade is actionable, active, blocked, or has a receipt. */
 export function HarnessUpgradeBanner({
   h,
@@ -273,6 +325,8 @@ export function HarnessUpgradeBanner({
   disabled,
   retry,
   showButton = true,
+  local = false,
+  onOpenTab,
   upgrade,
 }: {
   h: HarnessUpdate
@@ -281,6 +335,8 @@ export function HarnessUpgradeBanner({
   disabled: boolean
   retry: boolean
   showButton?: boolean
+  local?: boolean
+  onOpenTab?: (tab: NodeTab) => void
   upgrade: (retry: boolean) => void
 }) {
   const t = useT()
@@ -327,9 +383,13 @@ export function HarnessUpgradeBanner({
           </p>
         )}
         {h.blocked_reason && status !== "waiting" && status !== "running" && (
-          <p className="type-footnote text-muted-foreground" data-harness-blocked-reason={h.blocked_reason}>
-            {t(`devices:harnessUpdates.blockReason.${h.blocked_reason}`)}
-          </p>
+          h.blocked_reason === "exec_denied" ? (
+            <ExecDeniedNotice local={local} context="upgrade" onOpenTab={onOpenTab} />
+          ) : (
+            <p className="type-footnote text-muted-foreground" data-harness-blocked-reason={h.blocked_reason}>
+              {t(`devices:harnessUpdates.blockReason.${h.blocked_reason}`)}
+            </p>
+          )
         )}
         <div className="flex flex-wrap items-center justify-between gap-2">
           {upgradableSummary.length > 0 && (

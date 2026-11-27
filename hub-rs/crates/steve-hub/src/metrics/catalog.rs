@@ -653,6 +653,11 @@ pub(super) fn describe() {
         "Harness upgrades finished on Nodes. Labels: trigger (manual, auto), outcome (succeeded, failed)."
     );
     describe_counter!(
+        "steve_hub_harness_installs_total",
+        Count,
+        "Owner-initiated harness adapter installations routed to Nodes. Label: outcome (accepted, rejected)."
+    );
+    describe_counter!(
         "steve_hub_harness_auto_upgrade_policy_changes_total",
         Count,
         "Owner updates to per-Node or per-harness automatic upgrade policy."

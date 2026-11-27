@@ -7,17 +7,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::Json;
+use axum::body::Bytes;
 use axum::extract::{Path, Query, State};
 use serde::Deserialize;
 use steve_modules::Caller;
 use steve_node_api::{
-    AdapterStatus, Code, ComponentStatus, HarnessCapability, HarnessSetup, Node, NodeId, SetupState,
+    AdapterStatus, Code, Command, ComponentStatus, GrantId, HarnessCapability, HarnessSetup,
+    InstallHarness, MissingCommandKind, Node, NodeId, OperationId, SetupState, Timestamp,
 };
+use steve_store::{Read, UserRows, node_directory};
 use steve_types::devices::{
-    HarnessDegradedReason, NodeHarnessComponentStatus, NodeHarnessComponentView,
-    NodeHarnessDetectedView, NodeHarnessRefreshResponse, NodeHarnessReportState,
-    NodeHarnessReportView, NodeHarnessSetupState, NodeHarnessSetupView, NodeHarnessView,
-    NodeHarnessesResponse,
+    HarnessDegradedReason, InstallNodeHarnessResponse, NodeHarnessComponentStatus,
+    NodeHarnessComponentView, NodeHarnessDetectedView, NodeHarnessRefreshResponse,
+    NodeHarnessReportState, NodeHarnessReportView, NodeHarnessSetupState, NodeHarnessSetupView,
+    NodeHarnessView, NodeHarnessesResponse, NodeReason,
 };
 
 use super::AppState;
@@ -25,6 +28,10 @@ use crate::error::ApiError;
 
 const MAX_AGE: Duration = Duration::from_secs(60);
 const PROBE_TIMEOUT: Duration = Duration::from_secs(45);
+/// Acceptance window for an owner-initiated harness adapter installation command.
+const INSTALL_ACCEPT_WINDOW_MS: i64 = 30_000;
+/// Timeout for submitting `harness.install` to a Node and receiving its initial receipt.
+const INSTALL_RPC_TIMEOUT: Duration = Duration::from_secs(15);
 
 pub type Report = NodeHarnessReportView;
 
@@ -116,6 +123,7 @@ fn setup_view(s: HarnessSetup) -> NodeHarnessSetupView {
             })
             .collect(),
         can_install: s.can_install,
+        blocked_reason: s.blocked_reason,
         reason: s.reason,
         help: s.help,
         error: s.error,
@@ -146,33 +154,29 @@ fn harness(c: HarnessCapability) -> NodeHarnessView {
     let a = c.adapter.as_ref();
     let s = c.setup.as_ref();
     let auth = a.is_some_and(|a| a.session_auth_required == Some(true));
+    let missing_kind = a.and_then(|a| a.missing_command.as_ref().map(|m| m.kind));
     let adapter_reason = a.and_then(|a| {
         if a.session_auth_required == Some(true) {
             return Some(AuthenticationRequired);
         }
         match a.status {
-            AdapterStatus::AdapterMissing => {
-                if a.missing_command
-                    .as_ref()
-                    .is_some_and(|m| m.login_shell_path.is_some())
-                {
-                    Some(CommandNotInServicePath)
-                } else {
-                    Some(AdapterMissing)
-                }
-            }
+            AdapterStatus::AdapterMissing => match missing_kind {
+                Some(MissingCommandKind::CommandNotInServicePath) => Some(CommandNotInServicePath),
+                Some(MissingCommandKind::AdapterPackageMissing) => Some(AdapterPackageMissing),
+                Some(MissingCommandKind::BothMissing) | None => Some(AdapterMissing),
+            },
             AdapterStatus::InitializeFailed => Some(InitializeFailed),
             AdapterStatus::Ready if a.session.is_none() => Some(SessionUnavailable),
             _ => None,
         }
     });
-    let has_login_shell_cmd = a.is_some_and(|a| {
-        a.missing_command
-            .as_ref()
-            .is_some_and(|m| m.login_shell_path.is_some())
-    });
+    let has_missing_diag_presence = matches!(
+        missing_kind,
+        Some(MissingCommandKind::CommandNotInServicePath)
+            | Some(MissingCommandKind::AdapterPackageMissing)
+    );
     let has_partial_install = !c.version.is_empty()
-        || has_login_shell_cmd
+        || has_missing_diag_presence
         || s.is_some_and(|s| {
             s.components
                 .iter()
@@ -201,7 +205,7 @@ fn harness(c: HarnessCapability) -> NodeHarnessView {
     } else if let Some(a) = a {
         match a.status {
             AdapterStatus::AdapterMissing => {
-                !a.builtin || !c.version.is_empty() || has_login_shell_cmd
+                !a.builtin || !c.version.is_empty() || has_missing_diag_presence
             }
             AdapterStatus::Ready | AdapterStatus::InitializeFailed => true,
         }
@@ -345,6 +349,7 @@ impl Inventory {
                     let (state, error) = match result {
                         Ok(Ok(c)) if c.node.as_str() == t.id => {
                             report.checked_at = report.attempted_at;
+                            report.exec_allowed = Some(c.capacity.execs > 0);
                             report.harnesses = c.harnesses.into_iter().map(harness).collect();
                             (NodeHarnessReportState::Reported, None)
                         }
@@ -504,6 +509,140 @@ pub async fn get(
     }))
 }
 
+fn install_authorized(
+    db: &mut impl Read,
+    me: &str,
+    node: &str,
+) -> Result<bool, steve_store::StoreError> {
+    if UserRows(db).first_owner()?.as_deref() != Some(me) {
+        return Ok(false);
+    }
+    if node == "local" {
+        return Ok(true);
+    }
+    if node_directory::owner_if_connectable(db, node)?.as_deref() != Some(me) {
+        return Ok(false);
+    }
+    Ok(node_directory::link_state(db, node)?.is_some_and(|(_, state)| state == "active"))
+}
+
+/// Owner-only installation of a built-in harness's managed ACP adapter components on a specific
+/// Node (local or remote). Respects the target Node's local execution policy (`policy.json`
+/// `"exec"`) and compiled built-in catalog; accepts no arbitrary package or path parameters.
+pub async fn install(
+    State(st): State<AppState>,
+    caller: Caller,
+    Path((id, harness)): Path<(String, String)>,
+    body: Bytes,
+) -> Result<Json<InstallNodeHarnessResponse>, ApiError> {
+    if !body.is_empty() {
+        let parsed: serde_json::Value = serde_json::from_slice(&body)
+            .map_err(|_| ApiError::bad_request("invalid JSON body"))?;
+        if parsed != serde_json::json!({}) {
+            return Err(ApiError::bad_request(
+                "installation takes no package, command or destination parameters",
+            ));
+        }
+    }
+    if steve_harness_spec::components(&harness).is_empty() {
+        return Err(ApiError::bad_request(
+            "only registered built-in harness components can be installed",
+        ));
+    }
+    let store = st
+        .modules
+        .as_ref()
+        .map(|m| m.store.clone())
+        .or_else(|| st.nodes.as_ref().map(|n| n.store.clone()))
+        .ok_or_else(|| {
+            ApiError::Contract(steve_types::Error::new(
+                steve_types::Code::Unavailable,
+                "no store",
+            ))
+        })?;
+    let (me, node_id) = (caller.me.clone(), id.clone());
+    let allowed =
+        tokio::task::spawn_blocking(move || store.read(|db| install_authorized(db, &me, &node_id)))
+            .await
+            .map_err(|_| ApiError::Json(500, "internal".into()))?
+            .map_err(|_| ApiError::Json(500, "internal".into()))?;
+    if !allowed {
+        ::metrics::counter!("steve_hub_harness_installs_total", "outcome" => "rejected")
+            .increment(1);
+        return Err(ApiError::Contract(steve_types::Error::new(
+            steve_types::Code::Forbidden,
+            "Only the instance owner may install harness components on active Nodes",
+        )));
+    }
+    let t = targets(&st, caller)
+        .await?
+        .into_iter()
+        .find(|t| t.id == id)
+        .ok_or_else(|| ApiError::Json(404, "Node not found".into()))?;
+    if t.upgrade_only {
+        ::metrics::counter!("steve_hub_harness_installs_total", "outcome" => "rejected")
+            .increment(1);
+        return Err(ApiError::Contract(NodeReason::upgrade_required(
+            "Node requires upgrade before installing harness components",
+        )));
+    }
+    let Some(node) = t.node else {
+        ::metrics::counter!("steve_hub_harness_installs_total", "outcome" => "rejected")
+            .increment(1);
+        return Err(ApiError::Contract(steve_types::Error::new(
+            steve_types::Code::Unavailable,
+            "Node is offline; reconnect it before installing harness components",
+        )));
+    };
+    let now = crate::nodes::now();
+    let op_id = OperationId::new(format!("install_{}", uuid::Uuid::new_v4().simple()))
+        .expect("generated operation id");
+    let command = Command {
+        id: op_id.clone(),
+        issued_at: Timestamp(now),
+        accept_before: Timestamp(now + INSTALL_ACCEPT_WINDOW_MS),
+        grant: GrantId::new("instance_owner").expect("static grant"),
+        body: InstallHarness { harness },
+    };
+    st.node_harnesses.invalidate(&id);
+    if id == "local" {
+        st.runtimes.invalidate();
+    }
+    let receipt = tokio::time::timeout(INSTALL_RPC_TIMEOUT, node.install_harness(command))
+        .await
+        .map_err(|_| {
+            ::metrics::counter!("steve_hub_harness_installs_total", "outcome" => "rejected")
+                .increment(1);
+            ApiError::Contract(steve_types::Error::new(
+                steve_types::Code::Unavailable,
+                "Node harness installation request timed out",
+            ))
+        })?
+        .map_err(|e| {
+            ::metrics::counter!("steve_hub_harness_installs_total", "outcome" => "rejected")
+                .increment(1);
+            let code = match e.code {
+                Code::Forbidden => steve_types::Code::Forbidden,
+                Code::Busy | Code::Conflict => steve_types::Code::Conflict,
+                Code::Unavailable | Code::OutcomeUnknown => steve_types::Code::Unavailable,
+                _ => steve_types::Code::Invalid,
+            };
+            let mut contract = steve_types::Error::new(code, e.safe_detail);
+            contract.reason = e.reason;
+            contract.params = e.params;
+            ApiError::Contract(contract)
+        })?;
+    st.node_harnesses.invalidate(&id);
+    if id == "local" {
+        st.runtimes.invalidate();
+    }
+    ::metrics::counter!("steve_hub_harness_installs_total", "outcome" => "accepted").increment(1);
+    Ok(Json(InstallNodeHarnessResponse {
+        accepted: true,
+        operation: receipt.operation.as_str().to_string(),
+    }))
+}
+
 #[cfg(test)]
 mod tests;
 
@@ -513,6 +652,10 @@ pub(crate) fn routes() -> axum::Router<super::AppState> {
     Router::new()
         .route("/node-harnesses", get(node_harnesses::list))
         .route("/node-harnesses/{id}", get(node_harnesses::get))
+        .route(
+            "/node-harnesses/{id}/{harness}/install",
+            post(node_harnesses::install),
+        )
 }
 
 pub(crate) const CACHE_SPEC: (&str, u8) = (INVENTORY_SPACE.name, INVENTORY_SPACE.share_pct);

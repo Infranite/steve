@@ -86,6 +86,8 @@ pub struct NodeOffline {
 pub enum HarnessDegradedReason {
     AuthenticationRequired,
     AdapterMissing,
+    /// Underlying harness CLI is detected, but its ACP adapter package or command is not installed.
+    AdapterPackageMissing,
     CommandNotInServicePath,
     InitializeFailed,
     SessionUnavailable,
@@ -270,6 +272,10 @@ pub struct NodeHarnessSetupView {
     pub state: NodeHarnessSetupState,
     pub components: Vec<NodeHarnessComponentView>,
     pub can_install: bool,
+    /// Typed Node-level policy or maintenance blocker preventing installation right now.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub blocked_reason: Option<HarnessUpgradeBlockReason>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub reason: Option<String>,
@@ -321,6 +327,11 @@ pub struct NodeHarnessReportView {
     pub stale: bool,
     pub refreshing: bool,
     pub error: Option<String>,
+    /// Whether this Node's local execution policy (`policy.json` `"exec"`) permits remote commands
+    /// and one-click adapter installs/upgrades. `None` before the Node has been probed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub exec_allowed: Option<bool>,
     pub harnesses: Vec<NodeHarnessView>,
 }
 
@@ -337,6 +348,14 @@ pub struct NodeHarnessesResponse {
 pub struct NodeHarnessRefreshResponse {
     pub node_id: String,
     pub report: NodeHarnessReportView,
+}
+
+/// Response body of `POST /api/node-harnesses/{id}/{harness}/install`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct InstallNodeHarnessResponse {
+    pub accepted: bool,
+    pub operation: String,
 }
 
 /// Where a service definition's `PATH` was captured from.
@@ -358,15 +377,49 @@ pub enum ServiceEnvDiagnosticReason {
     CommandNotInServicePath,
 }
 
-/// Diagnostic evidence when a harness command cannot be resolved from the running service's `PATH`.
+/// Strongly-typed diagnosis explaining why a harness adapter command could not be started.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum MissingCommandKind {
+    /// The adapter executable (or its `node` interpreter) is absent from the service `PATH`,
+    /// but was found on the user's login shell `$PATH`. Refreshing the service environment fixes it.
+    /// The default, so a Node that predates `kind` still decodes on this Hub (no protocol bump).
+    #[default]
+    CommandNotInServicePath,
+    /// The underlying harness CLI (`detect_bins`) is present, but the ACP adapter package or
+    /// binary required by the harness spec is not installed.
+    AdapterPackageMissing,
+    /// Neither the ACP adapter nor any underlying harness CLI binary was found on the service
+    /// or login shell `PATH`.
+    BothMissing,
+}
+
+/// Diagnostic evidence when a harness adapter command cannot be resolved or started.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, serde::Deserialize)]
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub struct MissingCommandDiagnostic {
-    /// Executable name or path the Node attempted to start (for example `agy`, `claude`).
+    /// Deterministic diagnosis derived from the harness spec (`command` kind and `detect_bins`).
+    #[serde(default)]
+    pub kind: MissingCommandKind,
+    /// Executable name or path the Node attempted to start (for example `agy`, `openma-pi-acp`, `node`).
     pub command: String,
+    /// Expected npm package of the missing ACP adapter when the harness spec uses an npm command
+    /// (for example `@openma/pi-acp`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub adapter_package: Option<String>,
+    /// Underlying harness CLI binary discovered via `detect_bins` (for example `pi`, `claude`, `cursor`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub detected_cli: Option<String>,
+    /// Full executable path of `detected_cli` on the running service `PATH`, when present there.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub cli_service_path: Option<String>,
     /// `PATH` currently active in the running Node service process.
     pub service_path: String,
-    /// Full executable path found via the user's login shell `$PATH`, when installed there.
+    /// Full executable path found via the user's login shell `$PATH` when absent from `service_path`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub login_shell_path: Option<String>,

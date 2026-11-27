@@ -88,6 +88,8 @@ pub struct HarnessSetup {
     pub components: Vec<HarnessComponent>,
     pub can_install: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked_reason: Option<steve_types::devices::HarnessUpgradeBlockReason>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub help: Option<String>,

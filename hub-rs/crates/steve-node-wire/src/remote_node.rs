@@ -641,12 +641,8 @@ impl Discovery for RemoteNode {
         self.go(NODE_REMOVE_STATUS, &operation, None, false).await
     }
     async fn install_harness(&self, c: Command<InstallHarness>) -> ApiResult<Receipt> {
-        if !self.is_colocated() {
-            return Err(Error::new(
-                Code::Forbidden,
-                "install harnesses on a separate Node with its operator CLI",
-            ));
-        }
+        // Separate Nodes use the same owner-authorized install command as local; the Node
+        // itself enforces its local `policy.json` (`exec`) ceiling and compiled built-in catalog.
         self.cmd(HARNESS_INSTALL, &c, false).await
     }
     async fn harness_updates(&self, fresh: bool) -> ApiResult<HarnessUpdateReport> {

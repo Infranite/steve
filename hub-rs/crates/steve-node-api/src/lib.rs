@@ -44,8 +44,8 @@ pub use run::*;
 pub use steve_types::devices::{
     DEFAULT_DISK_FLOOR_BYTES, FileAccessReport, FileAccessStatus, LOCAL_SERVICE_LINK_FILE,
     LOCAL_SERVICE_PID_FILE, LOGIN_SHELL_PROBE_TIMEOUT_SECS, LocalServiceLink, LocalServicePid,
-    MissingCommandDiagnostic, NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET, ProtectedAccess,
-    ProtectedLocation, extract_login_shell_path, login_shell_path_script,
+    MissingCommandDiagnostic, MissingCommandKind, NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET,
+    ProtectedAccess, ProtectedLocation, extract_login_shell_path, login_shell_path_script,
     shell_supports_interactive_login,
 };
 pub use steve_types::gateway::{GatewayFailure, TimeoutPhase};

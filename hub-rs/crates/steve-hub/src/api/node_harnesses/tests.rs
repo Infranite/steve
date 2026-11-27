@@ -77,7 +77,11 @@ fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
     a.session = None;
     a.error = Some("the adapter's command is missing".into());
     a.missing_command = Some(steve_node_api::MissingCommandDiagnostic {
+        kind: steve_node_api::MissingCommandKind::CommandNotInServicePath,
         command: "agy".into(),
+        adapter_package: None,
+        detected_cli: None,
+        cli_service_path: None,
         service_path: "/usr/bin:/bin:/usr/sbin:/sbin".into(),
         login_shell_path: Some("/Users/example/.local/bin/agy".into()),
         login_shell: Some("/bin/zsh".into()),
@@ -90,6 +94,10 @@ fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
         Some(HarnessDegradedReason::CommandNotInServicePath)
     );
     let diag = h.missing_command.expect("missing command forwarded");
+    assert_eq!(
+        diag.kind,
+        steve_node_api::MissingCommandKind::CommandNotInServicePath
+    );
     assert_eq!(diag.command, "agy");
     assert_eq!(diag.service_path, "/usr/bin:/bin:/usr/sbin:/sbin");
     assert_eq!(
@@ -98,14 +106,15 @@ fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
     );
     assert_eq!(diag.refresh_command, "steve node refresh-env");
 
-    path_mismatch
+    let diag_mut = path_mismatch
         .adapter
         .as_mut()
         .unwrap()
         .missing_command
         .as_mut()
-        .unwrap()
-        .login_shell_path = None;
+        .unwrap();
+    diag_mut.kind = steve_node_api::MissingCommandKind::BothMissing;
+    diag_mut.login_shell_path = None;
     let h = harness(path_mismatch);
     assert_eq!(h.available, Some(false));
     assert_eq!(
@@ -116,7 +125,7 @@ fn readiness_requires_evidence_and_versions_models_belong_to_the_target() {
 
 #[test]
 fn typed_installed_and_degraded_reasons_distinguish_uninstalled_outdated_and_broken() {
-    // Built-in PATH binary installed in login shell but missing from service PATH (e.g. agy).
+    // 1. Built-in PATH binary installed in login shell but missing from service PATH (e.g. agy).
     let path_mismatch_builtin: HarnessCapability = serde_json::from_value(json!({
         "name": "antigravity", "version": "", "sessions": false, "jobs": false,
         "models": [], "resume": true, "cancel": true, "permissions": true,
@@ -126,6 +135,7 @@ fn typed_installed_and_degraded_reasons_distinguish_uninstalled_outdated_and_bro
             "builtin": true,
             "status": "adapter_missing",
             "missing_command": {
+                "kind": "command_not_in_service_path",
                 "command": "agy",
                 "service_path": "/usr/bin:/bin:/usr/sbin:/sbin",
                 "login_shell_path": "/Users/example/.local/bin/agy",
@@ -152,6 +162,120 @@ fn typed_installed_and_degraded_reasons_distinguish_uninstalled_outdated_and_bro
             .and_then(|m| m.login_shell_path.as_deref()),
         Some("/Users/example/.local/bin/agy")
     );
+
+    // 2. CLI present on service PATH, ACP adapter package missing (MacBook Pi scenario):
+    //    classified as `AdapterPackageMissing` (never `CommandNotInServicePath`) and forwards
+    //    `setup.blocked_reason` when execution policy forbids remote installs.
+    let cli_present_adapter_missing: HarnessCapability = serde_json::from_value(json!({
+        "name": "pi", "version": "", "sessions": false, "jobs": false,
+        "models": [], "resume": true, "cancel": true, "permissions": true,
+        "images": false, "enforcement": [],
+        "adapter": {
+            "title": "Pi",
+            "builtin": true,
+            "status": "adapter_missing",
+            "missing_command": {
+                "kind": "adapter_package_missing",
+                "command": "openma-pi-acp",
+                "adapter_package": "@openma/pi-acp",
+                "detected_cli": "pi",
+                "cli_service_path": "/usr/local/bin/pi",
+                "service_path": "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin",
+                "refresh_command": "steve node refresh-env"
+            }
+        },
+        "setup": {
+            "state": "not_installed",
+            "components": [
+                { "id": "pi", "name": "Pi SDK", "package": "@earendil-works/pi-coding-agent", "status": "missing", "detected": { "path": "/usr/local/bin/pi" } },
+                { "id": "adapter", "name": "Pi", "package": "@openma/pi-acp", "status": "missing" }
+            ],
+            "can_install": false,
+            "blocked_reason": "exec_denied"
+        }
+    }))
+    .unwrap();
+    let v = harness(cli_present_adapter_missing);
+    assert!(v.installed);
+    assert_eq!(v.available, Some(false));
+    assert_eq!(
+        v.degraded_reason,
+        Some(HarnessDegradedReason::AdapterPackageMissing)
+    );
+    let diag = v.missing_command.expect("diagnostic forwarded");
+    assert_eq!(
+        diag.kind,
+        steve_node_api::MissingCommandKind::AdapterPackageMissing
+    );
+    assert_eq!(diag.adapter_package.as_deref(), Some("@openma/pi-acp"));
+    assert_eq!(diag.detected_cli.as_deref(), Some("pi"));
+    assert_eq!(diag.cli_service_path.as_deref(), Some("/usr/local/bin/pi"));
+    assert_eq!(diag.login_shell_path, None);
+    assert_eq!(
+        v.setup.as_ref().and_then(|s| s.blocked_reason),
+        Some(steve_types::devices::HarnessUpgradeBlockReason::ExecDenied)
+    );
+
+    // 3. Truly uninstalled built-in (both CLI and ACP adapter missing) -> not installed.
+    let absent_both_missing: HarnessCapability = serde_json::from_value(json!({
+        "name": "pi", "version": "", "sessions": false, "jobs": false,
+        "models": [], "resume": true, "cancel": true, "permissions": true,
+        "images": false, "enforcement": [],
+        "adapter": {
+            "title": "Pi",
+            "builtin": true,
+            "status": "adapter_missing",
+            "missing_command": {
+                "kind": "both_missing",
+                "command": "openma-pi-acp",
+                "adapter_package": "@openma/pi-acp",
+                "service_path": "/usr/bin:/bin",
+                "refresh_command": "steve node refresh-env"
+            }
+        },
+        "setup": {
+            "state": "not_installed",
+            "components": [
+                { "id": "pi", "name": "Pi SDK", "package": "@earendil-works/pi-coding-agent", "status": "missing" },
+                { "id": "adapter", "name": "Pi", "package": "@openma/pi-acp", "status": "missing" }
+            ],
+            "can_install": true
+        }
+    }))
+    .unwrap();
+    let v = harness(absent_both_missing);
+    assert!(!v.installed);
+    assert_eq!(v.degraded_reason, None);
+
+    // 4. Adapter installed but startup / initialize failed -> `InitializeFailed`.
+    let startup_failed: HarnessCapability = serde_json::from_value(json!({
+        "name": "pi", "version": "1.5.2", "sessions": false, "jobs": false,
+        "models": [], "resume": true, "cancel": true, "permissions": true,
+        "images": false, "enforcement": [],
+        "adapter": {
+            "title": "Pi",
+            "builtin": true,
+            "status": "initialize_failed",
+            "error": "adapter exited before initialize"
+        },
+        "setup": {
+            "state": "unavailable",
+            "components": [
+                { "id": "pi", "name": "Pi SDK", "package": "@earendil-works/pi-coding-agent", "version": "1.5.2", "status": "installed" },
+                { "id": "adapter", "name": "Pi", "package": "@openma/pi-acp", "version": "0.14.0", "status": "installed" }
+            ],
+            "can_install": true
+        }
+    }))
+    .unwrap();
+    let v = harness(startup_failed);
+    assert!(v.installed);
+    assert_eq!(v.available, Some(false));
+    assert_eq!(
+        v.degraded_reason,
+        Some(HarnessDegradedReason::InitializeFailed)
+    );
+    assert!(v.missing_command.is_none());
 
     // Truly uninstalled built-in path-only adapter (no setup, empty version, adapter missing).
     let absent_builtin: HarnessCapability = serde_json::from_value(json!({
@@ -617,4 +741,116 @@ async fn upgrade_only_target_returns_upgrade_required_without_calling_probe() {
         fake.log().is_empty(),
         "upgrade-only target must never invoke ordinary probe()"
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn http_install_routes_to_remote_node_and_enforces_owner_and_builtin_contract() {
+    use crate::wire::{node_runtime::NodeRuntime, store::StoreBackend};
+    use axum::{
+        Router, middleware,
+        routing::{get as route_get, post as route_post},
+    };
+    let h = node_harness::Hub::start().await;
+    h.store
+        .write(|w| {
+            let mut u = steve_store::UserRows(w);
+            u.insert("u1", "default", "u1", "Owner", "owner", 1)?;
+            u.insert("other", "default", "other", "Other", "member", 2)?;
+            Ok::<(), steve_store::StoreError>(())
+        })
+        .unwrap();
+    let cfg = Arc::new(
+        crate::config::Config::from_vars(|k| match k {
+            "HOME" | "STEVE_HOME" => Some(h.dir.path().display().to_string()),
+            _ => None,
+        })
+        .unwrap(),
+    );
+    let fake_local = FakeNode::new("local");
+    let runtime = NodeRuntime::new(h.store.clone(), fake_local, h.ends.clone());
+    let bus = crate::bus::Bus::new(std::sync::Arc::new(steve_runtime::cache::Caches::new(
+        Default::default(),
+    )));
+    let st = AppState::new(
+        cfg.clone(),
+        StoreBackend(h.store.clone()),
+        crate::wire::core::CoreDomain::for_test(&cfg, h.store.clone(), &bus, None),
+        bus,
+    )
+    .with_node(Some(runtime))
+    .with_nodes(Some(h.svc.clone()));
+    let app = Router::new()
+        .route("/node-harnesses", route_get(super::list))
+        .route("/node-harnesses/{id}", route_get(super::get))
+        .route(
+            "/node-harnesses/{id}/{harness}/install",
+            route_post(super::install),
+        )
+        .with_state(st)
+        .layer(middleware::from_fn(caller));
+    let socket = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base = format!("http://{}", socket.local_addr().unwrap());
+    let server = tokio::spawn(async move {
+        axum::serve(socket, app).await.unwrap();
+    });
+    let http = reqwest::Client::new();
+
+    let (identity, id) = h.paired("u1").await;
+    let remote = FakeNode::new(id.as_str());
+    remote.set_harnesses(vec![cap("remote-cli", "remote/model")]);
+    let delayed = setup_node::Delayed::new(remote.clone());
+    let _link = node_harness::dial(&h, &identity, &id, delayed.clone(), 1)
+        .await
+        .unwrap();
+    steve_runtime::testkit::eventually_sync("linked", || {
+        h.svc.registry.current(id.as_str()).is_some()
+    })
+    .await;
+
+    // Non-owner is refused.
+    let res = http
+        .post(format!("{base}/node-harnesses/{id}/pi/install"))
+        .header("x-test-user", "other")
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 403);
+
+    // Arbitrary body parameters are refused.
+    let res = http
+        .post(format!("{base}/node-harnesses/{id}/pi/install"))
+        .json(&json!({"package": "@evil/pkg"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+
+    // Non-managed harness is refused.
+    let res = http
+        .post(format!("{base}/node-harnesses/{id}/antigravity/install"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 400);
+
+    // Owner installing a built-in managed harness on a remote Node succeeds and flips setup to installing.
+    let res = http
+        .post(format!("{base}/node-harnesses/{id}/pi/install"))
+        .json(&json!({}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(res.status(), 200);
+    let body: Value = res.json().await.unwrap();
+    assert_eq!(body["accepted"], true);
+    assert!(
+        body["operation"]
+            .as_str()
+            .is_some_and(|s| s.starts_with("install_"))
+    );
+
+    server.abort();
+    let _ = server.await;
 }
