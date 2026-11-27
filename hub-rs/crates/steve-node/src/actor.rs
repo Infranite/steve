@@ -2408,14 +2408,7 @@ fn harness_state(
         .import_owner
         .then(|| owner_state_root(sd, &inner.cfg.acp.user_home))
         .flatten();
-    match crate::harness_settings::apply(
-        &dir,
-        &target,
-        state_settings,
-        &inner.cfg.acp.steve_home,
-        &inner.cfg.home,
-        owner_root.as_deref(),
-    ) {
+    match crate::harness_settings::apply(&dir, &target, state_settings, owner_root.as_deref()) {
         Ok(left) => {
             for why in left {
                 tracing::info!("harness state: settings: {why}");

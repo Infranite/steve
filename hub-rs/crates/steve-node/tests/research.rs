@@ -937,23 +937,11 @@ async fn an_adapter_with_a_sandbox_of_its_own_is_not_wrapped() {
     };
     n.start_job(now_cmd("op_j2", spec.clone())).await.unwrap();
     assert_eq!(t.end_of(&n, "op_j2").await.outcome, Outcome::Succeeded);
-    // nothing of its own and no nesting: AllowFallback degrades to Off, Required is refused
+    // nothing of its own and no nesting: refused before anything runs
     spec.run.attempt = AttemptId::new("a_3").unwrap();
     spec.run.choice.harness = "no-nesting".into();
-    let e = n
-        .start_job(now_cmd("op_j3", spec.clone()))
-        .await
-        .unwrap_err();
+    let e = n.start_job(now_cmd("op_j3", spec)).await.unwrap_err();
     assert_eq!(e.code, Code::Unsupported);
-    spec.run.attempt = AttemptId::new("a_4").unwrap();
-    spec.run.policy.sandbox = SandboxRequirement::AllowFallback {
-        preferred: vec!["fs-readonly".into()],
-        acceptable: vec![],
-    };
-    n.start_job(now_cmd("op_j4", spec)).await.unwrap();
-    let c4 = t.end_of(&n, "op_j4").await;
-    assert_eq!(c4.outcome, Outcome::Succeeded, "{c4:?}");
-    assert!(!c4.job.unwrap().sandboxed, "degraded to Off");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

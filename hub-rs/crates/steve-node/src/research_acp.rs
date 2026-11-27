@@ -34,22 +34,11 @@ pub(super) fn sandbox_mode(
             _ => {}
         }
     }
-    if !properties.nested_sandbox {
-        // Harnesses that run their own sandbox (`nested_sandbox = false`) cannot be nested inside
-        // Steve's outer read-only sandbox. `AllowFallback` degrades to `Off` (read-only is kept by
-        // the harness's own sandbox, `PermissionMode::Plan`, and unconditional permission refusal,
-        // matching `job::think_sandbox`); `Required` remains unsupported unless `self_read_only`.
-        return match requirement {
-            SandboxRequirement::None => Ok(r::SandboxMode::Off),
-            SandboxRequirement::AllowFallback {
-                preferred,
-                acceptable,
-            } if only_fs(preferred) && acceptable.is_empty() => Ok(r::SandboxMode::Off),
-            _ => Err(Error::new(
-                Code::Unsupported,
-                "adapter cannot provide the requested research sandbox",
-            )),
-        };
+    if !properties.nested_sandbox && *requirement != SandboxRequirement::None {
+        return Err(Error::new(
+            Code::Unsupported,
+            "adapter cannot provide the requested research sandbox",
+        ));
     }
     let unsupported = |why: &str| Err(Error::new(Code::Unsupported, why));
     match requirement {
@@ -735,39 +724,6 @@ mod tests {
         };
         assert_eq!(sandbox_mode(&required, &own).unwrap(), r::SandboxMode::Off);
         assert_eq!(sandbox_mode(&preferred, &own).unwrap(), r::SandboxMode::Off);
-
-        // Harness with its own sandbox (not read-only, cannot nest): AllowFallback degrades to Off,
-        // while Required (or AllowFallback with non-empty acceptable) stays Unsupported.
-        let non_nested = steve_harness_spec::AdapterProperties {
-            self_read_only: false,
-            nested_sandbox: false,
-            ..Default::default()
-        };
-        assert_eq!(
-            sandbox_mode(&SandboxRequirement::None, &non_nested).unwrap(),
-            r::SandboxMode::Off
-        );
-        assert_eq!(
-            sandbox_mode(&preferred, &non_nested).unwrap(),
-            r::SandboxMode::Off
-        );
-        assert_eq!(
-            sandbox_mode(&required, &non_nested).unwrap_err().code,
-            Code::Unsupported,
-        );
-        assert_eq!(
-            sandbox_mode(
-                &SandboxRequirement::AllowFallback {
-                    preferred: vec![FS_READONLY.into()],
-                    acceptable: vec![FS_READONLY.into()],
-                },
-                &non_nested,
-            )
-            .unwrap_err()
-            .code,
-            Code::Unsupported,
-        );
-
         let plain = steve_harness_spec::AdapterProperties {
             self_read_only: false,
             nested_sandbox: true,

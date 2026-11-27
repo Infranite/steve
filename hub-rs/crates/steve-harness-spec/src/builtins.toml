@@ -759,16 +759,16 @@ primary = false
 managed_by_default = false
 [adapters.properties]
 self_read_only = false
-nested_sandbox = false
+nested_sandbox = true
 state = {"env" = "", "arg" = "--gemini-dir", "default" = ".gemini/antigravity-cli", "import" = ["settings.json"], "import_into" = "antigravity-cli", "extra_dirs" = [".gemini/config"]}
 native_approval = "ask_owner"
-modes = {"plan" = "plan", "ask" = "default", "accept_edits" = "accept-edits", "auto" = "auto", "full_access" = ""}
+modes = {"plan" = "plan", "ask" = "default", "accept_edits" = "accept-edits", "auto" = "", "full_access" = ""}
 blind_set_mode = false
 native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-mode_args = {"full_access" = ["--dangerously-skip-permissions"]}
+mode_args = {"auto" = ["--dangerously-skip-permissions"], "full_access" = ["--dangerously-skip-permissions"]}
 session_meta = "none"
 state_settings = "antigravity_settings"
 launch_extra = "none"
