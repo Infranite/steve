@@ -330,6 +330,12 @@ fn incoming(
                     .allow_steve_mcp_tools
                     .contains(&asked.fact.name.as_str())
             {
+                metrics::counter!(
+                    "steve_permission_oneshot_allowed_total",
+                    "harness" => req.harness.to_string(),
+                    "tool" => asked.fact.name.clone(),
+                )
+                .increment(1);
                 conn.respond(
                     id,
                     permission::answer(&asked, Some(PermissionDecision::AllowOnce)),
@@ -762,8 +768,12 @@ async fn open_job_session(
                 },
             }),
         },
-        req.cfg
-            .session_meta_with_mode(req.harness, req.tools_off, Some(req.mode)),
+        req.cfg.session_meta_for_request(
+            req.harness,
+            req.tools_off,
+            Some(req.mode),
+            req.allow_steve_mcp_tools,
+        ),
         &reports,
     );
     drive_open(conn, rx, opening, req.on_activity, prior_tokens).await
@@ -1905,6 +1915,41 @@ for line in sys.stdin:
                 let msg: Value = serde_json::from_str(&raw).unwrap();
                 assert_eq!(msg["result"]["outcome"]["optionId"], "no", "{label}");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn oneshot_injects_declarative_steve_mcp_allow_into_session_new_and_load_meta() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cfg = adapter(
+            temp.path(),
+            "        chunk(json.dumps(opened_params.get('_meta')))",
+            true,
+        );
+        let peer = cfg.adapters["neutral-test"].clone();
+        cfg.adapters.insert("claude-code".into(), peer);
+        for resume in [None, Some("acp-session")] {
+            let mut req = request(&cfg, temp.path());
+            req.harness = "claude-code";
+            req.resume = resume;
+            req.allow_steve_mcp_tools = &["steve_bots_list", "steve_nodes_list"];
+            let out = run(req, &|_| true, &|_| {}).await.unwrap();
+            let meta: Value = serde_json::from_str(&out.text).unwrap();
+            assert_eq!(
+                meta.pointer("/claudeCode/options/settings/permissions/allow"),
+                Some(&json!([
+                    "mcp__steve__steve_bots_list",
+                    "mcp__steve__steve_nodes_list"
+                ])),
+                "resume={resume:?} meta={meta}"
+            );
+            assert!(
+                meta.pointer("/claudeCode/options/settings/permissions/deny")
+                    .and_then(Value::as_array)
+                    .is_some_and(|a| !a.is_empty()),
+                "protected_deny must be preserved alongside allow: {meta}"
+            );
+            assert_eq!(meta.pointer("/claudeCode/options/tools"), Some(&json!([])));
         }
     }
 }

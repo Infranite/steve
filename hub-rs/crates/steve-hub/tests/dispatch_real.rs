@@ -613,6 +613,14 @@ async fn real_steve_inspects_bots_and_dispatches_to_matching_bot() {
         )
         .await;
 
+    // Check for preflight/dispatch failure BEFORE waiting on `runtime_jobs`, because preflight
+    // failures (e.g. missing adapter capability) settle directly to blocked without creating a job.
+    assert!(
+        blocked_json.is_none(),
+        "dispatch failed/blocked instead of selecting a Bot: blocked={blocked_json:?}\n{}",
+        diagnostics(&h, Some(&item1_id))
+    );
+
     // Wait briefly for `runtime_jobs` to record its finished state alongside the placement commit.
     let diag_jobs = on_timeout(|| async {
         format!(
@@ -627,12 +635,6 @@ async fn real_steve_inspects_bots_and_dispatches_to_matching_bot() {
             .any(|(_, state)| state == "finished")
     })
     .await;
-
-    assert!(
-        blocked_json.is_none(),
-        "dispatch failed/blocked instead of selecting a Bot: blocked={blocked_json:?}\n{}",
-        diagnostics(&h, Some(&item1_id))
-    );
 
     // Assertion 1: Verify from storage + tool-call ledger (never model reply text) that the
     // dispatch Think job actually executed `steve_bots_list`.

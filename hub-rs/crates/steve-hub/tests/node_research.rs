@@ -992,6 +992,31 @@ async fn research_tools_answer_only_a_running_research_job() {
         url.starts_with("http://127.0.0.1:") && !url.contains(":9/"),
         "{new}"
     );
+    let allow: Vec<&str> = new
+        .pointer("/_meta/claudeCode/options/settings/permissions/allow")
+        .and_then(Value::as_array)
+        .expect("research job with steve_tools must inject declarative permissions.allow")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    for expected in [
+        "mcp__steve__steve_items_search",
+        "mcp__steve__steve_item_read",
+        "mcp__steve__steve_knowledge_search",
+        "mcp__steve__steve_bots_list",
+        "mcp__steve__steve_nodes_list",
+    ] {
+        assert!(
+            allow.contains(&expected),
+            "{expected} missing from {allow:?}"
+        );
+    }
+    assert!(
+        !allow
+            .iter()
+            .any(|r| r.contains("onboard") || r.contains("deliver")),
+        "mutating tools must never be allowlisted in research: {allow:?}"
+    );
     let exec: ExecutionRef =
         serde_json::from_str(&node_checks::runtime_job_attempts_execution(&node.store).unwrap())
             .unwrap();

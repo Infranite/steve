@@ -1,5 +1,6 @@
 //! Research's ACP policy and budgets. Read-only enforcement relies on the OS sandbox,
-//! `PermissionMode::Plan`, and unconditional permission refusal in one-shot ACP calls.
+//! `PermissionMode::Plan`, declarative allowlisting limited to Steve's read-only research MCP
+//! tools, and unconditional refusal of every other permission request in one-shot ACP calls.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -420,6 +421,22 @@ impl Prepared {
     }
 }
 
+/// Exact read-only Steve MCP tools exposed to a research job (`ResearchJob::steve_tools`).
+/// Mutating tools (such as `steve_onboard_*` or session action tools) are excluded; the Hub
+/// remains authoritative for workspace and conversation scoping on every call.
+const RESEARCH_READ_ONLY_STEVE_TOOLS: &[&str] = &[
+    "steve_knowledge_search",
+    "steve_knowledge_read",
+    "steve_debug",
+    "steve_items_search",
+    "steve_item_read",
+    "steve_sessions_list",
+    "steve_bots_list",
+    "steve_nodes_list",
+    "steve_im_thread",
+    "steve_im_media",
+];
+
 /// Prepared inputs for one ACP call; no polling or stop policy lives in the transport.
 struct ResearchCall<'a> {
     node: &'a LocalNode,
@@ -488,7 +505,11 @@ impl ResearchCall<'_> {
                 on_activity: Some(&activity),
                 max_output_bytes: spec.run.limits.max_output_bytes,
                 emit_thoughts: true,
-                allow_steve_mcp_tools: &[],
+                allow_steve_mcp_tools: if req.mcp.is_some() {
+                    RESEARCH_READ_ONLY_STEVE_TOOLS
+                } else {
+                    &[]
+                },
             },
             spawned,
             &event,

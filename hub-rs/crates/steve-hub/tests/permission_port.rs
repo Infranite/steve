@@ -31,7 +31,8 @@ fn session_permissions_have_one_ingress_and_one_hub_ledger_writer() {
 
     // One-shot ACP calls refuse `session/request_permission` except for an explicit, static
     // Steve-origin read-only MCP tool allowlist (`allow_steve_mcp_tools`, used only for dispatch
-    // inspection tools), and never run a second approval rule engine or persist AllowAlways.
+    // and research read-only tools), and never run a second approval rule engine or persist
+    // AllowAlways.
     let oneshot = std::fs::read_to_string(crates.join("steve-acp/src/oneshot.rs")).unwrap();
     let oneshot_prod = strip_tests(&oneshot);
     assert_eq!(
@@ -44,8 +45,8 @@ fn session_permissions_have_one_ingress_and_one_hub_ledger_writer() {
     assert!(
         oneshot_prod.contains("asked.fact.origin == ToolOrigin::Steve")
             && oneshot_prod.contains("asked.fact.category == ToolCategory::Steve")
-            && oneshot_prod.contains("req\n                    .allow_steve_mcp_tools")
-            || oneshot_prod.contains("req.allow_steve_mcp_tools"),
+            && (oneshot_prod.contains("req\n                    .allow_steve_mcp_tools")
+                || oneshot_prod.contains("req.allow_steve_mcp_tools")),
         "oneshot.rs AllowOnce must remain gated to Steve-origin MCP tools in allow_steve_mcp_tools"
     );
     assert!(
@@ -56,15 +57,81 @@ fn session_permissions_have_one_ingress_and_one_hub_ledger_writer() {
     assert!(oneshot_prod.contains("steve_permission_refused_total"));
     assert!(oneshot_prod.contains("OneShotError::ToolRefused"));
 
-    // Research jobs must never populate `allow_steve_mcp_tools`; dispatch think jobs may only
-    // allow the two read-only inspection tools.
-    let research_acp =
-        std::fs::read_to_string(crates.join("steve-node/src/research_acp.rs")).unwrap();
-    assert!(strip_tests(&research_acp).contains("allow_steve_mcp_tools: &[]"));
+    // Dispatch and research one-shot jobs may only allowlist their exact static read-only Steve
+    // MCP tools (never mutating tools like `steve_onboard_*`, `steve_deliver`, or `steve_tool_call`).
     let node_job = std::fs::read_to_string(crates.join("steve-node/src/job.rs")).unwrap();
     assert!(strip_tests(&node_job).contains(
         r#"const DISPATCH_STEVE_TOOLS: &[&str] = &["steve_bots_list", "steve_nodes_list"];"#
     ));
+    let research_acp =
+        std::fs::read_to_string(crates.join("steve-node/src/research_acp.rs")).unwrap();
+    let research_prod = strip_tests(&research_acp);
+    let expected_research_tools = [
+        "steve_knowledge_search",
+        "steve_knowledge_read",
+        "steve_debug",
+        "steve_items_search",
+        "steve_item_read",
+        "steve_sessions_list",
+        "steve_bots_list",
+        "steve_nodes_list",
+        "steve_im_thread",
+        "steve_im_media",
+    ];
+    let research_const_block = research_prod
+        .split("const RESEARCH_READ_ONLY_STEVE_TOOLS: &[&str] = &[")
+        .nth(1)
+        .and_then(|rest| rest.split("];").next())
+        .expect("research_acp.rs must declare static RESEARCH_READ_ONLY_STEVE_TOOLS");
+    let parsed_research_tools: Vec<&str> =
+        research_const_block.split('"').skip(1).step_by(2).collect();
+    assert_eq!(
+        parsed_research_tools, expected_research_tools,
+        "RESEARCH_READ_ONLY_STEVE_TOOLS must stay strictly limited to Steve's read-only research tools"
+    );
+    // Verify every entry matches Hub's read-only research / IM catalogs and never includes write tools.
+    let hub_read_only_tools: std::collections::HashSet<String> =
+        steve_hub::wire::research_mcp::descriptors()
+            .into_iter()
+            .filter(|t| t.read_only)
+            .map(|t| t.name)
+            .chain(
+                steve_channels::im_conv_mcp::tools()
+                    .into_iter()
+                    .filter_map(|t| t["name"].as_str().map(str::to_owned)),
+            )
+            .collect();
+    for tool in &parsed_research_tools {
+        assert!(
+            hub_read_only_tools.contains(*tool),
+            "research allowlist tool {tool:?} is not a Hub read-only research tool"
+        );
+    }
+    let hub_dispatch_tools: std::collections::HashSet<String> =
+        steve_hub::wire::research_mcp::dispatch_descriptors()
+            .into_iter()
+            .filter(|t| t.read_only)
+            .map(|t| t.name)
+            .collect();
+    assert_eq!(
+        hub_dispatch_tools,
+        std::collections::HashSet::from([
+            "steve_bots_list".to_string(),
+            "steve_nodes_list".to_string(),
+        ])
+    );
+    for forbidden in [
+        "steve_onboard_",
+        "steve_deliver",
+        "steve_tool_call",
+        "steve_publish",
+        "steve_secret_use",
+    ] {
+        assert!(
+            !research_const_block.contains(forbidden),
+            "RESEARCH_READ_ONLY_STEVE_TOOLS must never include mutating tool {forbidden}"
+        );
+    }
 
     // Across every crate's production source, `allow_tool` is completely gone and
     // `session/request_permission` only exists in the interactive session actor and oneshot rejector.
