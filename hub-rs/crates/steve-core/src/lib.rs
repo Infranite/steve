@@ -126,6 +126,8 @@ pub(crate) struct Inner {
     dispatch_wake: Arc<tokio::sync::Notify>,
     /// Concurrency cap across simultaneous Steve bot-dispatch Think jobs.
     dispatch_permits: Arc<tokio::sync::Semaphore>,
+    /// In-flight cancellation signals keyed by `item_id` -> `(attempt_id, notify)`.
+    dispatch_cancels: Mutex<HashMap<String, (String, Arc<tokio::sync::Notify>)>>,
 }
 
 /// What a session's last Steve tool call left behind, consumed at its turn end.
@@ -232,6 +234,7 @@ impl Core {
             dispatch_permits: Arc::new(tokio::sync::Semaphore::new(
                 dispatch::MAX_CONCURRENT_DISPATCHES,
             )),
+            dispatch_cancels: Default::default(),
         }))
     }
 

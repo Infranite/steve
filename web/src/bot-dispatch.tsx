@@ -5,7 +5,7 @@ import { type ModuleScope, type RItemDetail } from "@/api"
 import { botDispatchApi, type BotTeam, type CandidateNode as Candidate, type ItemDispatch, type NodeList, type TeamList, type TeamMember } from "@/api/bot-dispatch"
 import { modelsApi } from "@/api/models"
 import { useHubQuery } from "@/data/use-hub-query"
-import type { BotProposal, PlacementBlocked, PlacementExplanation, PlacementRejection } from "@/gen"
+import type { BotProposal, DispatchEvent, PlacementBlocked, PlacementExplanation, PlacementRejection } from "@/gen"
 import { decisionView } from "@/data/sync"
 import { hubBase } from "@/hub"
 import { useT } from "@/i18n"
@@ -24,6 +24,44 @@ export type { TeamMember, BotTeam, ItemDispatch }
 const msg = (e: unknown) => e instanceof Error ? e.message : String(e)
 const activeScope = (): ModuleScope => ({ workspace: st.workspace?.id ?? "", hub: hubBase() })
 const reasonLabel = (t: ReturnType<typeof useT>, reason: string) => t(`manage:dispatch.reason.${reason}`, { defaultValue: t("manage:dispatch.reason.bind_failed") })
+
+export function formatDispatchTimeline(raw: string, t: ReturnType<typeof useT>): string {
+  try {
+    const ev = JSON.parse(raw) as DispatchEvent
+    switch (ev.code) {
+      case "queued":
+        return t("manage:dispatch.timeline.queued")
+      case "selected":
+        return ev.why
+          ? t("manage:dispatch.timeline.selectedWhy", { bot: botName(ev.bot), why: ev.why })
+          : t("manage:dispatch.timeline.selected", { bot: botName(ev.bot) })
+      case "no_candidates":
+        return ev.why
+          ? t("manage:dispatch.timeline.noCandidatesWhy", { why: ev.why })
+          : t("manage:dispatch.timeline.noCandidates")
+      case "coordinator_deferred":
+        return t("manage:dispatch.timeline.coordinatorDeferred", { bot: botName(ev.bot) })
+      case "invalid_choice":
+        return t("manage:dispatch.timeline.invalidChoice", {
+          bot: botName(ev.bot),
+          reason: reasonLabel(t, ev.reason),
+        })
+      case "failed": {
+        const error = t(`manage:dispatch.errors.${ev.error}`, { defaultValue: ev.error })
+        return ev.detail
+          ? t("manage:dispatch.timeline.failedDetail", { error, detail: ev.detail })
+          : t("manage:dispatch.timeline.failed", { error })
+      }
+      case "retry_assigned":
+        return t("manage:dispatch.timeline.retryAssigned", { bot: botName(ev.bot) })
+      case "retry_queued":
+        return t("manage:dispatch.timeline.retryQueued")
+    }
+  } catch {
+    // Fall back to raw text for non-JSON legacy timeline rows.
+  }
+  return raw
+}
 
 export function useBotTeams() {
   const scope = activeScope()

@@ -488,6 +488,7 @@ impl ResearchCall<'_> {
                 on_activity: Some(&activity),
                 max_output_bytes: spec.run.limits.max_output_bytes,
                 emit_thoughts: true,
+                allow_steve_mcp_tools: &[],
             },
             spawned,
             &event,

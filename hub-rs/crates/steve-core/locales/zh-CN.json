@@ -1,5 +1,6 @@
 {
   "core.thread.choose_execution_bot": "当前没有合格的执行 Bot，Steve 已在待处理中发卡询问如何处理。",
+  "core.thread.dispatching_execution_bot": "已做成事项 %{id}，Steve 正在为你选择合适的执行 Bot。",
   "core.bot.invalid_selection": "Bot 配置值无效：%{field}",
   "core.bot.unsupported_selection": "%{harness} 未提供 %{field} `%{value}`；请选择实报值或重置为默认（null）。",
   "core.item.closed": "这个事项已经结束了，需要时先新建周期",

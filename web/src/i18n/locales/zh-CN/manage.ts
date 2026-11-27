@@ -93,6 +93,26 @@ export default {
       "bot": "Bot 已停用或不再属于当前工作空间。",
       "local": "本机 Node 不能运行这个会话（目录、权限模式或事项状态不符）。",
       "bind_failed": "未能绑定限定范围内的节点，请检查 Bot 和设备设置后重试。"
+    },
+    timeline: {
+      queued: "正在由 Steve 安排执行 Bot",
+      selected: "Steve 选择由 {{bot}} 执行",
+      selectedWhy: "Steve 选择由 {{bot}} 执行：{{why}}",
+      noCandidates: "Steve 判断当前没有合适的执行 Bot，等待你指定",
+      noCandidatesWhy: "Steve 判断当前没有合适的执行 Bot：{{why}}",
+      coordinatorDeferred: "无合适执行 Bot，改由 {{bot}} 自己执行",
+      invalidChoice: "Steve 选择的 {{bot}} 未通过校验（{{reason}}），等待你处理",
+      failed: "Steve 未能完成执行 Bot 选择：{{error}}",
+      failedDetail: "Steve 未能完成执行 Bot 选择（{{error}}）：{{detail}}",
+      retryAssigned: "重新派发并交给 {{bot}} 执行",
+      retryQueued: "已交由 Steve 重新选择执行 Bot",
+    },
+    errors: {
+      invalid_response: "返回格式无效",
+      model_call_failed: "模型调用失败",
+      prepare_failed: "准备派发上下文失败",
+      settle_failed: "写入派发结果失败",
+      internal_panic: "派发任务异常中断",
     }
   },
   bot: {

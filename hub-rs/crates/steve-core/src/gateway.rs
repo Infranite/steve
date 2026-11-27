@@ -493,7 +493,17 @@ pub fn dispatch_prompt(input: &DispatchPromptInput<'_>) -> String {
         lines.push(format!("项目：{pname} ({pid})"));
     }
     if let Some(team) = input.team {
-        let members: Vec<&str> = team.members.iter().map(|m| m.bot.as_str()).collect();
+        let members: Vec<String> = team
+            .members
+            .iter()
+            .map(|m| match m.nodes.as_deref() {
+                Some(nodes) if !nodes.is_empty() => {
+                    format!("{} (nodes: {})", m.bot, nodes.join(", "))
+                }
+                Some(_) => format!("{} (nodes: none)", m.bot),
+                None => m.bot.clone(),
+            })
+            .collect();
         lines.push(format!(
             "限定 Team：{} ({})，成员 Bot ID：[{}]",
             team.name,
@@ -517,13 +527,36 @@ pub fn dispatch_prompt(input: &DispatchPromptInput<'_>) -> String {
 }
 
 /// Strictly parse Steve's JSON choice `{"bot": "<id>" | null, "why": "..."}` from Think output.
+///
+/// Requires a JSON object with an explicit `"bot"` key (`null` or non-empty trimmed string).
+/// Missing `"bot"`, empty strings, or wrong field types return `None` so callers fail honestly
+/// with `DispatchFailed` instead of misinterpreting malformed output as "no candidates".
 pub fn parse_dispatch_choice(text: &str) -> Option<DispatchChoice> {
-    #[derive(serde::Deserialize)]
-    struct RawChoice {
-        bot: Option<String>,
-        #[serde(default)]
-        why: Option<String>,
+    fn parse_obj(raw: &str) -> Option<DispatchChoice> {
+        let value: Value = serde_json::from_str(raw).ok()?;
+        let obj = value.as_object()?;
+        let bot = match obj.get("bot")? {
+            Value::Null => None,
+            Value::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                Some(trimmed.to_owned())
+            }
+            _ => return None,
+        };
+        let why = match obj.get("why") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => {
+                let trimmed = s.trim();
+                (!trimmed.is_empty()).then(|| js_head(trimmed, MAX_OFFER_WHY_CHARS).to_owned())
+            }
+            Some(_) => return None,
+        };
+        Some(DispatchChoice { bot, why })
     }
+
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return None;
@@ -535,22 +568,24 @@ pub fn parse_dispatch_choice(text: &str) -> Option<DispatchChoice> {
         .and_then(|s| s.strip_suffix("```"))
         .map(str::trim)
         .unwrap_or(trimmed);
-    let parsed: RawChoice = serde_json::from_str(stripped).ok().or_else(|| {
-        let start = stripped.rfind('{')?;
-        let end = stripped.rfind('}')?;
-        (start < end)
-            .then(|| serde_json::from_str(&stripped[start..=end]).ok())
-            .flatten()
-    })?;
-    let bot = parsed
-        .bot
-        .map(|s| s.trim().to_owned())
-        .filter(|s| !s.is_empty());
-    let why = parsed
-        .why
-        .map(|s| js_head(s.trim(), MAX_OFFER_WHY_CHARS).to_owned())
-        .filter(|s| !s.is_empty());
-    Some(DispatchChoice { bot, why })
+    if let Some(choice) = parse_obj(stripped) {
+        return Some(choice);
+    }
+    if let Some(fence_end) = trimmed.rfind("```") {
+        let before_end = trimmed[..fence_end].trim_end();
+        if let Some(fence_start) = before_end.rfind("```") {
+            let block = before_end[fence_start + 3..].trim();
+            let block = block.strip_prefix("json").map(str::trim).unwrap_or(block);
+            if let Some(choice) = parse_obj(block) {
+                return Some(choice);
+            }
+        }
+    }
+    let start = stripped.rfind('{')?;
+    let end = stripped.rfind('}')?;
+    (start < end)
+        .then(|| parse_obj(&stripped[start..=end]))
+        .flatten()
 }
 
 /// The tools of a chat answer: none without readable attachments, else Read for those files.
@@ -2794,5 +2829,81 @@ mod tests {
         })
         .await;
         assert_eq!(picked.models, vec!["claude-haiku-5-5"]);
+    }
+
+    #[test]
+    fn parse_dispatch_choice_requires_explicit_bot_field_and_prompt_includes_team_node_limits() {
+        assert_eq!(
+            parse_dispatch_choice(r#"{"bot":"dev","why":"owns migrations"}"#),
+            Some(DispatchChoice {
+                bot: Some("dev".into()),
+                why: Some("owns migrations".into()),
+            })
+        );
+        assert_eq!(
+            parse_dispatch_choice(r#"{"bot":null,"why":"all bots busy"}"#),
+            Some(DispatchChoice {
+                bot: None,
+                why: Some("all bots busy".into()),
+            })
+        );
+        assert_eq!(
+            parse_dispatch_choice(
+                "Checked tools.\n```json\n{\"bot\":\"dev\",\"why\":\"fit\"}\n```"
+            ),
+            Some(DispatchChoice {
+                bot: Some("dev".into()),
+                why: Some("fit".into()),
+            })
+        );
+        for invalid in [
+            "",
+            "{}",
+            r#"{"error":"rate limit"}"#,
+            r#"{"bot":""}"#,
+            r#"{"bot":"   "}"#,
+            r#"{"bot":123}"#,
+            r#"{"bot":"dev","why":123}"#,
+            r#"Some prose ending in {"foo":"bar"}"#,
+        ] {
+            assert_eq!(
+                parse_dispatch_choice(invalid),
+                None,
+                "invalid dispatch output must not parse: {invalid}"
+            );
+        }
+
+        let team = steve_store::bot_dispatch::Team {
+            id: "team_1".into(),
+            name: "Core".into(),
+            members: vec![
+                steve_store::bot_dispatch::Member {
+                    bot: "dev".into(),
+                    nodes: Some(vec!["local".into(), "node_b".into()]),
+                },
+                steve_store::bot_dispatch::Member {
+                    bot: "blocked".into(),
+                    nodes: Some(vec![]),
+                },
+                steve_store::bot_dispatch::Member {
+                    bot: "review".into(),
+                    nodes: None,
+                },
+            ],
+        };
+        let prompt = dispatch_prompt(&DispatchPromptInput {
+            title: "Add index".into(),
+            goal: "Add sqlite index".into(),
+            tags: &[],
+            project_id: None,
+            project_name: None,
+            team: Some(&team),
+            required_node: None,
+            node_tag: None,
+            required_specialties: &[],
+        });
+        assert!(prompt.contains("dev (nodes: local, node_b)"), "{prompt}");
+        assert!(prompt.contains("blocked (nodes: none)"), "{prompt}");
+        assert!(prompt.contains("review"), "{prompt}");
     }
 }

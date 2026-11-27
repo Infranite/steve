@@ -192,6 +192,7 @@ impl Core {
                 required_specialties: &[],
                 node: None,
                 required_nodes: None,
+                allow_main: reason != PlacementReason::SteveSelected,
             },
             default_model,
             reason,
@@ -256,6 +257,7 @@ impl Core {
                     required_specialties: &[],
                     node: None,
                     required_nodes: None,
+                    allow_main: false,
                 },
                 default_model,
             )?;
@@ -544,7 +546,7 @@ impl Core {
         } else {
             space
         };
-        let blocked = Self::unplaced_reply(item);
+        let blocked = self.unplaced_reply(item);
         let id = self.store().message_add_in(
             ws,
             &space,
@@ -561,14 +563,26 @@ impl Core {
         Ok(id)
     }
 
-    pub(super) fn unplaced_reply(item: &Item) -> Option<String> {
-        item.bot_id.is_none().then(|| {
-            format!(
-                "已做成事项 {}。{}",
-                item.id,
-                steve_i18n::t!("core.thread.choose_execution_bot")
-            )
-        })
+    pub(crate) fn unplaced_reply(&self, item: &Item) -> Option<String> {
+        if item.bot_id.is_some() {
+            return None;
+        }
+        let dispatching = self
+            .store()
+            .store()
+            .read(|r| steve_store::bot_dispatch::is_dispatching(r, &item.id))
+            .unwrap_or(false);
+        if dispatching {
+            return Some(steve_i18n::t!(
+                "core.thread.dispatching_execution_bot",
+                id = item.id
+            ));
+        }
+        Some(format!(
+            "已做成事项 {}。{}",
+            item.id,
+            steve_i18n::t!("core.thread.choose_execution_bot")
+        ))
     }
 
     /// “Steve 开发 Bot” / “Steve” for an item's bot.

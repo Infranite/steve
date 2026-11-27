@@ -1116,17 +1116,21 @@ fn tool_fact(
     let origin = match server {
         Some("steve") => ToolOrigin::Steve,
         Some(_) => ToolOrigin::External,
-        None if name.starts_with("mcp__steve__") => ToolOrigin::Steve,
+        None if name.starts_with("mcp__steve__") || name.starts_with("mcp_steve_") => {
+            ToolOrigin::Steve
+        }
         None if name.starts_with("mcp__") => ToolOrigin::External,
         None => ToolOrigin::Harness,
     };
-    // Strip the flat MCP transport prefix (`mcp__steve__<tool>`) only when the adapter did not
-    // supply structured server routing metadata. A structured invocation with `server: "steve"`
-    // already carries the literal tool name, so a nested `mcp__steve__` inside it must stay
-    // unstripped and fail strict name checks.
+    // Strip flat MCP transport prefixes (`mcp__steve__<tool>` from Claude Code, `mcp_steve_<tool>`
+    // from Antigravity) only when the adapter did not supply structured server routing metadata.
+    // A structured invocation with `server: "steve"` already carries the literal tool name, so a
+    // nested prefix inside it must stay unstripped and fail strict name checks.
     if server.is_none()
         && origin == ToolOrigin::Steve
-        && let Some(short) = name.strip_prefix("mcp__steve__")
+        && let Some(short) = name
+            .strip_prefix("mcp__steve__")
+            .or_else(|| name.strip_prefix("mcp_steve_"))
     {
         name = short.to_owned();
     }
@@ -1644,5 +1648,105 @@ mod tests {
             n.fact("call_2").unwrap().paths,
             vec!["/work/proj/Cargo.toml"]
         );
+    }
+
+    #[test]
+    fn antigravity_and_claude_steve_mcp_prefixes_normalize_without_double_stripping() {
+        let mut n = n();
+        // Antigravity single-underscore prefix -> Steve origin + bare tool name.
+        let agy = crate::permission::asked(
+            &mut n,
+            &json!(1),
+            &json!({
+                "sessionId": "s",
+                "toolCall": {
+                    "toolCallId": "p_agy",
+                    "name": "mcp_steve_steve_bots_list",
+                    "kind": "other",
+                    "status": "pending",
+                    "rawInput": {}
+                },
+                "options": [{"optionId": "allow", "kind": "allow_once"}]
+            }),
+        );
+        assert_eq!(agy.fact.origin, ToolOrigin::Steve);
+        assert_eq!(agy.fact.category, ToolCategory::Steve);
+        assert_eq!(agy.fact.name, "steve_bots_list");
+
+        // Claude Code double-underscore prefix -> Steve origin + bare tool name.
+        let claude = crate::permission::asked(
+            &mut n,
+            &json!(2),
+            &json!({
+                "sessionId": "s",
+                "toolCall": {
+                    "toolCallId": "p_claude",
+                    "_meta": {"claudeCode": {"toolName": "mcp__steve__steve_nodes_list"}},
+                    "kind": "other",
+                    "status": "pending",
+                    "rawInput": {}
+                },
+                "options": [{"optionId": "allow", "kind": "allow_once"}]
+            }),
+        );
+        assert_eq!(claude.fact.origin, ToolOrigin::Steve);
+        assert_eq!(claude.fact.category, ToolCategory::Steve);
+        assert_eq!(claude.fact.name, "steve_nodes_list");
+
+        // Display title alone must NEVER grant Steve origin.
+        let spoofed_title = crate::permission::asked(
+            &mut n,
+            &json!(3),
+            &json!({
+                "sessionId": "s",
+                "toolCall": {
+                    "toolCallId": "p_title",
+                    "title": "mcp_steve_steve_bots_list",
+                    "kind": "other",
+                    "status": "pending",
+                    "rawInput": {}
+                },
+                "options": [{"optionId": "allow", "kind": "allow_once"}]
+            }),
+        );
+        assert_ne!(spoofed_title.fact.origin, ToolOrigin::Steve);
+
+        // Structured server_name metadata must NOT strip a nested prefix inside tool name.
+        let nested = crate::permission::asked(
+            &mut n,
+            &json!(4),
+            &json!({
+                "sessionId": "s",
+                "toolCall": {
+                    "toolCallId": "p_nested",
+                    "name": "mcp_steve_steve_bots_list",
+                    "kind": "other",
+                    "status": "pending",
+                    "rawInput": {"server_name": "steve"}
+                },
+                "options": [{"optionId": "allow", "kind": "allow_once"}]
+            }),
+        );
+        assert_eq!(nested.fact.origin, ToolOrigin::Steve);
+        assert_eq!(nested.fact.name, "mcp_steve_steve_bots_list");
+
+        // External MCP server carrying the same suffix must stay External.
+        let ext = crate::permission::asked(
+            &mut n,
+            &json!(5),
+            &json!({
+                "sessionId": "s",
+                "toolCall": {
+                    "toolCallId": "p_ext",
+                    "name": "mcp__other__steve_bots_list",
+                    "kind": "other",
+                    "status": "pending",
+                    "rawInput": {}
+                },
+                "options": [{"optionId": "allow", "kind": "allow_once"}]
+            }),
+        );
+        assert_eq!(ext.fact.origin, ToolOrigin::External);
+        assert_ne!(ext.fact.category, ToolCategory::Steve);
     }
 }

@@ -29,13 +29,24 @@ fn session_permissions_have_one_ingress_and_one_hub_ledger_writer() {
     assert_eq!(node.matches("permission::answer(").count(), 1);
     assert!(node.contains("permission::answer(&asked, Some(res.decision))"));
 
-    // One-shot ACP calls unconditionally refuse `session/request_permission` and carry no second
-    // approval rule engine.
+    // One-shot ACP calls refuse `session/request_permission` except for an explicit, static
+    // Steve-origin read-only MCP tool allowlist (`allow_steve_mcp_tools`, used only for dispatch
+    // inspection tools), and never run a second approval rule engine or persist AllowAlways.
     let oneshot = std::fs::read_to_string(crates.join("steve-acp/src/oneshot.rs")).unwrap();
     let oneshot_prod = strip_tests(&oneshot);
+    assert_eq!(
+        oneshot_prod
+            .matches("PermissionDecision::AllowOnce")
+            .count(),
+        1,
+        "oneshot.rs may only AllowOnce in the narrow Steve MCP tool check"
+    );
     assert!(
-        !oneshot_prod.contains("PermissionDecision::AllowOnce"),
-        "oneshot.rs must never self-approve PermissionDecision::AllowOnce"
+        oneshot_prod.contains("asked.fact.origin == ToolOrigin::Steve")
+            && oneshot_prod.contains("asked.fact.category == ToolCategory::Steve")
+            && oneshot_prod.contains("req\n                    .allow_steve_mcp_tools")
+            || oneshot_prod.contains("req.allow_steve_mcp_tools"),
+        "oneshot.rs AllowOnce must remain gated to Steve-origin MCP tools in allow_steve_mcp_tools"
     );
     assert!(
         !oneshot_prod.contains("PermissionDecision::AllowAlways"),
@@ -44,6 +55,16 @@ fn session_permissions_have_one_ingress_and_one_hub_ledger_writer() {
     assert!(oneshot_prod.contains("PermissionDecision::Reject"));
     assert!(oneshot_prod.contains("steve_permission_refused_total"));
     assert!(oneshot_prod.contains("OneShotError::ToolRefused"));
+
+    // Research jobs must never populate `allow_steve_mcp_tools`; dispatch think jobs may only
+    // allow the two read-only inspection tools.
+    let research_acp =
+        std::fs::read_to_string(crates.join("steve-node/src/research_acp.rs")).unwrap();
+    assert!(strip_tests(&research_acp).contains("allow_steve_mcp_tools: &[]"));
+    let node_job = std::fs::read_to_string(crates.join("steve-node/src/job.rs")).unwrap();
+    assert!(strip_tests(&node_job).contains(
+        r#"const DISPATCH_STEVE_TOOLS: &[&str] = &["steve_bots_list", "steve_nodes_list"];"#
+    ));
 
     // Across every crate's production source, `allow_tool` is completely gone and
     // `session/request_permission` only exists in the interactive session actor and oneshot rejector.

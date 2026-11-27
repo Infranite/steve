@@ -1035,10 +1035,12 @@ impl Tx<'_> {
         acceptance: &Option<String>,
         reason: &str,
     ) -> Result<()> {
-        if self.db().store().write(|w| {
+        let cleared = self.db().store().write(|w| {
             let _ = steve_store::bot_dispatch::cancel_dispatch(w, &i.workspace_id, &i.id)?;
             steve_store::bot_dispatch::clear_wait(w, &i.id)
-        })? {
+        })?;
+        self.c.cancel_inflight_dispatch(&i.id);
+        if cleared {
             self.reconcile_no_executor_card(&i.workspace_id)?;
         }
         self.retire_closed_cycle_children(&i.id)?;

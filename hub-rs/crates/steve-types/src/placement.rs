@@ -160,6 +160,55 @@ pub struct PlacementExplanation {
     pub deferred_by: Option<CoordinatorDeferSource>,
 }
 
+/// Typed failure codes recorded in a dispatch timeline entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum DispatchErrorCode {
+    InvalidResponse,
+    ModelCallFailed,
+    PrepareFailed,
+    SettleFailed,
+    InternalPanic,
+}
+
+/// Structured event persisted in `timeline.text` when `timeline.kind == "dispatch"`.
+/// Rendered into localized user copy strictly in the UI layer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum DispatchEvent {
+    Queued,
+    Selected {
+        bot: BotId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        why: Option<String>,
+    },
+    NoCandidates {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        why: Option<String>,
+    },
+    CoordinatorDeferred {
+        bot: BotId,
+    },
+    InvalidChoice {
+        bot: BotId,
+        reason: PlacementRejection,
+    },
+    Failed {
+        error: DispatchErrorCode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        detail: Option<String>,
+    },
+    RetryAssigned {
+        bot: BotId,
+    },
+    RetryQueued,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BotPlacement {
     pub rule_version: u32,

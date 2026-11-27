@@ -126,7 +126,7 @@ export default {
     botAutoUnassigned: "暂无可用 Bot",
     botAutoUnassignedHint: "请在此改选其他执行 Bot",
     rejectedNotice: "Steve 选择的 {{bot}} 当前不可用：{{reason}} 请在左侧改选执行 Bot。",
-    unassignedNotice: "当前没有可用的执行 Bot：{{reason}} 请在左侧改选。",
+    unassignedNotice: "当前没有可用的执行 Bot：{{reason}} 可在左侧改选，或直接建为待分配事项。",
     take: "做成事项：{{title}}",
     dismiss: "不用",
   },

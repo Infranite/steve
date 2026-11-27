@@ -135,7 +135,7 @@ export default {
     botAutoUnassigned: "No eligible Bot",
     botAutoUnassignedHint: "Pick another Bot here to assign directly",
     rejectedNotice: "Steve's pick {{bot}} is unavailable: {{reason}} Pick another Bot to continue.",
-    unassignedNotice: "No eligible Bot right now: {{reason}} Pick a Bot to continue.",
+    unassignedNotice: "No eligible Bot right now: {{reason}} Pick another Bot, or create it unassigned to resolve later.",
     take: "Make it an item: {{title}}",
     dismiss: "No thanks",
   },

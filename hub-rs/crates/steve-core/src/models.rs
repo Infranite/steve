@@ -1007,7 +1007,15 @@ impl Models {
                     "value": custom,
                     "follows": custom.is_none(),
                     "role": if p.tier == Tier::Fast { "lightweight" } else { "primary" },
-                    "source": if custom.is_some() { "override" } else if p.tier == Tier::Fast && self.lightweight(ws).is_some() { "lightweight" } else { "primary" },
+                    "source": if custom.is_some() {
+                        "override"
+                    } else if p.key == "dispatch" && self.custom(ws, "chat").is_some() {
+                        "chat"
+                    } else if p.tier == Tier::Fast && self.lightweight(ws).is_some() {
+                        "lightweight"
+                    } else {
+                        "primary"
+                    },
                     "effective": effective,
                     "recommended": self.recommended(p),
                     "recent": recent.get(p.key),

@@ -5,12 +5,13 @@
 //! with `ThinkTools::Dispatch` (exposing only `steve_bots_list` and `steve_nodes_list`) so Steve
 //! inspects real Bot/Node state and chooses the executor, then Hub hard-validates the choice
 //! before starting the item's session. Failures never silently swap Bots or fall back to scoring.
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use steve_store::bot_dispatch::{self, DispatchJob};
 use steve_types::{
-    CoordinatorDeferSource, DecisionStatus, NoExecutorPolicy, PlacementBlocked, PlacementBlocker,
-    PlacementReason, PlacementRejection,
+    CoordinatorDeferSource, DecisionStatus, DispatchErrorCode, DispatchEvent, NoExecutorPolicy,
+    PlacementBlocked, PlacementBlocker, PlacementReason, PlacementRejection,
 };
 
 use crate::error::{CoreError, Result};
@@ -19,7 +20,6 @@ use crate::gateway::{
     parse_dispatch_choice,
 };
 use crate::patch;
-use crate::repo::BotExt;
 use crate::util::js_head;
 use crate::{Core, Tx};
 
@@ -28,6 +28,19 @@ pub const MAX_CONCURRENT_DISPATCHES: usize = 4;
 
 /// Safety sweep interval so pending dispatch jobs are picked up even if a wake signal raced.
 const DISPATCH_SWEEP_INTERVAL: Duration = Duration::from_secs(5);
+
+/// Persist a typed `DispatchEvent` in `timeline.text` under `kind = "dispatch"`.
+/// User-visible localization happens strictly in the UI layer.
+pub(crate) fn record_dispatch_timeline(
+    db: &crate::repo::Db,
+    item_id: &str,
+    actor: &str,
+    event: &DispatchEvent,
+) -> Result<()> {
+    let payload = serde_json::to_string(event)?;
+    db.timeline_add(item_id, actor, "dispatch", &payload, None)?;
+    Ok(())
+}
 
 fn record_job_metrics(started: Instant, outcome: &'static str) {
     metrics::histogram!("steve_dispatch_job_duration_seconds", "outcome" => outcome)
@@ -46,17 +59,85 @@ fn record_invalid_choice(reason: PlacementRejection) {
 
 enum DispatchEval {
     Selected(DispatchChoice),
-    Failed(String),
+    Failed {
+        error: DispatchErrorCode,
+        detail: Option<String>,
+    },
 }
 
 struct PreparedDispatch {
     prompt: String,
 }
 
+struct CancelGuard {
+    core: Core,
+    item_id: String,
+    attempt_id: String,
+}
+
+impl Drop for CancelGuard {
+    fn drop(&mut self) {
+        let mut cancels = self
+            .core
+            .0
+            .dispatch_cancels
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if cancels
+            .get(&self.item_id)
+            .is_some_and(|(att, _)| att == &self.attempt_id)
+        {
+            cancels.remove(&self.item_id);
+        }
+    }
+}
+
 impl Core {
     /// Wake the background Bot-dispatch worker after enqueueing a pending `item_dispatch_jobs` row.
     pub(crate) fn wake_dispatch(&self) {
         self.0.dispatch_wake.notify_one();
+    }
+
+    fn register_dispatch_cancel(
+        &self,
+        item_id: &str,
+        attempt_id: &str,
+    ) -> (Arc<tokio::sync::Notify>, CancelGuard) {
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let prev = {
+            let mut cancels = self
+                .0
+                .dispatch_cancels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cancels.insert(item_id.to_owned(), (attempt_id.to_owned(), notify.clone()))
+        };
+        if let Some((_, old)) = prev {
+            old.notify_one();
+        }
+        (
+            notify,
+            CancelGuard {
+                core: self.clone(),
+                item_id: item_id.to_owned(),
+                attempt_id: attempt_id.to_owned(),
+            },
+        )
+    }
+
+    /// Abort any in-flight Steve dispatch Think job for `item_id` immediately.
+    pub(crate) fn cancel_inflight_dispatch(&self, item_id: &str) {
+        let entry = {
+            let mut cancels = self
+                .0
+                .dispatch_cancels
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            cancels.remove(item_id)
+        };
+        if let Some((_, notify)) = entry {
+            notify.notify_one();
+        }
     }
 
     /// Background task processing durable `item_dispatch_jobs` with bounded concurrency.
@@ -94,7 +175,7 @@ impl Core {
                         let this = self.clone();
                         tokio::spawn(async move {
                             let _permit = permit;
-                            this.run_dispatch_job(job).await;
+                            this.run_dispatch_job_supervised(job).await;
                         });
                     }
                     Ok(Ok(None)) => {
@@ -129,13 +210,107 @@ impl Core {
         else {
             return Ok(false);
         };
-        self.run_dispatch_job(job).await;
+        self.run_dispatch_job_supervised(job).await;
         Ok(true)
+    }
+
+    /// Supervise one claimed dispatch job so even a task panic releases the `running` row,
+    /// records `DispatchFailed`, and opens/updates the `no_executor` card.
+    pub(crate) async fn run_dispatch_job_supervised(&self, job: DispatchJob) {
+        let started = Instant::now();
+        let job_for_task = job.clone();
+        let this = self.clone();
+        let handle = tokio::spawn(async move {
+            this.run_dispatch_job(job_for_task).await;
+        });
+        if let Err(join_err) = handle.await {
+            let attempt_id = job.attempt_id.as_deref().unwrap_or("");
+            let detail = if join_err.is_panic() {
+                let panic_msg = join_err
+                    .into_panic()
+                    .downcast::<String>()
+                    .map(|s| *s)
+                    .or_else(|p| p.downcast::<&'static str>().map(|s| (*s).to_owned()))
+                    .unwrap_or_else(|_| "dispatch task panicked".to_owned());
+                tracing::error!(item = %job.item_id, "dispatch: job panicked: {panic_msg}");
+                Some(js_head(&panic_msg, 200).to_owned())
+            } else {
+                tracing::warn!(item = %job.item_id, "dispatch: job task cancelled");
+                Some("dispatch task cancelled".to_owned())
+            };
+            self.abort_dispatch_job(&job, attempt_id, DispatchErrorCode::InternalPanic, detail);
+            record_job_metrics(started, "failed");
+        }
+    }
+
+    fn abort_dispatch_job(
+        &self,
+        job: &DispatchJob,
+        attempt_id: &str,
+        error: DispatchErrorCode,
+        detail: Option<String>,
+    ) {
+        let mut tx = self.tx();
+        let db = tx.db().clone();
+        let store = db.store().clone();
+        let ws = job.workspace_id.as_str();
+        let item_id = job.item_id.as_str();
+        let constraints = job.constraints();
+        let aborted = store.write::<_, CoreError>(|w| {
+            if !bot_dispatch::finish_dispatch_if_matching(w, ws, item_id, attempt_id)? {
+                return Ok(None);
+            }
+            let Some(item) = db.item(item_id)? else {
+                return Ok(None);
+            };
+            if item.is_closed() || item.archived || item.bot_id.is_some() {
+                return Ok(None);
+            }
+            let blocked = PlacementBlocked {
+                reason: PlacementRejection::DispatchFailed,
+                rejected: vec![],
+            };
+            bot_dispatch::record_wait(w, ws, item_id, &blocked, None, &constraints)?;
+            record_dispatch_timeline(
+                &db,
+                item_id,
+                "steve",
+                &DispatchEvent::Failed {
+                    error,
+                    detail: detail.clone(),
+                },
+            )?;
+            let paused_wf = Tx::block_wf_dispatching_child_in(
+                w,
+                item_id,
+                PlacementRejection::DispatchFailed.as_str(),
+            )?;
+            Ok(Some(paused_wf))
+        });
+        match aborted {
+            Ok(Some(paused_wf)) => {
+                if paused_wf {
+                    crate::workflow_run::update_active_runs_gauge(&store);
+                }
+                if let Err(e) = tx.open_or_update_no_executor_card(ws) {
+                    tracing::warn!(
+                        item = %item_id,
+                        "dispatch: failed to open no_executor card after abort: {e}"
+                    );
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                tracing::error!(item = %item_id, "dispatch: abort cleanup failed: {e}");
+            }
+        }
     }
 
     pub(crate) async fn run_dispatch_job(&self, job: DispatchJob) {
         let attempt_id = job.attempt_id.as_deref().unwrap_or("");
         let started = Instant::now();
+        let (cancel, _cancel_guard) = self.register_dispatch_cancel(&job.item_id, attempt_id);
+
         let prepared = {
             let mut tx = self.tx();
             tx.prepare_dispatch_job(&job, attempt_id)
@@ -144,33 +319,53 @@ impl Core {
             Ok(p) => p,
             Err(e) => {
                 tracing::warn!(item = %job.item_id, "dispatch: prepare failed: {e}");
+                self.abort_dispatch_job(
+                    &job,
+                    attempt_id,
+                    DispatchErrorCode::PrepareFailed,
+                    Some(js_head(&e.to_string(), 200).to_owned()),
+                );
+                record_job_metrics(started, "failed");
                 return;
             }
         }) else {
             return;
         };
 
-        let gw_res = crate::stats::tagged(
-            "dispatch",
-            &job.workspace_id,
-            self.gw().call(
-                &prepared.prompt,
-                Tier::Smart,
-                DISPATCH_TIMEOUT,
-                &ThinkTools::Dispatch,
-            ),
-        )
-        .await;
+        let gw_res = tokio::select! {
+            biased;
+            _ = cancel.notified() => {
+                tracing::debug!(item = %job.item_id, attempt = attempt_id, "dispatch: cancelled in flight");
+                record_job_metrics(started, "cancelled");
+                return;
+            }
+            res = crate::stats::tagged(
+                "dispatch",
+                &job.workspace_id,
+                self.gw().call(
+                    &prepared.prompt,
+                    Tier::Smart,
+                    DISPATCH_TIMEOUT,
+                    &ThinkTools::Dispatch,
+                ),
+            ) => res,
+        };
 
         let eval = match gw_res {
             Ok(printed) => match parse_dispatch_choice(&printed.text) {
                 Some(choice) => DispatchEval::Selected(choice),
-                None => DispatchEval::Failed(format!(
-                    "模型返回内容无法解析为派发 JSON：{}",
-                    js_head(printed.text.trim(), 160)
-                )),
+                None => {
+                    let excerpt = js_head(printed.text.trim(), 160);
+                    DispatchEval::Failed {
+                        error: DispatchErrorCode::InvalidResponse,
+                        detail: (!excerpt.is_empty()).then(|| excerpt.to_owned()),
+                    }
+                }
             },
-            Err(e) => DispatchEval::Failed(js_head(&e.to_string(), 200).to_owned()),
+            Err(e) => DispatchEval::Failed {
+                error: DispatchErrorCode::ModelCallFailed,
+                detail: Some(js_head(&e.to_string(), 200).to_owned()),
+            },
         };
 
         let outcome = {
@@ -182,6 +377,12 @@ impl Core {
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!(item = %job.item_id, "dispatch: settle failed: {e}");
+                self.abort_dispatch_job(
+                    &job,
+                    attempt_id,
+                    DispatchErrorCode::SettleFailed,
+                    Some(js_head(&e.to_string(), 200).to_owned()),
+                );
                 record_job_metrics(started, "failed");
             }
         }
@@ -206,7 +407,12 @@ impl Tx<'_> {
             .decisions_of_item(&item.id)?
             .into_iter()
             .any(|d| d.kind == "propose" && d.status == DecisionStatus::Open);
-        if item.is_closed() || item.archived || item.bot_id.is_some() || propose_open {
+        if item.is_closed()
+            || item.archived
+            || item.bot_id.is_some()
+            || propose_open
+            || self.active_session(&item.id)?.is_some()
+        {
             let _ = db.store().write(|w| {
                 bot_dispatch::finish_dispatch_if_matching(w, ws, &job.item_id, attempt_id)
             });
@@ -245,6 +451,7 @@ impl Tx<'_> {
         let store = db.store().clone();
         let ws = job.workspace_id.as_str();
         let item_id = job.item_id.as_str();
+        let constraints = job.constraints();
         let default_model = |rt_id: &str| self.c.models().agent_model(ws, rt_id);
 
         enum PostAction {
@@ -268,25 +475,32 @@ impl Tx<'_> {
             let Some(item) = db.item(item_id)? else {
                 return Ok(PostAction::Stale);
             };
-            if item.is_closed() || item.archived || item.bot_id.is_some() {
+            if item.is_closed()
+                || item.archived
+                || item.bot_id.is_some()
+                || self.active_session(item_id)?.is_some()
+            {
                 return Ok(PostAction::Stale);
             }
             let (team, _goal, _tags, required_nodes) = Self::item_placement_inputs(w, &db, &item)?;
-            let project_opt = Some(item.project_id.clone());
+            let project_opt = if !job.project_explicit && item.project_id.is_none() {
+                None
+            } else {
+                Some(item.project_id.clone())
+            };
 
             match eval {
-                DispatchEval::Failed(detail) => {
+                DispatchEval::Failed { error, detail } => {
                     let blocked = PlacementBlocked {
                         reason: PlacementRejection::DispatchFailed,
                         rejected: vec![],
                     };
-                    bot_dispatch::record_wait(w, ws, item_id, &blocked, None)?;
-                    db.timeline_add(
+                    bot_dispatch::record_wait(w, ws, item_id, &blocked, None, &constraints)?;
+                    record_dispatch_timeline(
+                        &db,
                         item_id,
                         "steve",
-                        "sys",
-                        &format!("Steve 未能完成执行 Bot 选择：{detail}"),
-                        None,
+                        &DispatchEvent::Failed { error, detail },
                     )?;
                     let paused_wf = Self::block_wf_dispatching_child_in(
                         w,
@@ -322,6 +536,7 @@ impl Tx<'_> {
                             required_specialties: &job.required_specialties,
                             node: job.required_node.as_deref(),
                             required_nodes: required_nodes.as_deref(),
+                            allow_main: true,
                         };
                         match crate::placement::validate_coordinator(
                             &db,
@@ -331,20 +546,33 @@ impl Tx<'_> {
                             blocked.clone(),
                             CoordinatorDeferSource::Setting,
                         ) {
-                            Ok((placement, _)) => {
+                            Ok((placement, resolved_project)) => {
                                 let main_id = placement.explanation.bot.as_str().to_owned();
-                                bot_dispatch::record(w, ws, item_id, None, Ok(&placement))?;
-                                db.item_patch(item_id, patch![bot_id: main_id.as_str()])?;
+                                if bot_dispatch::initial(w, item_id)?.is_none() {
+                                    bot_dispatch::record(w, ws, item_id, None, Ok(&placement))?;
+                                }
+                                if item.project_id.is_none()
+                                    && let Some(ref proj) = resolved_project
+                                {
+                                    db.item_patch(
+                                        item_id,
+                                        patch![
+                                            bot_id: main_id.as_str(),
+                                            project_id: Some(proj.id.as_str())
+                                        ],
+                                    )?;
+                                } else {
+                                    db.item_patch(item_id, patch![bot_id: main_id.as_str()])?;
+                                }
                                 bot_dispatch::clear_wait(w, item_id)?;
                                 Self::settle_wf_dispatching_child_in(w, item_id, &placement)?;
-                                let display =
-                                    db.bot(&main_id)?.map(|b| b.display()).unwrap_or(main_id);
-                                db.timeline_add(
+                                record_dispatch_timeline(
+                                    &db,
                                     item_id,
                                     "steve",
-                                    "sys",
-                                    &format!("无合适执行 Bot，改由 {display} 自己执行"),
-                                    None,
+                                    &DispatchEvent::CoordinatorDeferred {
+                                        bot: main_id.into(),
+                                    },
                                 )?;
                                 return Ok(PostAction::Placed {
                                     outcome: "selected",
@@ -352,7 +580,14 @@ impl Tx<'_> {
                                 });
                             }
                             Err(CoreError::Placement(coord_blocked)) => {
-                                bot_dispatch::record_wait(w, ws, item_id, &coord_blocked, None)?;
+                                bot_dispatch::record_wait(
+                                    w,
+                                    ws,
+                                    item_id,
+                                    &coord_blocked,
+                                    None,
+                                    &constraints,
+                                )?;
                                 let paused_wf = Self::block_wf_dispatching_child_in(
                                     w,
                                     item_id,
@@ -366,12 +601,13 @@ impl Tx<'_> {
                             Err(e) => return Err(e),
                         }
                     }
-                    bot_dispatch::record_wait(w, ws, item_id, &blocked, None)?;
-                    let note = match why {
-                        Some(w_text) => format!("Steve 判断当前没有合适的执行 Bot：{w_text}"),
-                        None => "Steve 判断当前没有合适的执行 Bot，等待你指定".to_owned(),
-                    };
-                    db.timeline_add(item_id, "steve", "sys", &note, None)?;
+                    bot_dispatch::record_wait(w, ws, item_id, &blocked, None, &constraints)?;
+                    record_dispatch_timeline(
+                        &db,
+                        item_id,
+                        "steve",
+                        &DispatchEvent::NoCandidates { why },
+                    )?;
                     let paused_wf =
                         Self::block_wf_dispatching_child_in(w, item_id, blocked.reason.as_str())?;
                     Ok(PostAction::Blocked {
@@ -383,49 +619,56 @@ impl Tx<'_> {
                     bot: Some(chosen),
                     why,
                 }) => {
-                    let is_main = db.bot(&chosen)?.is_some_and(|b| b.main);
-                    let validated = if is_main {
-                        Err(CoreError::Placement(PlacementBlocked {
-                            reason: PlacementRejection::OutsideTeam,
-                            rejected: vec![PlacementBlocker {
-                                bot: Some(chosen.clone().into()),
-                                reason: PlacementRejection::OutsideTeam,
-                            }],
-                        }))
-                    } else {
-                        crate::placement::validate(
-                            &db,
-                            self.rt(),
-                            &crate::placement::DispatchRequest {
-                                workspace: ws,
-                                bot: Some(&chosen),
-                                harness: None,
-                                model: None,
-                                effort: None,
-                                team: team.as_ref(),
-                                project: &project_opt,
-                                required_specialties: &job.required_specialties,
-                                node: job.required_node.as_deref(),
-                                required_nodes: required_nodes.as_deref(),
-                            },
-                            default_model,
-                            PlacementReason::SteveSelected,
-                            why.clone(),
-                        )
-                    };
+                    let validated = crate::placement::validate(
+                        &db,
+                        self.rt(),
+                        &crate::placement::DispatchRequest {
+                            workspace: ws,
+                            bot: Some(&chosen),
+                            harness: None,
+                            model: None,
+                            effort: None,
+                            team: team.as_ref(),
+                            project: &project_opt,
+                            required_specialties: &job.required_specialties,
+                            node: job.required_node.as_deref(),
+                            required_nodes: required_nodes.as_deref(),
+                            allow_main: false,
+                        },
+                        default_model,
+                        PlacementReason::SteveSelected,
+                        why.clone(),
+                    );
                     match validated {
-                        Ok((placement, _)) => {
+                        Ok((placement, resolved_project)) => {
                             let bot_id = placement.explanation.bot.as_str().to_owned();
-                            bot_dispatch::record(w, ws, item_id, None, Ok(&placement))?;
-                            db.item_patch(item_id, patch![bot_id: bot_id.as_str()])?;
+                            if bot_dispatch::initial(w, item_id)?.is_none() {
+                                bot_dispatch::record(w, ws, item_id, None, Ok(&placement))?;
+                            }
+                            if item.project_id.is_none()
+                                && let Some(ref proj) = resolved_project
+                            {
+                                db.item_patch(
+                                    item_id,
+                                    patch![
+                                        bot_id: bot_id.as_str(),
+                                        project_id: Some(proj.id.as_str())
+                                    ],
+                                )?;
+                            } else {
+                                db.item_patch(item_id, patch![bot_id: bot_id.as_str()])?;
+                            }
                             bot_dispatch::clear_wait(w, item_id)?;
                             Self::settle_wf_dispatching_child_in(w, item_id, &placement)?;
-                            let display = db.bot(&bot_id)?.map(|b| b.display()).unwrap_or(bot_id);
-                            let line = match placement.explanation.why.as_deref() {
-                                Some(w_text) => format!("Steve 选择由 {display} 执行：{w_text}"),
-                                None => format!("Steve 选择由 {display} 执行"),
-                            };
-                            db.timeline_add(item_id, "steve", "sys", &line, None)?;
+                            record_dispatch_timeline(
+                                &db,
+                                item_id,
+                                "steve",
+                                &DispatchEvent::Selected {
+                                    bot: bot_id.into(),
+                                    why: placement.explanation.why.clone(),
+                                },
+                            )?;
                             Ok(PostAction::Placed {
                                 outcome: "selected",
                                 deferred_by_setting: false,
@@ -440,16 +683,22 @@ impl Tx<'_> {
                                     reason: blocked.reason,
                                 }],
                             };
-                            bot_dispatch::record_wait(w, ws, item_id, &wait_blocked, None)?;
-                            db.timeline_add(
+                            bot_dispatch::record_wait(
+                                w,
+                                ws,
+                                item_id,
+                                &wait_blocked,
+                                None,
+                                &constraints,
+                            )?;
+                            record_dispatch_timeline(
+                                &db,
                                 item_id,
                                 "steve",
-                                "sys",
-                                &format!(
-                                    "Steve 选择的 Bot（{chosen}）未通过校验（{}），等待你处理",
-                                    blocked.reason.as_str()
-                                ),
-                                None,
+                                &DispatchEvent::InvalidChoice {
+                                    bot: chosen.into(),
+                                    reason: blocked.reason,
+                                },
                             )?;
                             let paused_wf = Self::block_wf_dispatching_child_in(
                                 w,
@@ -481,7 +730,11 @@ impl Tx<'_> {
                     .increment(1);
                 }
                 self.reconcile_no_executor_card(ws)?;
-                self.start_waiting_item(item_id)?;
+                if self.dependency_waiting(item_id)? {
+                    self.check_blocked(item_id)?;
+                } else {
+                    self.start_waiting_item(item_id)?;
+                }
                 Ok(Some(outcome))
             }
             PostAction::Blocked { outcome, paused_wf } => {
@@ -792,5 +1045,375 @@ mod tests {
                 "u",
             )
             .unwrap();
+    }
+
+    #[tokio::test]
+    async fn dispatching_item_blocks_start_defers_supplement_and_ignores_resume_and_deps() {
+        let k = Kit::new();
+        seed_extra_bot(&k, "review", "Review", true);
+        let item = k
+            .core
+            .create_item(CreateItem {
+                ws: WS.into(),
+                title: "Wait on Steve".into(),
+                goal: "Do not fall back to main".into(),
+                project: Some(None),
+                opening: Some("initial brief".into()),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(item.bot_id, None);
+        assert!(
+            k.db()
+                .store()
+                .read(|r| bot_dispatch::is_dispatching(r, &item.id))
+                .unwrap()
+        );
+
+        // Unplaced reply during dispatch says Steve is selecting, not blocked.
+        let reply = k.core.unplaced_reply(&item).expect("unplaced reply");
+        assert!(
+            reply.contains(&item.id)
+                && reply == steve_i18n::t!("core.thread.dispatching_execution_bot", id = item.id),
+            "{reply}"
+        );
+
+        // Direct start_session_with must fail with Pending and never start on main_bot.
+        let err = k.core.tx().start_session(&item.id, None, None).unwrap_err();
+        assert!(matches!(
+            err,
+            crate::CoreError::Placement(steve_types::PlacementBlocked {
+                reason: PlacementRejection::Pending,
+                ..
+            })
+        ));
+        assert!(k.db().sessions_of_item(&item.id).unwrap().is_empty());
+
+        // Supplement while dispatching must not open a session on main_bot, and must be preserved.
+        k.core
+            .supplement(
+                &item.id,
+                "extra owner hint",
+                crate::SupplementMode::Auto,
+                &[],
+                "u",
+            )
+            .unwrap();
+        assert!(k.db().sessions_of_item(&item.id).unwrap().is_empty());
+
+        // Pause + Resume while dispatching must not open a session on main_bot.
+        k.core
+            .item_action(&item.id, crate::ItemAction::Pause, "u")
+            .unwrap();
+        k.core
+            .item_action(&item.id, crate::ItemAction::Resume, "u")
+            .unwrap();
+        assert!(k.db().sessions_of_item(&item.id).unwrap().is_empty());
+
+        // Now settle dispatch -> starts on review with both initial brief and supplement.
+        k.gw.set(|_, _| Ok(r#"{"bot":"review","why":"best fit"}"#.into()));
+        assert!(k.core.drain_dispatch_once().await.unwrap());
+        let sessions = k.db().sessions_of_item(&item.id).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].bot_id.as_deref(), Some("review"));
+        let prompt_text =
+            k.rt.st()
+                .prompts
+                .iter()
+                .map(|(_, text, _)| text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+        assert!(prompt_text.contains("initial brief"), "{prompt_text}");
+        assert!(prompt_text.contains("extra owner hint"), "{prompt_text}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_job_panic_releases_running_row_and_opens_card() {
+        let k = Kit::new();
+        seed_extra_bot(&k, "review", "Review", true);
+        k.gw.set(|_, _| panic!("simulated gateway panic"));
+
+        let item = k
+            .core
+            .create_item(CreateItem {
+                ws: WS.into(),
+                title: "Panic recovery".into(),
+                goal: "Must never stay stuck dispatching".into(),
+                project: Some(None),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(k.core.drain_dispatch_once().await.unwrap());
+        assert!(
+            !k.db()
+                .store()
+                .read(|r| bot_dispatch::is_dispatching(r, &item.id))
+                .unwrap(),
+            "running row must be released on panic"
+        );
+        let cards = open_no_executor(&k);
+        assert_eq!(cards.len(), 1);
+        let Some(DecisionPrompt::NoExecutor { reason, .. }) = &cards[0].question_template else {
+            panic!("expected NoExecutor prompt");
+        };
+        assert_eq!(*reason, PlacementRejection::DispatchFailed);
+
+        // Structured DispatchEvent recorded in timeline under kind = "dispatch" (no hardcoded Chinese).
+        let tl = k.db().timeline(&item.id).unwrap();
+        let dispatch_events: Vec<steve_types::DispatchEvent> = tl
+            .iter()
+            .filter(|e| e.kind == "dispatch")
+            .map(|e| serde_json::from_str(&e.text).expect("valid DispatchEvent JSON"))
+            .collect();
+        assert!(
+            dispatch_events
+                .iter()
+                .any(|ev| matches!(ev, steve_types::DispatchEvent::Queued))
+        );
+        assert!(dispatch_events.iter().any(|ev| matches!(
+            ev,
+            steve_types::DispatchEvent::Failed {
+                error: steve_types::DispatchErrorCode::InternalPanic,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn async_dispatch_and_retry_preserve_constraints_and_backfill_default_project() {
+        let k = Kit::new();
+        steve_store::testkit::hub::mutations::seed_users(k.db().store()).unwrap();
+        let owner = Caller {
+            ws: WS.into(),
+            me: "u".into(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        let proj = k
+            .db()
+            .store()
+            .projects()
+            .create(
+                WS,
+                &steve_store::NewProject {
+                    name: "Backend".into(),
+                    description: "backend".into(),
+                    device_id: "hub".into(),
+                    path: dir.path().display().to_string(),
+                    kind: "dir".into(),
+                    worktree: false,
+                    default_bot: None,
+                    release: None,
+                },
+            )
+            .unwrap();
+        k.db()
+            .store()
+            .bots()
+            .patch(
+                "dev",
+                &BotPatch {
+                    specialties: Some(vec!["rust".into()]),
+                    ..Default::default()
+                },
+                "u",
+            )
+            .unwrap();
+        k.db()
+            .store()
+            .bots()
+            .seed(
+                "review",
+                false,
+                &NewBot {
+                    name: "Review".into(),
+                    harness: "fixture".into(),
+                    specialties: Some(vec!["rust".into()]),
+                    default_project: Some(proj.id.clone()),
+                    ..Default::default()
+                },
+                WS,
+            )
+            .unwrap();
+
+        // First attempt fails -> constraints must persist in item_placement_waits.
+        k.gw.set(|_, _| Err(crate::CoreError::Msg("temporary failure".into())));
+        let item = k
+            .core
+            .create_item(CreateItem {
+                ws: WS.into(),
+                title: "Rust migration".into(),
+                goal: "Check constraint preservation".into(),
+                project: None,
+                node: Some("local".into()),
+                required_specialties: vec!["rust".into()],
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(item.project_id, None);
+        assert!(k.core.drain_dispatch_once().await.unwrap());
+
+        let waits = k
+            .db()
+            .store()
+            .read(|r| bot_dispatch::waiting_items(r, WS))
+            .unwrap();
+        assert_eq!(waits.len(), 1);
+        assert_eq!(waits[0].constraints.required_node.as_deref(), Some("local"));
+        assert_eq!(waits[0].constraints.required_specialties, vec!["rust"]);
+        assert!(!waits[0].constraints.project_explicit);
+
+        // Retry dispatch -> re-enqueues with the exact same constraints and backfills default_project.
+        let card = open_no_executor(&k).pop().unwrap();
+        k.gw.set(|_, _| Ok(r#"{"bot":"review","why":"owns backend"}"#.into()));
+        k.core
+            .decision_command(
+                &owner,
+                &card.id,
+                Some(card.revision),
+                DecisionCommand::Resolve {
+                    choice: "retry_dispatch".into(),
+                    text: String::new(),
+                },
+            )
+            .unwrap();
+
+        let job = k
+            .db()
+            .store()
+            .write(|w| bot_dispatch::claim_next_dispatch(w, "dsp_retry_check"))
+            .unwrap()
+            .expect("re-enqueued dispatch job");
+        assert_eq!(job.required_node.as_deref(), Some("local"));
+        assert_eq!(job.required_specialties, vec!["rust"]);
+        assert!(!job.project_explicit);
+
+        k.core.run_dispatch_job_supervised(job).await;
+        let settled = k.db().item(&item.id).unwrap().unwrap();
+        assert_eq!(settled.bot_id.as_deref(), Some("review"));
+        assert_eq!(
+            settled.project_id.as_deref(),
+            Some(proj.id.as_str()),
+            "omitted project must backfill chosen Bot's default_project"
+        );
+    }
+
+    #[tokio::test]
+    async fn inflight_dispatch_is_cancelled_immediately_on_reassign() {
+        use async_trait::async_trait;
+        use std::sync::{
+            Arc, Mutex, RwLock,
+            atomic::{AtomicBool, Ordering},
+        };
+        use std::time::Duration;
+        use tokio::sync::Notify;
+
+        struct HangingGw {
+            started: Arc<Notify>,
+            dropped: Arc<AtomicBool>,
+        }
+        struct DropFlag(Arc<AtomicBool>);
+        impl Drop for DropFlag {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        #[async_trait]
+        impl crate::gateway::ModelGateway for HangingGw {
+            async fn call(
+                &self,
+                _: &str,
+                _: crate::gateway::Tier,
+                _: Duration,
+                _: &crate::gateway::ThinkTools,
+            ) -> crate::Result<crate::gateway::Printed> {
+                let _flag = DropFlag(self.dropped.clone());
+                self.started.notify_one();
+                std::future::pending::<()>().await;
+                unreachable!()
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store =
+            steve_store::Store::open(dir.path().join("steve.sqlite3"), steve_store::NoPublisher)
+                .unwrap();
+        store.ensure_workspace().unwrap();
+        let db = crate::repo::Db::new(store);
+        let rt = Arc::new(crate::testkit::FakeRuntime {
+            store: db.clone(),
+            s: Mutex::new(Default::default()),
+            flushed: Notify::new(),
+            stop_gate: RwLock::new(()),
+        });
+        let started = Arc::new(Notify::new());
+        let dropped = Arc::new(AtomicBool::new(false));
+        let gw = Arc::new(HangingGw {
+            started: started.clone(),
+            dropped: dropped.clone(),
+        });
+        let core = crate::Core::new(db.clone(), rt, gw, crate::CoreConfig::for_home(dir.path()));
+        for (id, name) in [("dev", "Dev"), ("review", "Review")] {
+            db.store()
+                .bots()
+                .seed(
+                    id,
+                    false,
+                    &NewBot {
+                        name: name.into(),
+                        harness: "fixture".into(),
+                        ..Default::default()
+                    },
+                    WS,
+                )
+                .unwrap();
+        }
+
+        let item = core
+            .create_item(CreateItem {
+                ws: WS.into(),
+                title: "Cancel in flight".into(),
+                goal: "Owner takes over immediately".into(),
+                project: Some(None),
+                ..Default::default()
+            })
+            .unwrap();
+        let job = db
+            .store()
+            .write(|w| bot_dispatch::claim_next_dispatch(w, "dsp_hang"))
+            .unwrap()
+            .expect("claimed");
+        let core_bg = core.clone();
+        let task = tokio::spawn(async move {
+            core_bg.run_dispatch_job_supervised(job).await;
+        });
+        started.notified().await;
+        core.reassign(&item.id, "dev", "u").unwrap();
+        tokio::time::timeout(Duration::from_secs(2), task)
+            .await
+            .expect("in-flight dispatch task must cancel immediately")
+            .unwrap();
+        assert!(dropped.load(Ordering::SeqCst));
+    }
+
+    #[test]
+    fn offer_meta_rejects_main_bot_choice() {
+        let k = Kit::new();
+        let meta = k
+            .core
+            .offer_meta(
+                WS,
+                &crate::gateway::Offer {
+                    title: "Fix bug".into(),
+                    goal: "Fix the bug".into(),
+                    bot: Some("steve".into()),
+                    why: Some("picked coordinator".into()),
+                },
+                None,
+                &[],
+            )
+            .unwrap();
+        assert_eq!(meta["bot"], "steve");
+        assert_eq!(meta["rejected"], "outside_team");
+        assert!(meta.get("reason").is_none());
     }
 }

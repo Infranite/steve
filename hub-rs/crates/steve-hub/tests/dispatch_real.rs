@@ -318,11 +318,15 @@ fn diagnostics(h: &Home, item: Option<&str>) -> String {
             ));
         }
     }
-    if let Some(id) = item
-        && let Ok(tl) = node_process::item_timeline_lines(&h.db_path(), id)
-    {
-        out.push_str("\nitem timeline:\n");
-        out.push_str(&tl.join("\n"));
+    if let Some(id) = item {
+        if let Ok(Some(wait)) = node_process::item_placement_wait_blocked(&h.db_path(), id) {
+            out.push_str("\nitem_placement_wait:\n");
+            out.push_str(&wait);
+        }
+        if let Ok(tl) = node_process::item_timeline_lines(&h.db_path(), id) {
+            out.push_str("\nitem timeline:\n");
+            out.push_str(&tl.join("\n"));
+        }
     }
     out
 }
@@ -577,7 +581,7 @@ async fn real_steve_inspects_bots_and_dispatches_to_matching_bot() {
         "with 3 eligible bots, item creation must defer bot selection asynchronously: {item1}"
     );
 
-    // Wait for the async dispatch Think job to settle (either placed or blocked).
+    // Wait for the async dispatch Think job to settle (either placed or blocked in waits).
     let deadline = tokio::time::Instant::now() + DISPATCH_WAIT;
     let (fact_json, blocked_json) = loop {
         if let Some((fact, blocked)) =
@@ -585,6 +589,11 @@ async fn real_steve_inspects_bots_and_dispatches_to_matching_bot() {
             && (fact.is_some() || blocked.is_some())
         {
             break (fact, blocked);
+        }
+        if let Some(wait_blocked) =
+            node_process::item_placement_wait_blocked(&h.db_path(), &item1_id).unwrap()
+        {
+            break (None, Some(wait_blocked));
         }
         assert!(
             tokio::time::Instant::now() < deadline,

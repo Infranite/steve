@@ -7,7 +7,7 @@ export type ModelUsedRow = { harness: string; model: string; calls: number; fail
 export type ModelRecent = { last: { harness: string; model: string; at: number } | null; used: ModelUsedRow[] }
 export type ModelPurpose = {
   role?: "primary" | "lightweight"
-  source?: "primary" | "lightweight" | "override"
+  source?: "primary" | "lightweight" | "chat" | "override"
   key: string
   label: string
   desc: string

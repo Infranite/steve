@@ -1,5 +1,6 @@
 {
   "core.thread.choose_execution_bot": "No eligible executor Bot is available right now. Steve opened a decision card asking how to proceed.",
+  "core.thread.dispatching_execution_bot": "Created item %{id}. Steve is selecting an executor Bot.",
   "core.bot.invalid_selection": "Invalid Bot selection: %{field}",
   "core.bot.unsupported_selection": "%{harness} does not offer %{field} `%{value}`. Choose a reported value or reset it to default (null).",
   "core.item.closed": "This item has ended; start a new cycle if you need to",

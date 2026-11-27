@@ -2,8 +2,8 @@
 //!
 //! Coordinates sandboxed single-step JS replay (`WorkflowStepExecutor`) against the normalized
 //! `wf_runs` / `wf_script_versions` / `wf_calls` / `wf_call_attempts` / `wf_version_calls` ledger,
-//! W3.1 deterministic placement (`placement::select` / `placement::select_coordinator` + unified
-//! `NO_EXECUTOR` coordinator waits), W3.2 two-phase cycle settlement (`cycle.rs`), W3.3 owner
+//! W3.1 hard-constraint placement (`placement::eligible` / `placement::validate` /
+//! `placement::validate_coordinator` + unified `NO_EXECUTOR` coordinator waits), W3.2 two-phase
 //! decisions (`subject_type = "wf_run"`), live SQL `COUNT(*)` cycle budgets, and Hub-authoritative
 //! 4-rule independent final review.
 

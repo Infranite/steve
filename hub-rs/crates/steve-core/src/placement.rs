@@ -33,6 +33,9 @@ pub(crate) struct DispatchRequest<'a> {
     pub required_specialties: &'a [String],
     pub node: Option<&'a str>,
     pub required_nodes: Option<&'a [String]>,
+    /// Whether the workspace coordinator (`main = true`) is permitted as an explicit choice.
+    /// Steve-driven selection (OFFER `SteveSelected`, async dispatch) sets this to `false`.
+    pub allow_main: bool,
 }
 
 pub(crate) struct EligibleBot {
@@ -318,6 +321,15 @@ pub(crate) fn check_bot(
             rejected: vec![],
         }));
     };
+    if bot.main && !req.allow_main {
+        return Err(CoreError::Placement(PlacementBlocked {
+            reason: Rejection::OutsideTeam,
+            rejected: vec![PlacementBlocker {
+                bot: Some(bot.id.into()),
+                reason: Rejection::OutsideTeam,
+            }],
+        }));
+    }
     let mandatory: Vec<_> = req
         .required_specialties
         .iter()
@@ -455,6 +467,7 @@ mod tests {
             required_specialties: &[],
             node: None,
             required_nodes: None,
+            allow_main: false,
         };
         let found = eligible(db, k.rt.as_ref(), &req, |_| None).unwrap();
         let ids: Vec<&str> = found.candidates.iter().map(|c| c.bot.id.as_str()).collect();
@@ -538,5 +551,109 @@ mod tests {
             coord.explanation.reason,
             PlacementReason::CoordinatorDeferred
         );
+    }
+
+    #[test]
+    fn validate_enforces_workspace_membership_before_main_bot_restriction() {
+        let k = Kit::new();
+        let db = k.core.store();
+        steve_store::testkit::hub::mutations::seed_users(db.store()).unwrap();
+        let ws2 = db
+            .store()
+            .workspaces()
+            .create(
+                &steve_store::NewWorkspace {
+                    name: "Other".into(),
+                    description: None,
+                    item_prefix: None,
+                },
+                "u",
+            )
+            .unwrap();
+        db.store()
+            .bots()
+            .seed(
+                "steve2",
+                true,
+                &NewBot {
+                    name: "Steve2".into(),
+                    harness: "fixture".into(),
+                    ..Default::default()
+                },
+                &ws2.id,
+            )
+            .unwrap();
+
+        let base = DispatchRequest {
+            workspace: WS,
+            bot: None,
+            harness: None,
+            model: None,
+            effort: None,
+            team: None,
+            project: &Some(None),
+            required_specialties: &[],
+            node: None,
+            required_nodes: None,
+            allow_main: false,
+        };
+
+        // In-workspace main bot rejected with OutsideTeam when allow_main=false.
+        let main_err = validate(
+            db,
+            k.rt.as_ref(),
+            &DispatchRequest {
+                bot: Some("steve"),
+                ..base
+            },
+            |_| None,
+            PlacementReason::SteveSelected,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            main_err,
+            CoreError::Placement(PlacementBlocked {
+                reason: Rejection::OutsideTeam,
+                ..
+            })
+        ));
+
+        // Cross-workspace main bot rejected with Unauthorized (workspace membership checked first).
+        let other_err = validate(
+            db,
+            k.rt.as_ref(),
+            &DispatchRequest {
+                bot: Some("steve2"),
+                ..base
+            },
+            |_| None,
+            PlacementReason::SteveSelected,
+            None,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            other_err,
+            CoreError::Placement(PlacementBlocked {
+                reason: Rejection::Unauthorized,
+                ..
+            })
+        ));
+
+        // Explicit owner selection allows in-workspace main bot when allow_main=true.
+        let (placed, _) = validate(
+            db,
+            k.rt.as_ref(),
+            &DispatchRequest {
+                bot: Some("steve"),
+                allow_main: true,
+                ..base
+            },
+            |_| None,
+            PlacementReason::Explicit,
+            None,
+        )
+        .unwrap();
+        assert_eq!(placed.explanation.bot.as_str(), "steve");
     }
 }

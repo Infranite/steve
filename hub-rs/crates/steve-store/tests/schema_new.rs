@@ -2027,7 +2027,11 @@ fn migration_148_creates_dispatch_jobs_and_cleans_legacy_scoring_reasons() {
                ('ST-2',NULL,'{"rule_version":2,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":"default","explanation":{"bot":"dev","reason":"description","matched":["docs"],"rejected":[],"fallback":null}}',NULL),
                ('ST-3',NULL,'{"rule_version":2,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":"default","explanation":{"bot":"dev","reason":"project_preference","matched":[],"rejected":[],"fallback":null}}',NULL),
                ('ST-4',NULL,'{"rule_version":2,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":"default","explanation":{"bot":"dev","reason":"stable_order","matched":[],"rejected":[],"fallback":null}}',NULL),
-               ('ST-5',NULL,'{"rule_version":2,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":"default","explanation":{"bot":"dev","reason":"explicit","matched":[],"rejected":[],"fallback":null}}',NULL);"#,
+               ('ST-5',NULL,'{"rule_version":2,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":"default","explanation":{"bot":"dev","reason":"explicit","matched":[],"rejected":[],"fallback":null}}',NULL);
+           INSERT INTO messages(id,workspace_id,space,author,text,meta,created)
+             VALUES
+               ('msg_1','default','main','steve','ans','{"offer":{"title":"T","goal":"G","bot":"dev","reason":"specialty","matched":["rust"],"state":"open"}}',1),
+               ('msg_2','default','main','steve','ans2','{"offer":{"title":"T2","goal":"G2","bot":"dev","reason":"explicit","matched":["x"],"state":"open"}}',2);"#,
     )
     .unwrap();
     drop(c);
@@ -2055,21 +2059,28 @@ fn migration_148_creates_dispatch_jobs_and_cleans_legacy_scoring_reasons() {
         steve_types::PlacementReason::Explicit
     );
 
+    let msg1 = store.messages().get("msg_1").unwrap().unwrap();
+    assert_eq!(msg1.meta["offer"]["reason"], "existing_assignment");
+    assert!(msg1.meta["offer"].get("matched").is_none());
+    let msg2 = store.messages().get("msg_2").unwrap().unwrap();
+    assert_eq!(msg2.meta["offer"]["reason"], "explicit");
+    assert!(msg2.meta["offer"].get("matched").is_none());
+
     store
         .write(|w| {
-            steve_store::bot_dispatch::enqueue_dispatch(
-                w,
-                "default",
-                "ST-5",
-                Some("local"),
-                &["rust".into()],
-            )?;
+            let constraints = steve_store::bot_dispatch::DispatchConstraints {
+                required_node: Some("local".into()),
+                required_specialties: vec!["rust".into()],
+                project_explicit: false,
+            };
+            steve_store::bot_dispatch::enqueue_dispatch(w, "default", "ST-5", &constraints)?;
             assert!(steve_store::bot_dispatch::is_dispatching(w, "ST-5")?);
             let job = steve_store::bot_dispatch::claim_next_dispatch(w, "att_1")?
                 .expect("claimed pending dispatch");
             assert_eq!(job.item_id, "ST-5");
             assert_eq!(job.required_node.as_deref(), Some("local"));
             assert_eq!(job.required_specialties, vec!["rust"]);
+            assert!(!job.project_explicit);
             assert_eq!(steve_store::bot_dispatch::reset_running_dispatches(w)?, 1);
             let job2 = steve_store::bot_dispatch::claim_next_dispatch(w, "att_2")?
                 .expect("re-claimed after reset");
@@ -2081,7 +2092,32 @@ fn migration_148_creates_dispatch_jobs_and_cleans_legacy_scoring_reasons() {
                 w, "default", "ST-5", "att_2"
             )?);
             assert!(!steve_store::bot_dispatch::is_dispatching(w, "ST-5")?);
+
+            steve_store::bot_dispatch::record_wait(
+                w,
+                "default",
+                "ST-5",
+                &steve_types::PlacementBlocked {
+                    reason: steve_types::PlacementRejection::DispatchFailed,
+                    rejected: vec![],
+                },
+                None,
+                &constraints,
+            )?;
             Ok::<_, steve_store::StoreError>(())
         })
         .unwrap();
+    store
+        .fixture_write(|c| {
+            c.execute("UPDATE items SET bot_id = NULL WHERE id = 'ST-5'", [])?;
+            Ok(())
+        })
+        .unwrap();
+    let waits = store
+        .read(|r| steve_store::bot_dispatch::waiting_items(r, "default"))
+        .unwrap();
+    assert_eq!(waits.len(), 1);
+    assert_eq!(waits[0].constraints.required_node.as_deref(), Some("local"));
+    assert_eq!(waits[0].constraints.required_specialties, vec!["rust"]);
+    assert!(!waits[0].constraints.project_explicit);
 }

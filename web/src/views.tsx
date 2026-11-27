@@ -8,7 +8,7 @@ import { getItem, getItems, getSession, itemDisplayStatus } from "@/store"
 import { VirtualList } from "@/components/virtual-list"
 import { itemState, type ItemState } from "@/item-state"
 import { clip } from "@/thread/topics"
-import { BlockedPlacement, BotProposalCard, DispatchDetails, PlacementWhy, NO_TEAM, useBotTeams } from "@/bot-dispatch"
+import { BlockedPlacement, BotProposalCard, DispatchDetails, PlacementWhy, NO_TEAM, formatDispatchTimeline, useBotTeams } from "@/bot-dispatch"
 import { SetSelect } from "@/settings-controls"
 import { DependencyWaitPanel } from "@/dependency-wait-panel"
 import { ItemDebugDialog } from "@/debug-panel"
@@ -297,11 +297,12 @@ function estimateWorklogRow(row: WorklogRow): number {
 /* a folded run of process lines: how many and the latest one; opens in place */
 function ProcessRun({ count, last, renderChildren }: { count: number; last: any[]; renderChildren: () => ReactNode }) {
   const t = useT(), [open, setOpen] = useState(false)
+  const preview = last[0] === "dispatch" ? formatDispatchTimeline(String(last[1] ?? ""), t) : String(last[1] ?? "")
   return <Collapsible open={open} onOpenChange={setOpen} data-process-run={count}>
     <CollapsibleTrigger className="flex w-full min-w-0 items-center gap-2 py-1 text-left type-footnote text-muted-foreground hover:text-foreground">
       <span className="flex size-5 shrink-0 items-center justify-center"><ChevronRightIcon className={cn("size-3.5 transition-transform duration-180 ease-(--ease-out)", open && "rotate-90")} /></span>
       <span className="shrink-0">{t("views:itemState.process", { count })}</span>
-      <span className={cn("min-w-0 truncate text-tertiary transition-opacity duration-180", open && "opacity-0")}>· {clip(String(last[1] ?? ""), 120)}</span>
+      <span className={cn("min-w-0 truncate text-tertiary transition-opacity duration-180", open && "opacity-0")}>· {clip(preview, 120)}</span>
       <span className="ml-auto shrink-0 tabular-nums text-tertiary">{when(last)}</span>
     </CollapsibleTrigger>
     <CollapsibleContent className="ml-2.5 border-l pl-2">{open && renderChildren()}</CollapsibleContent>
@@ -435,7 +436,7 @@ export function ItemView({ id }: { id: string }) {
   const worklogRows = useMemo<WorklogRow[]>(() => {
     if (!i) return []
     const feed = i.tl.map((e, n) => ({ e, n }))
-    const days = byDay(foldProcess(feed, (x) => x.e[0] === "sys" && !queued.byComment.has(x.n)))
+    const days = byDay(foldProcess(feed, (x) => (x.e[0] === "sys" || x.e[0] === "dispatch") && !queued.byComment.has(x.n)))
     const out: WorklogRow[] = []
     days.forEach(([day, gs], dayIndex) => {
       if (day) out.push({ id: `day:${day}:${dayIndex}`, kind: "day", day, first: dayIndex === 0 })
@@ -524,7 +525,7 @@ export function ItemView({ id }: { id: string }) {
   )
   const timelineDisambig = disambiguateActors([
     ...st.members.map((m) => { const a = resolveActor(m.user_id, actorCtx); return { key: a.id ?? m.user_id, name: a.name, subtitle: a.subtitle, fallbackId: m.user_id } }),
-    ...i.tl.filter((e) => e[0] === "me" || e[0] === "sys").map((e) => {
+    ...i.tl.filter((e) => e[0] === "me" || e[0] === "sys" || e[0] === "dispatch").map((e) => {
       const a = actorOf(e)
       return { key: a.id ?? a.name, name: a.name, subtitle: a.subtitle, fallbackId: a.id }
     }),
@@ -547,11 +548,12 @@ export function ItemView({ id }: { id: string }) {
         <div className="min-w-0 flex-1">{notes.length ? <div data-comment-notes><div className="type-body">{t("views:item.notes", { count: notes.length })}</div><AnnRefs item={i.id} anns={notes} outs={i.outs} open={(o, ann) => setPreview({ o, focus: ann })} /></div>
           : (e[1] !== "（附件）" || !e[5]?.length) && <div className="type-body"><Markdown text={e[1]} /></div>}<Files files={e[5]} className="my-1" /><div className="type-footnote tabular-nums text-tertiary"><span className="font-medium text-muted-foreground" data-timeline-actor>{shownName(actor)}</span> · {when(e)}{e[3] && getSession(e[3]) ? ` · ${t("views:item.deliveredTo", { n: getSession(e[3])!.n })}` : ""}{e[6] === "thread" && <a href="#/" className="ml-1.5 rounded-md bg-muted px-1.5 hover:text-foreground" data-from-thread>{t("views:item.fromThread")}</a>}</div></div></div>
     )
+    const sysText = e[0] === "dispatch" ? formatDispatchTimeline(String(e[1] ?? ""), t) : String(e[1] ?? "")
     return (
       <div key={n} className="flex items-center gap-2 py-1 type-footnote text-muted-foreground" data-timeline-sys>
         <ActorAvatar actor={actor} disambiguator={extra} size={18} />
         {actor.kind !== "system" && <span className="shrink-0 font-medium text-foreground/80" data-timeline-actor>{shownName(actor)}</span>}
-        <span className="min-w-0 truncate" title={String(e[1] ?? "")}>{clip(String(e[1] ?? ""), 240)}</span>
+        <span className="min-w-0 truncate" title={sysText}>{clip(sysText, 240)}</span>
         <span className="shrink-0 tabular-nums text-tertiary">{when(e)}</span>
       </div>
     )

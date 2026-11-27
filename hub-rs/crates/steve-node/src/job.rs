@@ -319,6 +319,9 @@ struct Ran {
     usage: Vec<UsageReport>,
 }
 
+/// Exact read-only Steve MCP tools permitted during a dispatch Think job (`ThinkJob::steve_tools`).
+const DISPATCH_STEVE_TOOLS: &[&str] = &["steve_bots_list", "steve_nodes_list"];
+
 /// The think job as a one-shot ACP call. The prompt's stable head goes as the session's system
 /// prompt where the adapter takes one; without tools the harness's own tools are off where it
 /// declares how.
@@ -409,6 +412,11 @@ async fn acp_think(
         max_output_bytes: spec.run.limits.max_output_bytes,
         on_activity: None,
         emit_thoughts: false,
+        allow_steve_mcp_tools: if think.steve_tools {
+            DISPATCH_STEVE_TOOLS
+        } else {
+            &[]
+        },
     };
     let ran =
         crate::acp_job::run_cancellable(req, spawned, &event, stop_execution.notified()).await;
@@ -521,6 +529,17 @@ fn record_think_event(
                 .j
                 .events(vec![(Subject::Execution(exec), progress)], None)
             {
+                event_failed(inner, broken, &error);
+            }
+            inner.wake.notify_one();
+        }
+        tool @ EventBody::ToolChanged { .. } if matches!(&spec.work, JobWork::Think(t) if t.steve_tools) =>
+        {
+            let exec = ExecutionRef::Job {
+                job: spec.job.clone(),
+                attempt: spec.run.attempt.clone(),
+            };
+            if let Err(error) = inner.j.events(vec![(Subject::Execution(exec), tool)], None) {
                 event_failed(inner, broken, &error);
             }
             inner.wake.notify_one();

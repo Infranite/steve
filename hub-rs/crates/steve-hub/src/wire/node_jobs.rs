@@ -896,6 +896,9 @@ impl OneModel for NodePrint {
         if !probe.supports_jobs() {
             return Err(GatewayError::LocalNodeUpdating.into());
         }
+        if needs_dispatch && !probe.supports_think_steve_tools() {
+            return Err(GatewayError::LocalNodeUpdating.into());
+        }
         if !needs_tools && !needs_images {
             return Ok(());
         }
@@ -909,7 +912,8 @@ impl OneModel for NodePrint {
         if needs_read && !harness.is_some_and(|h| h.read_attached) {
             return Err(GatewayError::MissingCapability.into());
         }
-        if needs_dispatch && harness.is_none() {
+        if needs_dispatch && !harness.is_some_and(|h| h.adapter.as_ref().is_none_or(|a| a.mcp_http))
+        {
             return Err(GatewayError::MissingCapability.into());
         }
         if needs_images && !harness.is_some_and(|h| h.images) {
@@ -1485,5 +1489,104 @@ mod tests {
             call_error(&other, None),
             OneShotError::Harness { .. }
         ));
+    }
+
+    #[tokio::test]
+    async fn dispatch_preflight_requires_think_steve_tools_capability_and_mcp_http() {
+        use steve_core::gateway::CallSpec;
+        use steve_node_api::testkit::FakeNode;
+        use steve_node_api::{
+            AdapterInfo, AdapterStatus, FEATURE_THINK_STEVE_TOOLS, HarnessCapability,
+        };
+
+        struct NoopDomain;
+        impl NodeDomain for NoopDomain {
+            fn turn_ended(&self, _: &str, _: Option<&str>, _: &str, _: Option<String>) {}
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("steve.db"), steve_store::NoPublisher).unwrap();
+        let node = FakeNode::new("local");
+        let make_harness = |mcp_http: bool| HarnessCapability {
+            name: "antigravity".into(),
+            version: "1.0.0".into(),
+            sessions: true,
+            jobs: true,
+            models: vec!["gemini-3.8-flash".into()],
+            resume: true,
+            cancel: true,
+            permissions: true,
+            images: false,
+            read_attached: false,
+            enforcement: vec![],
+            adapter: Some(AdapterInfo {
+                title: "Antigravity".into(),
+                builtin: true,
+                status: AdapterStatus::Ready,
+                error: None,
+                version: Some("1.0.0".into()),
+                load_session: true,
+                list_sessions: false,
+                mcp_http,
+                embedded_context: false,
+                auth: vec![],
+                install_hint: None,
+                system_prompt: true,
+                session: None,
+                session_error: None,
+                session_auth_required: Some(false),
+                execution_modes: None,
+                resume_command: None,
+                fork_command: None,
+                capabilities: None,
+                missing_command: None,
+            }),
+            setup: None,
+        };
+        let rt = NodeRuntime::new(store, node.clone(), Arc::new(NoopDomain));
+        let print = NodePrint {
+            runtime: rt,
+            data_dir: dir.path().to_path_buf(),
+        };
+        let tools = ThinkTools::Dispatch;
+        let call = OneCall {
+            prompt: "pick a bot",
+            spec: CallSpec {
+                purpose: "dispatch",
+                required_tools: &tools,
+                auth_scope: &tools,
+                deadline: tokio::time::Instant::now() + Duration::from_secs(30),
+            },
+            harness: "antigravity",
+            images: &[],
+        };
+
+        // 1. Old Node lacking FEATURE_THINK_STEVE_TOOLS must fail explicitly with LocalNodeUpdating.
+        node.set_harnesses(vec![make_harness(true)]);
+        node.set_features(vec![]);
+        let err = print.preflight(&call).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                steve_core::CoreError::Gateway(GatewayError::LocalNodeUpdating)
+            ),
+            "old node without feature must fail with LocalNodeUpdating, got {err:?}"
+        );
+
+        // 2. Node with feature but harness lacking mcp_http must fail with MissingCapability.
+        node.set_features(vec![FEATURE_THINK_STEVE_TOOLS.to_owned()]);
+        node.set_harnesses(vec![make_harness(false)]);
+        let err = print.preflight(&call).await.unwrap_err();
+        assert!(
+            matches!(
+                err,
+                steve_core::CoreError::Gateway(GatewayError::MissingCapability)
+            ),
+            "harness without mcp_http must fail with MissingCapability, got {err:?}"
+        );
+
+        // 3. Node with feature + ready harness with mcp_http succeeds.
+        node.set_harnesses(vec![make_harness(true)]);
+        print.preflight(&call).await.unwrap();
     }
 }

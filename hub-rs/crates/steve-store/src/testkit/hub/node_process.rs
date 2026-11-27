@@ -649,6 +649,17 @@ pub fn item_initial_placement(
         .ok())
 }
 
+pub fn item_placement_wait_blocked(path: &Path, item: &str) -> Result<Option<String>> {
+    let db = super::inspect_database(path)?;
+    Ok(db
+        .query_row(
+            "SELECT blocked FROM item_placement_waits WHERE item_id=?1",
+            [item],
+            |r| r.get(0),
+        )
+        .ok())
+}
+
 pub fn item_timeline_lines(path: &Path, item: &str) -> Result<Vec<String>> {
     let db = super::inspect_database(path)?;
     let mut q = db.prepare(

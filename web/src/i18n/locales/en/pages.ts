@@ -72,6 +72,7 @@ export default {
       preview_other: "Review all {{count}} purpose assignments",
       actual_other: "View actual models for all {{count}} purposes",
       advanced: "Advanced: individual purpose overrides",
+      chat: "Follows chat",
       override: "Individual override",
       exceptions_other: "{{count}} purposes still have individual overrides: {{purposes}}. Configure both models to replace them together, or manage them under Advanced.",
     },

@@ -5,7 +5,6 @@
 //! ([`steve_channels::im_conv_mcp`], scoped to its space). Anything else is refused. The token is the run's own
 //! (`thread_runs.token_hash`), valid while the run is `running`.
 
-use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use axum::http::StatusCode;
@@ -58,6 +57,16 @@ pub struct BotRecentItemInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct BotTeamInfo {
+    pub id: String,
+    pub name: String,
+    /// When `Some`, this Team restricts the Bot to these workspace-visible Nodes;
+    /// when `None`, all of the Bot's `bound_nodes` apply.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowed_nodes: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct BotInfo {
     pub id: String,
     pub name: String,
@@ -70,7 +79,7 @@ pub struct BotInfo {
     pub model: Option<String>,
     pub effort: String,
     pub perm_mode: String,
-    pub teams: Vec<NamedRef>,
+    pub teams: Vec<BotTeamInfo>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_project: Option<NamedRef>,
     pub bound_nodes: Vec<String>,
@@ -93,6 +102,7 @@ pub struct NodeHarnessInfo {
     pub permission_modes: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub default_model: Option<String>,
+    pub models: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -105,7 +115,8 @@ pub struct NodeLoadInfo {
     pub mem_available_bytes: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mem_total_bytes: Option<u64>,
-    pub running_sessions: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub running_sessions: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -148,12 +159,12 @@ fn dispatch_tool_defs() -> Vec<Value> {
     vec![
         json!({
             "name": BOTS_LIST,
-            "description": "List this workspace's Bots with their id, name, role, specialties, harness, model, reasoning effort, permission mode, Teams, default project, bound execution Nodes, current load (active items and running sessions), and up to 5 recent completed or failed items. Use this before choosing a Bot to dispatch work.",
+            "description": "List this workspace's Bots with their id, name, role, specialties, harness, model, reasoning effort, permission mode, Teams (with per-Team allowed_nodes restrictions when set), default project, bound execution Nodes, current load (active items and running sessions), and up to 5 recent completed or failed items. Use this before choosing a Bot to dispatch work.",
             "inputSchema": schema(json!({}), &[]),
         }),
         json!({
             "name": NODES_LIST,
-            "description": "List execution Nodes visible in this workspace with online status, tags, ready harnesses (version, supported permission modes, default model), current load, capacity limits, and disk free/total space. Use this with steve_bots_list to verify which Bots can run right now.",
+            "description": "List execution Nodes visible in this workspace with online status, tags, ready harnesses (version, supported permission modes, default model, and available models), current load, capacity limits (when online), and disk free/total space. Use this with steve_bots_list to verify which Bots can run right now.",
             "inputSchema": schema(json!({}), &[]),
         }),
     ]
@@ -201,7 +212,6 @@ pub fn tools() -> Vec<Value> {
 }
 
 /// The two read-only inspection tools exposed to an async dispatch Think job.
-#[allow(dead_code)]
 pub fn dispatch_descriptors() -> Vec<steve_node_api::ToolDescriptor> {
     dispatch_tool_defs()
         .into_iter()
@@ -345,93 +355,58 @@ pub fn sessions_list(store: &Store, ws: &str, all: bool) -> Result<String, Strin
 
 /// `steve_bots_list`: strongly-typed workspace Bot facts for Steve's dispatch judgment.
 pub fn bots_list(store: &Store, ws: &str) -> Result<BotsListResponse, String> {
-    let mut bots = store.bots().list(Some(ws)).map_err(|e| e.to_string())?;
-    bots.sort_by(|a, b| a.main.cmp(&b.main).then_with(|| a.id.cmp(&b.id)));
-    let projects: HashMap<String, String> = store
-        .projects()
-        .list(ws, false)
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .map(|p| (p.id, p.name))
-        .collect();
-    let items = store.items().all(ws).map_err(|e| e.to_string())?;
-    let sessions = store.sessions().list(Some(ws)).map_err(|e| e.to_string())?;
-    let (default_team, teams, visible_nodes, bindings_by_bot) = store
-        .read(|r| {
-            let default_team = steve_store::bot_dispatch::selected(r, ws, None)?;
-            let teams = steve_store::bot_dispatch::teams(r, ws)?;
-            let mut visible = BTreeSet::from(["local".to_string()]);
-            for n in steve_store::node_directory::workspace_candidates(r, ws)? {
-                visible.insert(n.id);
-            }
-            let mut bindings = HashMap::with_capacity(bots.len());
-            for b in &bots {
-                let bound = steve_store::bot_dispatch::bindings(r, ws, &b.id)?
-                    .into_iter()
-                    .filter(|id| visible.contains(id))
-                    .collect::<Vec<_>>();
-                bindings.insert(b.id.clone(), bound);
-            }
-            Ok::<_, steve_store::StoreError>((default_team, teams, visible, bindings))
-        })
+    let mut facts = store
+        .read(|r| steve_store::bot_dispatch::workspace_bot_facts(r, ws, MAX_RECENT_ITEMS_PER_BOT))
         .map_err(|e| e.to_string())?;
-    let _ = visible_nodes;
-    let mut active_items_by_bot: HashMap<&str, usize> = HashMap::new();
-    let mut recent_by_bot: HashMap<&str, Vec<&steve_store::Item>> = HashMap::new();
-    for item in &items {
-        if item.kind != "task" {
-            continue;
-        }
-        let Some(bot_id) = item.bot_id.as_deref() else {
-            continue;
-        };
-        if !item.archived && !item.is_closed() {
-            *active_items_by_bot.entry(bot_id).or_default() += 1;
-        } else if item.is_closed()
-            && matches!(item.outcome.as_deref(), Some("completed" | "failed"))
-        {
-            recent_by_bot.entry(bot_id).or_default().push(item);
-        }
-    }
-    let mut running_sessions_by_bot: HashMap<&str, usize> = HashMap::new();
-    for session in &sessions {
-        if matches!(session.status.as_str(), "running" | "starting")
-            && let Some(bot_id) = session.bot_id.as_deref()
-        {
-            *running_sessions_by_bot.entry(bot_id).or_default() += 1;
-        }
-    }
-    let bots = bots
+    let bots = facts
+        .bots
         .into_iter()
         .map(|bot| {
-            let bot_teams = teams
+            let bot_teams = facts
+                .teams
                 .iter()
-                .filter(|t| t.member(&bot.id).is_some())
-                .map(|t| NamedRef {
-                    id: t.id.clone(),
-                    name: t.name.clone(),
+                .filter_map(|t| {
+                    let member = t.member(&bot.id)?;
+                    let allowed_nodes = member.nodes.as_ref().map(|ns| {
+                        ns.iter()
+                            .filter(|n| facts.visible_nodes.contains(*n))
+                            .cloned()
+                            .collect::<Vec<_>>()
+                    });
+                    Some(BotTeamInfo {
+                        id: t.id.clone(),
+                        name: t.name.clone(),
+                        allowed_nodes,
+                    })
                 })
                 .collect();
             let default_project = bot.default_project.as_ref().and_then(|pid| {
-                projects.get(pid).map(|name| NamedRef {
+                facts.projects.get(pid).map(|name| NamedRef {
                     id: pid.clone(),
                     name: name.clone(),
                 })
             });
-            let mut recent = recent_by_bot.remove(bot.id.as_str()).unwrap_or_default();
-            recent.sort_by(|a, b| b.updated.cmp(&a.updated).then_with(|| a.id.cmp(&b.id)));
-            recent.truncate(MAX_RECENT_ITEMS_PER_BOT);
-            let recent_items = recent
+            let recent_items = facts
+                .recent_items_by_bot
+                .remove(&bot.id)
+                .unwrap_or_default()
                 .into_iter()
                 .map(|it| BotRecentItemInfo {
-                    id: it.id.clone(),
-                    title: it.title.clone(),
-                    outcome: it.outcome.clone().unwrap_or_default(),
+                    id: it.id,
+                    title: it.title,
+                    outcome: it.outcome,
                     updated_at: it.updated,
                 })
                 .collect();
+            let bound_nodes = facts.bindings_by_bot.remove(&bot.id).unwrap_or_default();
+            let active_items = facts.active_items_by_bot.get(&bot.id).copied().unwrap_or(0);
+            let running_sessions = facts
+                .running_sessions_by_bot
+                .get(&bot.id)
+                .copied()
+                .unwrap_or(0);
             BotInfo {
-                id: bot.id.clone(),
+                id: bot.id,
                 name: bot.name,
                 role: bot.role,
                 specialties: bot.specialties,
@@ -443,23 +418,17 @@ pub fn bots_list(store: &Store, ws: &str) -> Result<BotsListResponse, String> {
                 perm_mode: bot.perm_mode,
                 teams: bot_teams,
                 default_project,
-                bound_nodes: bindings_by_bot.get(&bot.id).cloned().unwrap_or_default(),
+                bound_nodes,
                 load: BotLoadInfo {
-                    active_items: active_items_by_bot
-                        .get(bot.id.as_str())
-                        .copied()
-                        .unwrap_or(0),
-                    running_sessions: running_sessions_by_bot
-                        .get(bot.id.as_str())
-                        .copied()
-                        .unwrap_or(0),
+                    active_items,
+                    running_sessions,
                 },
                 recent_items,
             }
         })
         .collect();
     Ok(BotsListResponse {
-        workspace_default_team: default_team.map(|t| NamedRef {
+        workspace_default_team: facts.default_team.map(|t| NamedRef {
             id: t.id,
             name: t.name,
         }),
@@ -494,11 +463,28 @@ fn ready_harness_info(cap: &HarnessCapability) -> Option<NodeHarnessInfo> {
         .then(|| cap.version.clone())
         .or_else(|| adapter.version.clone().filter(|v| !v.trim().is_empty()));
     let default_model = offer.default_model.clone().filter(|m| !m.trim().is_empty());
+    let mut models = Vec::new();
+    let source_models = if !offer.models.is_empty() {
+        offer
+            .models
+            .iter()
+            .map(|m| m.id.as_str())
+            .collect::<Vec<_>>()
+    } else {
+        cap.models.iter().map(String::as_str).collect::<Vec<_>>()
+    };
+    for raw in source_models {
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() && !models.iter().any(|seen| seen == trimmed) {
+            models.push(trimmed.to_owned());
+        }
+    }
     Some(NodeHarnessInfo {
         name: cap.name.clone(),
         version,
         permission_modes,
         default_model,
+        models,
     })
 }
 
@@ -578,7 +564,7 @@ pub fn nodes_list(
                         load_avg: v.load,
                         mem_available_bytes: v.mem_available,
                         mem_total_bytes: v.mem_total,
-                        running_sessions: v.sessions,
+                        running_sessions: Some(v.sessions),
                     },
                     v.roots
                         .into_iter()
@@ -595,16 +581,20 @@ pub fn nodes_list(
                         load_avg: None,
                         mem_available_bytes: None,
                         mem_total_bytes: None,
-                        running_sessions: 0,
+                        running_sessions: None,
                     },
                     vec![],
                 ),
             };
-            let capacity = cached_caps.map(|c| NodeCapacityInfo {
-                sessions: c.capacity.sessions,
-                jobs: c.capacity.jobs,
-                execs: c.capacity.execs,
-            });
+            let capacity = if online {
+                cached_caps.map(|c| NodeCapacityInfo {
+                    sessions: c.capacity.sessions,
+                    jobs: c.capacity.jobs,
+                    execs: c.capacity.execs,
+                })
+            } else {
+                None
+            };
             NodeInfo {
                 tags: tags_by_node.get(&id).cloned().unwrap_or_default(),
                 id,
@@ -621,7 +611,6 @@ pub fn nodes_list(
 }
 
 /// Dispatch-job tool execution: only the two read-only Bot/Node inspection tools are allowed.
-#[allow(dead_code)]
 pub async fn dispatch_call(
     x: &Extra,
     ws: &str,
@@ -1203,7 +1192,7 @@ mod tests {
                     "Core Team",
                     &[steve_store::bot_dispatch::Member {
                         bot: "dev".into(),
-                        nodes: None,
+                        nodes: Some(vec!["local".into(), "hidden_node".into()]),
                     }],
                 )?;
                 steve_store::bot_admin::set_default(w, ws, Some(&id))?;
@@ -1304,9 +1293,10 @@ mod tests {
         assert_eq!(dev.perm_mode, "auto");
         assert_eq!(
             dev.teams,
-            vec![NamedRef {
+            vec![BotTeamInfo {
                 id: team_id,
-                name: "Core Team".into()
+                name: "Core Team".into(),
+                allowed_nodes: Some(vec!["local".into()]),
             }]
         );
         assert_eq!(
@@ -1476,6 +1466,8 @@ mod tests {
         assert_eq!(local.harnesses[0].version.as_deref(), Some("1.2.3"));
         assert_eq!(local.harnesses[0].permission_modes, vec!["plan", "ask"]);
         assert_eq!(local.harnesses[0].default_model.as_deref(), Some("gpt-5"));
+        assert_eq!(local.harnesses[0].models, vec!["gpt-5"]);
+        assert_eq!(local.load.running_sessions, None);
         assert_eq!(
             local.capacity,
             Some(NodeCapacityInfo {
@@ -1487,6 +1479,8 @@ mod tests {
         let remote = &resp.nodes[1];
         assert!(!remote.online);
         assert!(remote.harnesses.is_empty());
+        assert_eq!(remote.capacity, None);
+        assert_eq!(remote.load.running_sessions, None);
         assert_eq!(remote.tags, vec!["linux"]);
     }
 }

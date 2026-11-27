@@ -737,7 +737,7 @@ impl Tx<'_> {
     }
 
     /// Single unified handoff execution path:
-    /// 1. Resolve target Bot + execution surface through W3.1 [`crate::placement::select`] and
+    /// 1. Resolve target Bot + execution surface through W3.1 [`crate::placement::validate`] and
     ///    verify [`crate::AgentRuntime::can_run_choice`] BEFORE touching the old session.
     /// 2. Stop/hand off old session, expire session-scoped decisions, drain queued messages.
     /// 3. Assemble harness-agnostic deterministic handoff package (goal/acceptance, cwd/branch,
@@ -978,7 +978,7 @@ impl Tx<'_> {
     }
 
     /// Resolve the receiving Bot, [`HarnessChoice`], and W3.1 [`BotPlacement`] through
-    /// [`crate::placement::select`]. Default keeps the SAME Bot and switches only its execution
+    /// [`crate::placement::validate`]. Default keeps the SAME Bot and switches only its execution
     /// surface (`harness + model + effort`) for this item.
     fn resolve_handoff_placement(
         &self,
@@ -1067,6 +1067,7 @@ impl Tx<'_> {
                 required_specialties: &[],
                 node: node_constraint.as_deref(),
                 required_nodes: required_nodes.as_deref(),
+                allow_main: true,
             },
             |rt_id| self.c.models().agent_model(ws, rt_id),
             reason.placement_reason(),

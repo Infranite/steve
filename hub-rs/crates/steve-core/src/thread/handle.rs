@@ -1015,7 +1015,7 @@ impl Core {
                     return Ok(());
                 }
                 metrics::counter!("steve_gateway_handoffs_total").increment(1);
-                let reply_text = Self::unplaced_reply(&item).unwrap_or_else(|| {
+                let reply_text = self.unplaced_reply(&item).unwrap_or_else(|| {
                     handoff::handed_off(
                         &item.id,
                         &self.bot_name(&item),
@@ -1387,7 +1387,7 @@ impl Core {
             }
             format!(" 标签：{}。", names.join("、"))
         };
-        let head = Self::unplaced_reply(&item).unwrap_or_else(|| match &named {
+        let head = self.unplaced_reply(&item).unwrap_or_else(|| match &named {
             Some(b) => format!("按你指定的，交给 {} Bot 了。", b.name),
             None => format!("好，交给 {} 了，做完请你验收。", self.bot_name(&item)),
         });

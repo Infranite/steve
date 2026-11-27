@@ -37,6 +37,8 @@ export type { DecisionView } from "./DecisionView";
 export type { DeliveryRef } from "./DeliveryRef";
 export type { DeviceId } from "./DeviceId";
 export type { DevicesEvent } from "./DevicesEvent";
+export type { DispatchErrorCode } from "./DispatchErrorCode";
+export type { DispatchEvent } from "./DispatchEvent";
 export type { DomainEvent } from "./DomainEvent";
 export type { DurableFact } from "./DurableFact";
 export type { EffortMapping } from "./EffortMapping";

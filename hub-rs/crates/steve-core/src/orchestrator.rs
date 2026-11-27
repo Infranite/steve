@@ -1530,6 +1530,7 @@ impl Tx<'_> {
                     required_specialties: &n.required_specialties,
                     node: n.node.as_deref(),
                     required_nodes: required_nodes.as_deref(),
+                    allow_main: n.placement_reason != Some(steve_types::PlacementReason::SteveSelected),
                 };
                 let default_model = |rt_id: &str| self.c.models().agent_model(ws, rt_id);
                 let (placement, bot, project, blocked, dispatching, deferred_by_setting) =
@@ -1632,13 +1633,17 @@ impl Tx<'_> {
                 if let Some(placement) = &placement {
                     steve_store::bot_dispatch::record(w, ws, &item.id, None, Ok(placement))?;
                 }
+                let dispatch_constraints = steve_store::bot_dispatch::DispatchConstraints {
+                    required_node: n.node.clone(),
+                    required_specialties: n.required_specialties.clone(),
+                    project_explicit: n.project.is_some(),
+                };
                 if dispatching && !n.propose {
                     steve_store::bot_dispatch::enqueue_dispatch(
                         w,
                         ws,
                         &item.id,
-                        n.node.as_deref(),
-                        &n.required_specialties,
+                        &dispatch_constraints,
                     )?;
                 }
                 let mut detail =
@@ -1647,7 +1652,14 @@ impl Tx<'_> {
                     detail["source"] = json!([a, b]);
                 }
                 if let Some(blocked) = &blocked {
-                    steve_store::bot_dispatch::record_wait(w, ws, &item.id, blocked, None)?;
+                    steve_store::bot_dispatch::record_wait(
+                        w,
+                        ws,
+                        &item.id,
+                        blocked,
+                        None,
+                        &dispatch_constraints,
+                    )?;
                     detail["placement_blocked"] = serde_json::to_value(blocked)?;
                 }
                 db.audit(
@@ -1685,13 +1697,7 @@ impl Tx<'_> {
             .unwrap_or_default();
         let assigned = bot
             .map(|b| format!("，交给 {}", b.display()))
-            .unwrap_or_else(|| {
-                if dispatching && !n.propose {
-                    "，正在由 Steve 安排执行者".into()
-                } else {
-                    String::new()
-                }
-            });
+            .unwrap_or_default();
         db.timeline_add(
             &item.id,
             "steve",
@@ -1699,6 +1705,14 @@ impl Tx<'_> {
             &format!("Steve 建立事项{assigned}{where_}{kind}"),
             None,
         )?;
+        if dispatching && !n.propose {
+            crate::dispatch::record_dispatch_timeline(
+                db,
+                &item.id,
+                "steve",
+                &steve_types::DispatchEvent::Queued,
+            )?;
+        }
         if n.propose {
             db.decision_create(NewDecision {
                 workspace_id: ws.into(),
@@ -1945,20 +1959,37 @@ impl Tx<'_> {
 
     pub(crate) fn start_waiting_item(&mut self, item_id: &str) -> Result<()> {
         let item = self.item(item_id)?;
-        if let Some((opening, files)) = self.c.thread_start(&item)? {
-            return self.start_or_fail_files(item_id, Some(&opening), None, &files);
+        let start_kind = format!("deferred_start:{}", item.cycle);
+        let supp_kind = format!("deferred_supplement:{}", item.cycle);
+        let timeline = self.db().timeline(item_id)?;
+        let mut parts = Vec::new();
+        let mut files: Vec<FileRef> = Vec::new();
+        let mut add_files = |list: &[FileRef]| {
+            for f in list {
+                if !files.iter().any(|existing| existing.id == f.id) {
+                    files.push(f.clone());
+                }
+            }
+        };
+        if let Some((opening, thread_files)) = self.c.thread_start(&item)? {
+            if !opening.is_empty() {
+                parts.push(opening);
+            }
+            add_files(&thread_files);
+        } else if let Some(entry) = timeline.iter().find(|e| e.kind == start_kind) {
+            if !entry.text.is_empty() {
+                parts.push(entry.text.clone());
+            }
+            add_files(&entry.files);
         }
-        let deferred = self
-            .db()
-            .timeline(item_id)?
-            .into_iter()
-            .find(|e| e.kind == format!("deferred_start:{}", item.cycle));
-        let opening = deferred
-            .as_ref()
-            .map(|e| e.text.as_str())
-            .filter(|t| !t.is_empty());
-        let files = deferred.as_ref().map(|e| e.files.as_slice()).unwrap_or(&[]);
-        self.start_or_fail_files(item_id, opening, None, files)
+        for entry in timeline.iter().filter(|e| e.kind == supp_kind) {
+            if !entry.text.is_empty() {
+                parts.push(entry.text.clone());
+            }
+            add_files(&entry.files);
+        }
+        let opening = (!parts.is_empty()).then(|| parts.join("\n\n"));
+        self.start_or_fail_files(item_id, opening.as_deref(), None, &files)
     }
 
     fn resolve_no_executor(
@@ -1973,382 +2004,463 @@ impl Tx<'_> {
         let store = db.store().clone();
         let ws = cx.ws;
         let default_model = |rt_id: &str| self.c.models().agent_model(ws, rt_id);
-        let (started_items, wf_wakeups, self_executed, wake_dispatch, reopen_card) = match cx.choice
-        {
-            "assign_bot" => {
-                let bot_id = cx.text.trim();
-                if bot_id.is_empty() {
-                    return Err(steve_modules::ApiError::invalid("text").into());
-                }
-                let (started, wakeups) = store.write::<_, CoreError>(|w| {
-                    let bot = db
-                        .bot(bot_id)?
-                        .filter(|b| b.enabled && db.bot_in_workspace(&b.id, ws).unwrap_or(false))
-                        .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_in_workspace")))?;
-                    let waits = steve_store::bot_dispatch::waiting_items(w, ws)?;
-                    let mut planned = Vec::with_capacity(waits.len());
-                    for wait in &waits {
-                        let item = self.item(&wait.item_id)?;
-                        let (team, _goal, _tags, required_nodes) =
-                            Self::item_placement_inputs(w, &db, &item)?;
-                        let project_opt = Some(item.project_id.clone());
-                        let (placement, _) = crate::placement::validate(
-                            &db,
-                            self.rt(),
-                            &crate::placement::DispatchRequest {
-                                workspace: ws,
-                                bot: Some(&bot.id),
-                                harness: None,
-                                model: None,
-                                effort: None,
-                                team: team.as_ref(),
-                                project: &project_opt,
-                                required_specialties: &[],
-                                node: None,
-                                required_nodes: required_nodes.as_deref(),
-                            },
-                            default_model,
-                            steve_types::PlacementReason::Explicit,
-                            None,
-                        )?;
-                        self.rt().can_run(&item.id, &bot.id, &bot.harness)?;
-                        planned.push((item.id, placement));
+        let (started_items, cancelled_items, wf_wakeups, self_executed, wake_dispatch, reopen_card) =
+            match cx.choice {
+                "assign_bot" => {
+                    let bot_id = cx.text.trim();
+                    if bot_id.is_empty() {
+                        return Err(steve_modules::ApiError::invalid("text").into());
                     }
-                    let item_ids: Vec<&str> = planned.iter().map(|(id, _)| id.as_str()).collect();
-                    settle_answer(
-                        w,
-                        d,
-                        cx,
-                        json!({"choice": "assign_bot", "bot": bot.id, "items": item_ids}),
-                        DecisionChange::Resolve,
-                        None,
-                    )?;
-                    let mut wakeups = Vec::new();
-                    for (item_id, placement) in &planned {
-                        if steve_store::bot_dispatch::initial(w, item_id)?.is_none() {
-                            steve_store::bot_dispatch::record(w, ws, item_id, None, Ok(placement))?;
-                        }
-                        db.item_patch(item_id, patch![bot_id: bot.id.as_str()])?;
-                        steve_store::bot_dispatch::clear_wait(w, item_id)?;
-                        let _ = steve_store::bot_dispatch::cancel_dispatch(w, ws, item_id)?;
-                        if let Some(run_id) =
-                            Self::promote_wf_blocked_child_in(w, item_id, placement)?
-                        {
-                            wakeups.push(run_id);
-                        }
-                        db.timeline_add(
-                            item_id,
-                            cx.actor,
-                            "sys",
-                            &format!("指定由 {} 执行", bot.display()),
-                            None,
-                        )?;
-                    }
-                    Ok((
-                        planned.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
-                        wakeups,
-                    ))
-                })?;
-                (started, wakeups, false, false, false)
-            }
-            "confirm_proposal" => {
-                let draft = match &d.question_template {
-                    Some(steve_types::DecisionPrompt::NoExecutor {
-                        proposal: Some(draft),
-                        ..
-                    }) => draft.clone(),
-                    _ => return Err(steve_modules::ApiError::invalid("choice").into()),
-                };
-                let edit: steve_types::ConfirmBotProposal = if cx.text.trim().is_empty() {
-                    steve_types::ConfirmBotProposal {
-                        expected_revision: draft.revision,
-                        name: draft.name.clone(),
-                        role: draft.role.clone(),
-                        specialties: draft.specialties.clone(),
-                        harness: draft.harness.clone(),
-                        model: draft.model.clone(),
-                    }
-                } else {
-                    serde_json::from_str(cx.text)
-                        .map_err(|_| steve_modules::ApiError::invalid("text"))?
-                };
-                let bot_id = self
-                    .rt()
-                    .confirm_bot_proposal(ws, cx.actor, &draft.id, edit)?;
-                let (started, wakeups) = store.write::<_, CoreError>(|w| {
-                    let bot = db
-                        .bot(&bot_id)?
-                        .ok_or(steve_store::StoreError::NotFound("Bot"))?;
-                    let waits = steve_store::bot_dispatch::waiting_items(w, ws)?;
-                    let mut planned = Vec::with_capacity(waits.len());
-                    for wait in &waits {
-                        if let Some(team) = &draft.team {
-                            steve_store::bot_dispatch::add_member_to_snapshot(
-                                w,
-                                &wait.item_id,
-                                &team.id,
-                                &bot.id,
-                            )?;
-                        }
-                        let item = self.item(&wait.item_id)?;
-                        let (team, _goal, _tags, required_nodes) =
-                            Self::item_placement_inputs(w, &db, &item)?;
-                        let project_opt = Some(item.project_id.clone());
-                        let (placement, _) = crate::placement::validate(
-                            &db,
-                            self.rt(),
-                            &crate::placement::DispatchRequest {
-                                workspace: ws,
-                                bot: Some(&bot.id),
-                                harness: None,
-                                model: None,
-                                effort: None,
-                                team: team.as_ref(),
-                                project: &project_opt,
-                                required_specialties: &[],
-                                node: None,
-                                required_nodes: required_nodes.as_deref(),
-                            },
-                            default_model,
-                            steve_types::PlacementReason::Explicit,
-                            None,
-                        )?;
-                        self.rt().can_run(&item.id, &bot.id, &bot.harness)?;
-                        planned.push((item.id, placement));
-                    }
-                    let item_ids: Vec<&str> = planned.iter().map(|(id, _)| id.as_str()).collect();
-                    settle_answer(
-                        w,
-                        d,
-                        cx,
-                        json!({"choice": "confirm_proposal", "bot": bot.id, "proposal": draft.id, "items": item_ids}),
-                        DecisionChange::Resolve,
-                        None,
-                    )?;
-                    let mut wakeups = Vec::new();
-                    for (item_id, placement) in &planned {
-                        if steve_store::bot_dispatch::initial(w, item_id)?.is_none() {
-                            steve_store::bot_dispatch::record(w, ws, item_id, None, Ok(placement))?;
-                        }
-                        db.item_patch(item_id, patch![bot_id: bot.id.as_str()])?;
-                        steve_store::bot_dispatch::clear_wait(w, item_id)?;
-                        let _ = steve_store::bot_dispatch::cancel_dispatch(w, ws, item_id)?;
-                        if let Some(run_id) =
-                            Self::promote_wf_blocked_child_in(w, item_id, placement)?
-                        {
-                            wakeups.push(run_id);
-                        }
-                        db.timeline_add(
-                            item_id,
-                            cx.actor,
-                            "sys",
-                            &format!("新建并由 {} 执行", bot.display()),
-                            None,
-                        )?;
-                    }
-                    Ok((
-                        planned.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
-                        wakeups,
-                    ))
-                })?;
-                (started, wakeups, false, false, false)
-            }
-            "retry_dispatch" => {
-                let (started, wakeups, deferred_count, wake_dispatch, reopen_card) =
-                    store.write::<_, CoreError>(|w| {
+                    let (started, wakeups) = store.write::<_, CoreError>(|w| {
+                        let bot = db
+                            .bot(bot_id)?
+                            .filter(|b| {
+                                b.enabled && db.bot_in_workspace(&b.id, ws).unwrap_or(false)
+                            })
+                            .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_in_workspace")))?;
                         let waits = steve_store::bot_dispatch::waiting_items(w, ws)?;
+                        let mut planned = Vec::with_capacity(waits.len());
+                        for wait in &waits {
+                            let item = self.item(&wait.item_id)?;
+                            let (team, _goal, _tags, required_nodes) =
+                                Self::item_placement_inputs(w, &db, &item)?;
+                            let project_opt = Some(item.project_id.clone());
+                            let (placement, _) = crate::placement::validate(
+                                &db,
+                                self.rt(),
+                                &crate::placement::DispatchRequest {
+                                    workspace: ws,
+                                    bot: Some(&bot.id),
+                                    harness: None,
+                                    model: None,
+                                    effort: None,
+                                    team: team.as_ref(),
+                                    project: &project_opt,
+                                    required_specialties: &[],
+                                    node: None,
+                                    required_nodes: required_nodes.as_deref(),
+                                    allow_main: true,
+                                },
+                                default_model,
+                                steve_types::PlacementReason::Explicit,
+                                None,
+                            )?;
+                            self.rt().can_run(&item.id, &bot.id, &bot.harness)?;
+                            planned.push((item.id, placement));
+                        }
                         let item_ids: Vec<&str> =
-                            waits.iter().map(|w| w.item_id.as_str()).collect();
+                            planned.iter().map(|(id, _)| id.as_str()).collect();
                         settle_answer(
                             w,
                             d,
                             cx,
-                            json!({"choice": "retry_dispatch", "items": item_ids}),
+                            json!({"choice": "assign_bot", "bot": bot.id, "items": item_ids}),
                             DecisionChange::Resolve,
                             None,
                         )?;
-                        let mut started = Vec::new();
                         let mut wakeups = Vec::new();
-                        let mut deferred_count = 0u64;
-                        let mut wake_dispatch = false;
-                        let mut reopen_card = false;
+                        for (item_id, placement) in &planned {
+                            if steve_store::bot_dispatch::initial(w, item_id)?.is_none() {
+                                steve_store::bot_dispatch::record(
+                                    w,
+                                    ws,
+                                    item_id,
+                                    None,
+                                    Ok(placement),
+                                )?;
+                            }
+                            db.item_patch(item_id, patch![bot_id: bot.id.as_str()])?;
+                            steve_store::bot_dispatch::clear_wait(w, item_id)?;
+                            let _ = steve_store::bot_dispatch::cancel_dispatch(w, ws, item_id)?;
+                            if let Some(run_id) =
+                                Self::promote_wf_blocked_child_in(w, item_id, placement)?
+                            {
+                                wakeups.push(run_id);
+                            }
+                            db.timeline_add(
+                                item_id,
+                                cx.actor,
+                                "sys",
+                                &format!("指定由 {} 执行", bot.display()),
+                                None,
+                            )?;
+                        }
+                        Ok((
+                            planned.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                            wakeups,
+                        ))
+                    })?;
+                    let cancelled = started.clone();
+                    (started, cancelled, wakeups, false, false, false)
+                }
+                "confirm_proposal" => {
+                    let draft = match &d.question_template {
+                        Some(steve_types::DecisionPrompt::NoExecutor {
+                            proposal: Some(draft),
+                            ..
+                        }) => draft.clone(),
+                        _ => return Err(steve_modules::ApiError::invalid("choice").into()),
+                    };
+                    let edit: steve_types::ConfirmBotProposal = if cx.text.trim().is_empty() {
+                        steve_types::ConfirmBotProposal {
+                            expected_revision: draft.revision,
+                            name: draft.name.clone(),
+                            role: draft.role.clone(),
+                            specialties: draft.specialties.clone(),
+                            harness: draft.harness.clone(),
+                            model: draft.model.clone(),
+                        }
+                    } else {
+                        serde_json::from_str(cx.text)
+                            .map_err(|_| steve_modules::ApiError::invalid("text"))?
+                    };
+                    let bot_id = self
+                        .rt()
+                        .confirm_bot_proposal(ws, cx.actor, &draft.id, edit)?;
+                    let (started, wakeups) = store.write::<_, CoreError>(|w| {
+                        let bot = db
+                            .bot(&bot_id)?
+                            .ok_or(steve_store::StoreError::NotFound("Bot"))?;
+                        let waits = steve_store::bot_dispatch::waiting_items(w, ws)?;
+                        let mut planned = Vec::with_capacity(waits.len());
                         for wait in &waits {
+                            if let Some(team) = &draft.team {
+                                steve_store::bot_dispatch::add_member_to_snapshot(
+                                    w,
+                                    &wait.item_id,
+                                    &team.id,
+                                    &bot.id,
+                                )?;
+                            }
                             let item = self.item(&wait.item_id)?;
-                            steve_store::bot_dispatch::clear_wait(w, &item.id)?;
-                            let _ = steve_store::bot_dispatch::cancel_dispatch(w, ws, &item.id)?;
                             let (team, _goal, _tags, required_nodes) =
                                 Self::item_placement_inputs(w, &db, &item)?;
-                            let (wf_node, wf_specialties) =
-                                Self::wf_child_dispatch_constraints_in(w, &item.id)?;
                             let project_opt = Some(item.project_id.clone());
-                            let req = crate::placement::DispatchRequest {
-                                workspace: ws,
-                                bot: None,
-                                harness: None,
-                                model: None,
-                                effort: None,
-                                team: team.as_ref(),
-                                project: &project_opt,
-                                required_specialties: &wf_specialties,
-                                node: wf_node.as_deref(),
-                                required_nodes: required_nodes.as_deref(),
-                            };
-                            match self.plan_auto_dispatch_in(w, &req)? {
-                                AutoDispatchOutcome::Placed {
-                                    placement,
-                                    bot,
-                                    deferred_by_setting,
-                                    ..
-                                } => {
-                                    if steve_store::bot_dispatch::initial(w, &item.id)?.is_none() {
-                                        steve_store::bot_dispatch::record(
+                            let (placement, _) = crate::placement::validate(
+                                &db,
+                                self.rt(),
+                                &crate::placement::DispatchRequest {
+                                    workspace: ws,
+                                    bot: Some(&bot.id),
+                                    harness: None,
+                                    model: None,
+                                    effort: None,
+                                    team: team.as_ref(),
+                                    project: &project_opt,
+                                    required_specialties: &[],
+                                    node: None,
+                                    required_nodes: required_nodes.as_deref(),
+                                    allow_main: false,
+                                },
+                                default_model,
+                                steve_types::PlacementReason::Explicit,
+                                None,
+                            )?;
+                            self.rt().can_run(&item.id, &bot.id, &bot.harness)?;
+                            planned.push((item.id, placement));
+                        }
+                        let item_ids: Vec<&str> = planned.iter().map(|(id, _)| id.as_str()).collect();
+                        settle_answer(
+                            w,
+                            d,
+                            cx,
+                            json!({"choice": "confirm_proposal", "bot": bot.id, "proposal": draft.id, "items": item_ids}),
+                            DecisionChange::Resolve,
+                            None,
+                        )?;
+                        let mut wakeups = Vec::new();
+                        for (item_id, placement) in &planned {
+                            if steve_store::bot_dispatch::initial(w, item_id)?.is_none() {
+                                steve_store::bot_dispatch::record(w, ws, item_id, None, Ok(placement))?;
+                            }
+                            db.item_patch(item_id, patch![bot_id: bot.id.as_str()])?;
+                            steve_store::bot_dispatch::clear_wait(w, item_id)?;
+                            let _ = steve_store::bot_dispatch::cancel_dispatch(w, ws, item_id)?;
+                            if let Some(run_id) =
+                                Self::promote_wf_blocked_child_in(w, item_id, placement)?
+                            {
+                                wakeups.push(run_id);
+                            }
+                            db.timeline_add(
+                                item_id,
+                                cx.actor,
+                                "sys",
+                                &format!("新建并由 {} 执行", bot.display()),
+                                None,
+                            )?;
+                        }
+                        Ok((
+                            planned.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                            wakeups,
+                        ))
+                    })?;
+                    let cancelled = started.clone();
+                    (started, cancelled, wakeups, false, false, false)
+                }
+                "retry_dispatch" => {
+                    let (started, cancelled, wakeups, deferred_count, wake_dispatch, reopen_card) =
+                        store.write::<_, CoreError>(|w| {
+                            let waits = steve_store::bot_dispatch::waiting_items(w, ws)?;
+                            let item_ids: Vec<&str> =
+                                waits.iter().map(|w| w.item_id.as_str()).collect();
+                            settle_answer(
+                                w,
+                                d,
+                                cx,
+                                json!({"choice": "retry_dispatch", "items": item_ids}),
+                                DecisionChange::Resolve,
+                                None,
+                            )?;
+                            let mut started = Vec::new();
+                            let mut cancelled = Vec::with_capacity(waits.len());
+                            let mut wakeups = Vec::new();
+                            let mut deferred_count = 0u64;
+                            let mut wake_dispatch = false;
+                            let mut reopen_card = false;
+                            for wait in &waits {
+                                let item = self.item(&wait.item_id)?;
+                                cancelled.push(item.id.clone());
+                                steve_store::bot_dispatch::clear_wait(w, &item.id)?;
+                                let _ =
+                                    steve_store::bot_dispatch::cancel_dispatch(w, ws, &item.id)?;
+                                let (team, _goal, _tags, required_nodes) =
+                                    Self::item_placement_inputs(w, &db, &item)?;
+                                let (wf_node, wf_specialties) =
+                                    Self::wf_child_dispatch_constraints_in(w, &item.id)?;
+                                let constraints = steve_store::bot_dispatch::DispatchConstraints {
+                                    required_node: wait
+                                        .constraints
+                                        .required_node
+                                        .clone()
+                                        .or(wf_node),
+                                    required_specialties: if !wait
+                                        .constraints
+                                        .required_specialties
+                                        .is_empty()
+                                    {
+                                        wait.constraints.required_specialties.clone()
+                                    } else {
+                                        wf_specialties
+                                    },
+                                    project_explicit: wait.constraints.project_explicit,
+                                };
+                                let project_opt =
+                                    if !constraints.project_explicit && item.project_id.is_none() {
+                                        None
+                                    } else {
+                                        Some(item.project_id.clone())
+                                    };
+                                let req = crate::placement::DispatchRequest {
+                                    workspace: ws,
+                                    bot: None,
+                                    harness: None,
+                                    model: None,
+                                    effort: None,
+                                    team: team.as_ref(),
+                                    project: &project_opt,
+                                    required_specialties: &constraints.required_specialties,
+                                    node: constraints.required_node.as_deref(),
+                                    required_nodes: required_nodes.as_deref(),
+                                    allow_main: false,
+                                };
+                                match self.plan_auto_dispatch_in(w, &req)? {
+                                    AutoDispatchOutcome::Placed {
+                                        placement,
+                                        bot,
+                                        project,
+                                        deferred_by_setting,
+                                    } => {
+                                        if steve_store::bot_dispatch::initial(w, &item.id)?
+                                            .is_none()
+                                        {
+                                            steve_store::bot_dispatch::record(
+                                                w,
+                                                ws,
+                                                &item.id,
+                                                None,
+                                                Ok(&placement),
+                                            )?;
+                                        }
+                                        if item.project_id.is_none()
+                                            && let Some(ref proj) = project
+                                        {
+                                            db.item_patch(
+                                                &item.id,
+                                                patch![
+                                                    bot_id: bot.id.as_str(),
+                                                    project_id: Some(proj.id.as_str())
+                                                ],
+                                            )?;
+                                        } else {
+                                            db.item_patch(
+                                                &item.id,
+                                                patch![bot_id: bot.id.as_str()],
+                                            )?;
+                                        }
+                                        if let Some(run_id) = Self::promote_wf_blocked_child_in(
+                                            w, &item.id, &placement,
+                                        )? {
+                                            wakeups.push(run_id);
+                                        }
+                                        if deferred_by_setting {
+                                            deferred_count += 1;
+                                        }
+                                        crate::dispatch::record_dispatch_timeline(
+                                            &db,
+                                            &item.id,
+                                            cx.actor,
+                                            &steve_types::DispatchEvent::RetryAssigned {
+                                                bot: bot.id.clone().into(),
+                                            },
+                                        )?;
+                                        started.push(item.id);
+                                    }
+                                    AutoDispatchOutcome::Dispatching { .. } => {
+                                        steve_store::bot_dispatch::enqueue_dispatch(
                                             w,
                                             ws,
                                             &item.id,
-                                            None,
-                                            Ok(&placement),
+                                            &constraints,
                                         )?;
+                                        if let Some(run_id) =
+                                            Self::requeue_wf_blocked_child_for_dispatch_in(
+                                                w, &item.id,
+                                            )?
+                                        {
+                                            wakeups.push(run_id);
+                                        }
+                                        crate::dispatch::record_dispatch_timeline(
+                                            &db,
+                                            &item.id,
+                                            cx.actor,
+                                            &steve_types::DispatchEvent::RetryQueued,
+                                        )?;
+                                        wake_dispatch = true;
                                     }
-                                    db.item_patch(&item.id, patch![bot_id: bot.id.as_str()])?;
-                                    if let Some(run_id) =
-                                        Self::promote_wf_blocked_child_in(w, &item.id, &placement)?
-                                    {
-                                        wakeups.push(run_id);
+                                    AutoDispatchOutcome::Blocked { blocked, .. } => {
+                                        steve_store::bot_dispatch::record_wait(
+                                            w,
+                                            ws,
+                                            &item.id,
+                                            &blocked,
+                                            None,
+                                            &constraints,
+                                        )?;
+                                        reopen_card = true;
                                     }
-                                    if deferred_by_setting {
-                                        deferred_count += 1;
-                                    }
-                                    db.timeline_add(
-                                        &item.id,
-                                        cx.actor,
-                                        "sys",
-                                        &format!("重新派发并交给 {} 执行", bot.display()),
-                                        None,
-                                    )?;
-                                    started.push(item.id);
-                                }
-                                AutoDispatchOutcome::Dispatching { .. } => {
-                                    steve_store::bot_dispatch::enqueue_dispatch(
-                                        w,
-                                        ws,
-                                        &item.id,
-                                        wf_node.as_deref(),
-                                        &wf_specialties,
-                                    )?;
-                                    if let Some(run_id) =
-                                        Self::requeue_wf_blocked_child_for_dispatch_in(w, &item.id)?
-                                    {
-                                        wakeups.push(run_id);
-                                    }
-                                    db.timeline_add(
-                                        &item.id,
-                                        cx.actor,
-                                        "sys",
-                                        "已交由 Steve 重新选择执行 Bot",
-                                        None,
-                                    )?;
-                                    wake_dispatch = true;
-                                }
-                                AutoDispatchOutcome::Blocked { blocked, .. } => {
-                                    steve_store::bot_dispatch::record_wait(
-                                        w, ws, &item.id, &blocked, None,
-                                    )?;
-                                    reopen_card = true;
                                 }
                             }
-                        }
-                        Ok((started, wakeups, deferred_count, wake_dispatch, reopen_card))
-                    })?;
-                if deferred_count > 0 {
-                    metrics::counter!(
-                        "steve_coordinator_self_executions_total",
-                        "source" => steve_types::CoordinatorDeferSource::Setting.as_str()
-                    )
-                    .increment(deferred_count);
-                }
-                (started, wakeups, false, wake_dispatch, reopen_card)
-            }
-            "later" => {
-                let (started, wakeups) = store.write::<_, CoreError>(|w| {
-                    let main_bot = db
-                        .bots(ws)?
-                        .into_iter()
-                        .find(|b| b.main)
-                        .ok_or_else(|| msg(steve_i18n::t!("core.bot.no_main")))?;
-                    let waits = steve_store::bot_dispatch::waiting_items(w, ws)?;
-                    let mut planned = Vec::with_capacity(waits.len());
-                    for wait in &waits {
-                        let item = self.item(&wait.item_id)?;
-                        let (team, _goal, _tags, required_nodes) =
-                            Self::item_placement_inputs(w, &db, &item)?;
-                        let project_opt = Some(item.project_id.clone());
-                        let (placement, _) = crate::placement::validate_coordinator(
-                            &db,
-                            self.rt(),
-                            &crate::placement::DispatchRequest {
-                                workspace: ws,
-                                bot: None,
-                                harness: None,
-                                model: None,
-                                effort: None,
-                                team: team.as_ref(),
-                                project: &project_opt,
-                                required_specialties: &[],
-                                node: None,
-                                required_nodes: required_nodes.as_deref(),
-                            },
-                            default_model,
-                            wait.blocked.clone(),
-                            steve_types::CoordinatorDeferSource::Card,
-                        )?;
-                        self.rt().can_run(&item.id, &main_bot.id, &main_bot.harness)?;
-                        planned.push((item.id, placement));
+                            Ok((
+                                started,
+                                cancelled,
+                                wakeups,
+                                deferred_count,
+                                wake_dispatch,
+                                reopen_card,
+                            ))
+                        })?;
+                    if deferred_count > 0 {
+                        metrics::counter!(
+                            "steve_coordinator_self_executions_total",
+                            "source" => steve_types::CoordinatorDeferSource::Setting.as_str()
+                        )
+                        .increment(deferred_count);
                     }
-                    let item_ids: Vec<&str> = planned.iter().map(|(id, _)| id.as_str()).collect();
-                    settle_answer(
-                        w,
-                        d,
-                        cx,
-                        json!({"choice": "later", "bot": main_bot.id, "policy": "steve", "items": item_ids}),
-                        DecisionChange::Resolve,
-                        None,
-                    )?;
-                    steve_store::bot_dispatch::set_no_executor_policy(
-                        w,
-                        ws,
-                        steve_types::NoExecutorPolicy::Steve,
-                        cx.actor,
-                    )?;
-                    let mut wakeups = Vec::new();
-                    for (item_id, placement) in &planned {
-                        if steve_store::bot_dispatch::initial(w, item_id)?.is_none() {
-                            steve_store::bot_dispatch::record(w, ws, item_id, None, Ok(placement))?;
+                    (
+                        started,
+                        cancelled,
+                        wakeups,
+                        false,
+                        wake_dispatch,
+                        reopen_card,
+                    )
+                }
+                "later" => {
+                    let (started, wakeups) = store.write::<_, CoreError>(|w| {
+                        let main_bot = db
+                            .bots(ws)?
+                            .into_iter()
+                            .find(|b| b.main)
+                            .ok_or_else(|| msg(steve_i18n::t!("core.bot.no_main")))?;
+                        let waits = steve_store::bot_dispatch::waiting_items(w, ws)?;
+                        let mut planned = Vec::with_capacity(waits.len());
+                        for wait in &waits {
+                            let item = self.item(&wait.item_id)?;
+                            let (team, _goal, _tags, required_nodes) =
+                                Self::item_placement_inputs(w, &db, &item)?;
+                            let project_opt = Some(item.project_id.clone());
+                            let (placement, _) = crate::placement::validate_coordinator(
+                                &db,
+                                self.rt(),
+                                &crate::placement::DispatchRequest {
+                                    workspace: ws,
+                                    bot: None,
+                                    harness: None,
+                                    model: None,
+                                    effort: None,
+                                    team: team.as_ref(),
+                                    project: &project_opt,
+                                    required_specialties: &[],
+                                    node: None,
+                                    required_nodes: required_nodes.as_deref(),
+                                    allow_main: true,
+                                },
+                                default_model,
+                                wait.blocked.clone(),
+                                steve_types::CoordinatorDeferSource::Card,
+                            )?;
+                            self.rt().can_run(&item.id, &main_bot.id, &main_bot.harness)?;
+                            planned.push((item.id, placement));
                         }
-                        db.item_patch(item_id, patch![bot_id: main_bot.id.as_str()])?;
-                        steve_store::bot_dispatch::clear_wait(w, item_id)?;
-                        let _ = steve_store::bot_dispatch::cancel_dispatch(w, ws, item_id)?;
-                        if let Some(run_id) =
-                            Self::promote_wf_blocked_child_in(w, item_id, placement)?
-                        {
-                            wakeups.push(run_id);
-                        }
-                        db.timeline_add(
-                            item_id,
-                            cx.actor,
-                            "sys",
-                            &format!("无人可接，改为由 {} 自己执行", main_bot.display()),
+                        let item_ids: Vec<&str> = planned.iter().map(|(id, _)| id.as_str()).collect();
+                        settle_answer(
+                            w,
+                            d,
+                            cx,
+                            json!({"choice": "later", "bot": main_bot.id, "policy": "steve", "items": item_ids}),
+                            DecisionChange::Resolve,
                             None,
                         )?;
-                    }
-                    Ok((
-                        planned.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
-                        wakeups,
-                    ))
-                })?;
-                (started, wakeups, true, false, false)
-            }
-            _ => return Err(steve_modules::ApiError::invalid("choice").into()),
-        };
+                        steve_store::bot_dispatch::set_no_executor_policy(
+                            w,
+                            ws,
+                            steve_types::NoExecutorPolicy::Steve,
+                            cx.actor,
+                        )?;
+                        let mut wakeups = Vec::new();
+                        for (item_id, placement) in &planned {
+                            if steve_store::bot_dispatch::initial(w, item_id)?.is_none() {
+                                steve_store::bot_dispatch::record(w, ws, item_id, None, Ok(placement))?;
+                            }
+                            db.item_patch(item_id, patch![bot_id: main_bot.id.as_str()])?;
+                            steve_store::bot_dispatch::clear_wait(w, item_id)?;
+                            let _ = steve_store::bot_dispatch::cancel_dispatch(w, ws, item_id)?;
+                            if let Some(run_id) =
+                                Self::promote_wf_blocked_child_in(w, item_id, placement)?
+                            {
+                                wakeups.push(run_id);
+                            }
+                            db.timeline_add(
+                                item_id,
+                                cx.actor,
+                                "sys",
+                                &format!("无人可接，改为由 {} 自己执行", main_bot.display()),
+                                None,
+                            )?;
+                        }
+                        Ok((
+                            planned.into_iter().map(|(id, _)| id).collect::<Vec<_>>(),
+                            wakeups,
+                        ))
+                    })?;
+                    let cancelled = started.clone();
+                    (started, cancelled, wakeups, true, false, false)
+                }
+                _ => return Err(steve_modules::ApiError::invalid("choice").into()),
+            };
+        for item_id in &cancelled_items {
+            self.c.cancel_inflight_dispatch(item_id);
+        }
         metrics::counter!(
             "steve_no_executor_decisions_settled_total",
             "choice" => cx.choice.to_owned()
@@ -2462,6 +2574,16 @@ impl Tx<'_> {
                 })
             })?,
             None => {
+                if self
+                    .db()
+                    .store()
+                    .read(|r| steve_store::bot_dispatch::is_dispatching(r, item_id))?
+                {
+                    return Err(CoreError::Placement(steve_types::PlacementBlocked {
+                        reason: steve_types::PlacementRejection::Pending,
+                        rejected: vec![],
+                    }));
+                }
                 if let Some(blocked) = self.db().store().read(|r| {
                     steve_store::bot_dispatch::creation_blocked(r, &item.workspace_id, item_id)
                 })? {
@@ -3998,6 +4120,14 @@ impl Tx<'_> {
         if !i.phase.can_run() || i.archived || !deps_open(self.db(), item_id)?.is_empty() {
             return Ok(());
         }
+        if i.bot_id.is_none()
+            && self
+                .db()
+                .store()
+                .read(|r| steve_store::bot_dispatch::is_dispatching(r, item_id))?
+        {
+            return Ok(());
+        }
         if self.cfg().no_resume
             || self.holding()
             || self
@@ -4712,6 +4842,8 @@ impl Tx<'_> {
                                     let (team, _goal, _tags, required_nodes) =
                                         Self::item_placement_inputs(w, &db, &before)?;
                                     let project_opt = Some(before.project_id.clone());
+                                    let constraints =
+                                        steve_store::bot_dispatch::DispatchConstraints::default();
                                     let req = crate::placement::DispatchRequest {
                                         workspace: ws,
                                         bot: None,
@@ -4720,9 +4852,10 @@ impl Tx<'_> {
                                         effort: None,
                                         team: team.as_ref(),
                                         project: &project_opt,
-                                        required_specialties: &[],
-                                        node: None,
+                                        required_specialties: &constraints.required_specialties,
+                                        node: constraints.required_node.as_deref(),
                                         required_nodes: required_nodes.as_deref(),
+                                        allow_main: false,
                                     };
                                     match self.plan_auto_dispatch_in(w, &req)? {
                                         AutoDispatchOutcome::Placed {
@@ -4752,14 +4885,24 @@ impl Tx<'_> {
                                                 w,
                                                 ws,
                                                 &i,
-                                                None,
-                                                &[],
+                                                &constraints,
+                                            )?;
+                                            crate::dispatch::record_dispatch_timeline(
+                                                &db,
+                                                &i,
+                                                "steve",
+                                                &steve_types::DispatchEvent::Queued,
                                             )?;
                                             Ok((false, true, false, None))
                                         }
                                         AutoDispatchOutcome::Blocked { blocked, .. } => {
                                             steve_store::bot_dispatch::record_wait(
-                                                w, ws, &i, &blocked, None,
+                                                w,
+                                                ws,
+                                                &i,
+                                                &blocked,
+                                                None,
+                                                &constraints,
                                             )?;
                                             Ok((false, false, false, Some(blocked)))
                                         }
@@ -5556,6 +5699,24 @@ impl Tx<'_> {
         let s = match s {
             Some(s) if mode != SupplementMode::New => s,
             _ => {
+                let item = self.item(item_id)?;
+                if item.bot_id.is_none()
+                    && self
+                        .db()
+                        .store()
+                        .read(|r| steve_store::bot_dispatch::is_dispatching(r, item_id))?
+                {
+                    let kind = format!("deferred_supplement:{}", item.cycle);
+                    self.db().timeline_add_files(
+                        item_id,
+                        actor,
+                        &kind,
+                        &format!("补充信息：{text}"),
+                        None,
+                        files,
+                    )?;
+                    return Ok(());
+                }
                 self.start_session_files(
                     item_id,
                     Some(&format!(
@@ -5671,6 +5832,13 @@ impl Tx<'_> {
                     self.check_blocked(id)?;
                 } else if !deps_open(self.db(), id)?.is_empty() {
                     self.db().store().dependency_waits().arm(id)?;
+                } else if i.bot_id.is_none()
+                    && self
+                        .db()
+                        .store()
+                        .read(|r| steve_store::bot_dispatch::is_dispatching(r, id))?
+                {
+                    // Async Steve dispatch is still selecting the executor Bot; do not start early.
                 } else if !self.waits_on_user(Some(id))? {
                     match s.as_ref().filter(|s| s.status != "ended") {
                         Some(s) => self.prompt(&s.id, "继续这个事项。", "me"),
@@ -5680,10 +5848,12 @@ impl Tx<'_> {
             }
             ItemAction::Archive => {
                 self.db().item_patch(id, patch![archived: true])?;
-                if self.db().store().write(|w| {
+                let cleared = self.db().store().write(|w| {
                     let _ = steve_store::bot_dispatch::cancel_dispatch(w, &i.workspace_id, id)?;
                     steve_store::bot_dispatch::clear_wait(w, id)
-                })? {
+                })?;
+                self.c.cancel_inflight_dispatch(id);
+                if cleared {
                     self.reconcile_no_executor_card(&i.workspace_id)?;
                 }
             }
@@ -5749,6 +5919,7 @@ impl Tx<'_> {
                         required_specialties: &[],
                         node: None,
                         required_nodes: required_nodes.as_deref(),
+                        allow_main: true,
                     },
                     default_model,
                     steve_types::PlacementReason::Explicit,
@@ -5770,6 +5941,7 @@ impl Tx<'_> {
                 )?;
                 Ok((cleared, wf_wakeup))
             })?;
+            self.c.cancel_inflight_dispatch(id);
             if cleared {
                 self.reconcile_no_executor_card(&i.workspace_id)?;
             }

@@ -93,6 +93,26 @@ export default {
       "bot": "The Bot is disabled or no longer in the workspace.",
       "local": "The Hub’s local Node cannot run this session (its directory, permission mode or item state).",
       "bind_failed": "Could not bind a Node in the allowed list. Check the Bot and Device settings, then retry."
+    },
+    timeline: {
+      queued: "Steve is selecting an executor Bot",
+      selected: "Steve selected {{bot}}",
+      selectedWhy: "Steve selected {{bot}}: {{why}}",
+      noCandidates: "Steve found no eligible executor Bot; waiting for your choice",
+      noCandidatesWhy: "Steve found no eligible executor Bot: {{why}}",
+      coordinatorDeferred: "No eligible executor Bot; {{bot}} is taking over",
+      invalidChoice: "Steve selected {{bot}}, which failed validation ({{reason}}); waiting for your choice",
+      failed: "Steve could not choose an executor Bot: {{error}}",
+      failedDetail: "Steve could not choose an executor Bot ({{error}}): {{detail}}",
+      retryAssigned: "Retried dispatch and assigned to {{bot}}",
+      retryQueued: "Queued for Steve to choose an executor Bot again",
+    },
+    errors: {
+      invalid_response: "invalid response format",
+      model_call_failed: "model call failed",
+      prepare_failed: "failed to prepare dispatch context",
+      settle_failed: "failed to persist dispatch result",
+      internal_panic: "dispatch task aborted unexpectedly",
     }
   },
   bot: {

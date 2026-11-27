@@ -575,7 +575,7 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
   lines.forEach((t, n) => {
     const sid = started(t)
     /* [8] is the moment itself, for the page's day headings; [9] is the Hub actor id */
-    const row: any[] = sid ? ["sys", i18n.t("core:sessionStarted"), tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via, t.id] : ["sys", t.text, tm(t.ts)]
+    const row: any[] = sid ? ["sys", i18n.t("core:sessionStarted"), tm(t.ts)] : t.kind === "me" ? ["me", t.text, tm(t.ts), t.session_id ?? undefined, replies.get(t.id), t.files, t.via, t.id] : t.kind === "dispatch" ? ["dispatch", t.text, tm(t.ts)] : ["sys", t.text, tm(t.ts)]
     row[8] = t.ts
     row[9] = t.actor
     tl.push(row)
