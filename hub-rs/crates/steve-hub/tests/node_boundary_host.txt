@@ -44,8 +44,8 @@ Fs	steve-core/src/config.rs	3
 Fs	steve-core/src/orchestrator.rs	7
 Fs	steve-core/src/release.rs	11
 Fs	steve-core/src/workspace.rs	2
-Fs	steve-hub/src/access.rs	5
-Fs	steve-hub/src/admin/paths.rs	20
+Fs	steve-hub/src/access.rs	4
+Fs	steve-hub/src/admin/paths.rs	19
 Fs	steve-hub/src/admin/routes.rs	1
 Fs	steve-hub/src/api/files.rs	1
 Fs	steve-hub/src/api/outputs.rs	11
@@ -55,7 +55,7 @@ Fs	steve-hub/src/backup/engine.rs	10
 Fs	steve-hub/src/backup/files.rs	10
 Fs	steve-hub/src/backup/repository.rs	15
 Fs	steve-hub/src/check.rs	5
-Fs	steve-hub/src/config.rs	5
+Fs	steve-hub/src/config.rs	4
 Fs	steve-hub/src/deliveries/mod.rs	12
 Fs	steve-hub/src/extension.rs	1
 Fs	steve-hub/src/files.rs	6
@@ -64,7 +64,6 @@ Fs	steve-hub/src/metrics.rs	1
 Fs	steve-hub/src/metrics/backup.rs	2
 Fs	steve-hub/src/nodes/fleet.rs	1
 Fs	steve-hub/src/nodes/install.rs	16
-Fs	steve-hub/src/nodes/mod.rs	1
 Fs	steve-hub/src/nodes/tailcat.rs	3
 Fs	steve-hub/src/nodes/upgrade.rs	7
 Fs	steve-hub/src/plugins/install.rs	18
@@ -75,7 +74,7 @@ Fs	steve-hub/src/upgrades/cli.rs	22
 Fs	steve-hub/src/upgrades/client.rs	7
 Fs	steve-hub/src/upgrades/install.rs	4
 Fs	steve-hub/src/upgrades/maintenance.rs	1
-Fs	steve-hub/src/upgrades/mod.rs	13
+Fs	steve-hub/src/upgrades/mod.rs	12
 Fs	steve-hub/src/upgrades/runner.rs	13
 Fs	steve-hub/src/upgrades/supervisor.rs	8
 Fs	steve-hub/src/web.rs	5
@@ -89,7 +88,7 @@ Fs	steve-install/src/release.rs	25
 Fs	steve-install/src/service.rs	61
 Fs	steve-install/src/service/boot.rs	7
 Fs	steve-install/src/service/file_access.rs	2
-Fs	steve-install/src/setup.rs	17
+Fs	steve-install/src/setup.rs	16
 Fs	steve-install/src/setup/reconfigure.rs	11
 Fs	steve-install/src/setup/reconfigure/snapshot.rs	1
 Fs	steve-install/src/signing.rs	60
@@ -109,7 +108,7 @@ Fs	steve-mail/src/usage.rs	1
 Fs	steve-modules/src/vault/keystore/dir.rs	7
 Fs	steve-modules/src/vault/keystore/file.rs	8
 Fs	steve-modules/src/vault/keystore/helper.rs	2
-Fs	steve-node-wire/src/identity.rs	4
+Fs	steve-node-wire/src/identity.rs	3
 Fs	steve-node-wire/src/tailcat.rs	1
 Fs	steve-research/src/attach.rs	4
 Fs	steve-research/src/guard.rs	1

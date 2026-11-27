@@ -390,6 +390,45 @@ pub mod testkit {
         tx.commit()?;
         Ok(())
     }
+
+    /// Build a genuine SQLite database stopped at an earlier schema version `target`
+    /// (`1..=MIGRATIONS.len()`), so upgrade/init paths can be tested against real pending migrations.
+    pub fn migrate_to(path: &Path, target: usize) -> Result<()> {
+        assert!(
+            (1..=MIGRATIONS.len()).contains(&target),
+            "target {target} out of range 1..={}",
+            MIGRATIONS.len()
+        );
+        let mut c = Connection::open(path)?;
+        c.pragma_update(None, "journal_mode", "WAL")?;
+        c.pragma_update(None, "foreign_keys", "OFF")?;
+        c.execute_batch(
+            "CREATE TABLE IF NOT EXISTS schema_version (v INTEGER NOT NULL);
+             CREATE TABLE IF NOT EXISTS schema_compat (min_reader INTEGER NOT NULL);",
+        )?;
+        let tx = c.transaction()?;
+        for (i, sql) in MIGRATIONS[..target].iter().enumerate() {
+            let v = i + 1;
+            if v == 17 {
+                add_reasoning_effort(&tx)?;
+            } else {
+                tx.execute_batch(sql)?;
+            }
+            if v == 27 {
+                ensure_item_lifecycle(&tx)?;
+            }
+        }
+        tx.execute("DELETE FROM schema_version", [])?;
+        tx.execute("INSERT INTO schema_version (v) VALUES (?)", [target as i64])?;
+        tx.execute("DELETE FROM schema_compat", [])?;
+        tx.execute(
+            "INSERT INTO schema_compat (min_reader) VALUES (?)",
+            [target as i64],
+        )?;
+        tx.commit()?;
+        c.pragma_update(None, "foreign_keys", "ON")?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]

@@ -116,9 +116,12 @@ impl Identity {
     /// Written once, 0600 from the start (never widened then narrowed).
     pub fn save(&self, path: &Path) -> io::Result<()> {
         use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
         if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
+            std::fs::DirBuilder::new()
+                .recursive(true)
+                .mode(0o700)
+                .create(dir)?;
         }
         let mut f = std::fs::OpenOptions::new()
             .write(true)

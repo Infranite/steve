@@ -140,6 +140,7 @@ printf '%s|%s\n' '{component}' "$*" >> {calls}
 case "$1" in
  --build-info) printf '%s\n' '{info}' ;;
  --check-config) printf '%s\n' '{{"ok":true,"errors":[],"warnings":[]}}' ;;
+ --admin) printf '%s\n' '{{"ok":true,"schema_version":54}}' ;;
  --access) printf '%s\n' '{{"user":"fixture-owner","token":"fixture-token"}}' ;;
  adapters|--adapters) printf '%s\n' '{{"adapters":[],"npm":false}}' ;;
  pair) /bin/mkdir -p "$STEVE_HOME/node"; printf '{{"hub_url":"%s","pin":null}}' "$2" > "$STEVE_HOME/node/node.json" ;;
@@ -323,7 +324,7 @@ fn pin_normalization_and_same_hub_only_resume_table() {
 fn hub_checks_before_issuing_a_token_and_resume_does_not_issue_twice() {
     let f = Fixture::new("hub");
     // Resume after signing avoids invoking real platform signing/keychain programs. The first
-    // token has not been issued yet, so the real setup must still check and issue it once.
+    // token has not been issued yet, so the real setup must still check, init-db, and issue once.
     private(&f.home.join("bin/steve-keyhelper"), b"fixture helper");
     private(&f.home.join("signing/identity.json"), b"{}");
     let helper = hash(&f.home.join("bin/steve-keyhelper"));
@@ -337,11 +338,15 @@ fn hub_checks_before_issuing_a_token_and_resume_does_not_issue_twice() {
         assert!(phases(&out).contains(&"start".to_string()), "{text}");
         let log = f.log();
         let check = log.lines().position(|l| l == "hub|--check-config").unwrap();
+        let init_db = log
+            .lines()
+            .position(|l| l == "hub|--admin init-db")
+            .unwrap();
         let token = log
             .lines()
             .position(|l| l.starts_with("hub|--access token create "))
             .unwrap();
-        assert!(check < token, "{log}");
+        assert!(check < init_db && init_db < token, "{log}");
         assert_eq!(
             log.lines()
                 .filter(|l| l.starts_with("hub|--access token create "))
@@ -355,8 +360,231 @@ fn hub_checks_before_issuing_a_token_and_resume_does_not_issue_twice() {
             "{log}"
         );
         assert_eq!(
+            log.lines().filter(|l| *l == "hub|--admin init-db").count(),
+            attempt + 1,
+            "{log}"
+        );
+        assert_eq!(
             fs::read_to_string(f.home.join("secrets/owner.token")).unwrap(),
             "user=fixture-owner\ntoken=fixture-token\n"
         );
     }
+}
+
+#[test]
+fn setup_surfaces_underlying_subprocess_errors_verbatim() {
+    let info = json!({"version":"1.2.3","commit":"a".repeat(40),"schema":54,"target":steve_install::build_info()["target"]});
+
+    // 1) Hub subcommand failures: --check-config (non-JSON crash), --admin init-db, --access token create.
+    for (failing_arg, sentinel) in [
+        (
+            "--check-config",
+            "steve.env: invalid listener configuration",
+        ),
+        ("--admin", "database migration failed: schema v999 is newer"),
+        (
+            "--access",
+            "offline admin requires schema head: unable to open database file",
+        ),
+    ] {
+        let f = Fixture::new("hub");
+        let body = format!(
+            r#"#!/bin/sh
+case "$1" in
+ --build-info) printf '%s\n' '{info}' ;;
+ {failing_arg}) printf '%s\n' '{sentinel}' >&2; exit 2 ;;
+ --check-config) printf '%s\n' '{{"ok":true,"errors":[],"warnings":[]}}' ;;
+ --admin) printf '%s\n' '{{"ok":true,"schema_version":54}}' ;;
+ --access) printf '%s\n' '{{"user":"fixture-owner","token":"fixture-token"}}' ;;
+ *) exit 95 ;;
+esac
+"#
+        );
+        executable(&f.root.join("installer/bin/steve-hub"), &body);
+        private(&f.home.join("bin/steve-keyhelper"), b"fixture helper");
+        private(
+            &f.home.join("signing/identity.json"),
+            br#"{"label":"test.fixture.err"}"#,
+        );
+        let helper = hash(&f.home.join("bin/steve-keyhelper"));
+        let identity = hash(&f.home.join("signing/identity.json"));
+        f.receipt(
+            "hub",
+            json!({
+                "steps": ["keychain"],
+                "keychain_started": true,
+                "signed_hub_sha256": hash(&f.root.join("installer/bin/steve-hub")),
+                "helper_sha256": helper,
+                "identity_sha256": identity,
+                "environment": {
+                    "STEVE_HOST": "127.0.0.1",
+                    "STEVE_PORT": "18990",
+                    "STEVE_PUBLIC_URL": "http://127.0.0.1:18991",
+                    "STEVE_WEB_PORT": "18991",
+                    "STEVE_VAULT_KEYSTORE": "file"
+                }
+            }),
+        );
+        let out = Command::new(&f.cli)
+            .args([
+                "setup",
+                "hub",
+                "--home",
+                f.home.to_str().unwrap(),
+                "--label",
+                "test.fixture.err",
+                "--adapters",
+                "none",
+            ])
+            .env_clear()
+            .env("HOME", &f.account)
+            .env("PATH", &f.bin)
+            .env("TMPDIR", &f.root)
+            .env("STEVE_LANG", "en")
+            .env("STEVE_PLAIN", "1")
+            .current_dir(&f.root)
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        let text = said(&out);
+        assert!(!out.status.success(), "{failing_arg}: {text}");
+        assert!(
+            text.contains(sentinel),
+            "{failing_arg} must report underlying stderr verbatim:\n{text}"
+        );
+    }
+
+    // 2) Node resume status failure surfaces underlying steve-node stderr verbatim.
+    let f = Fixture::new("node");
+    let node_sentinel = "identity.key is readable by others (mode 644); chmod 600 it";
+    executable(
+        &f.root.join("installer/bin/steve-node"),
+        &format!(
+            r#"#!/bin/sh
+case "$1" in
+ --build-info) printf '%s\n' '{info}' ;;
+ adapters|--adapters) printf '%s\n' '{{"adapters":[],"npm":false}}' ;;
+ status) printf '%s\n' '{node_sentinel}' >&2; exit 1 ;;
+ *) exit 95 ;;
+esac
+"#
+        ),
+    );
+    f.receipt(
+        "node",
+        json!({"pair_started": true, "hub_url": "https://hub.example"}),
+    );
+    private(
+        &f.home.join("node/node.json"),
+        br#"{"hub_url":"https://hub.example","pin":null}"#,
+    );
+    let out = f.invoke("node", &["--hub", "https://hub.example"]);
+    let text = said(&out);
+    assert!(!out.status.success(), "{text}");
+    assert!(
+        text.contains(node_sentinel),
+        "node status failure must report underlying stderr verbatim:\n{text}"
+    );
+}
+
+#[test]
+fn hub_resume_reissues_missing_owner_token_and_guards_loose_secrets_dir() {
+    // 1) A stale phantom `files["secrets/owner.token"]` in setup.json with no file on disk
+    //    must not cause resume to skip issuing the owner token.
+    let f = Fixture::new("hub");
+    private(&f.home.join("bin/steve-keyhelper"), b"fixture helper");
+    private(&f.home.join("signing/identity.json"), b"{}");
+    let helper = hash(&f.home.join("bin/steve-keyhelper"));
+    let identity = hash(&f.home.join("signing/identity.json"));
+    let stale_digest = "0".repeat(64);
+    f.receipt(
+        "hub",
+        json!({
+            "steps": ["keychain"],
+            "keychain_started": true,
+            "signed_hub_sha256": hash(&f.root.join("installer/bin/steve-hub")),
+            "helper_sha256": helper,
+            "identity_sha256": identity,
+            "files": { "secrets/owner.token": stale_digest },
+            "environment": {
+                "STEVE_HOST": "127.0.0.1",
+                "STEVE_PORT": "18990",
+                "STEVE_PUBLIC_URL": "http://127.0.0.1:18991",
+                "STEVE_WEB_PORT": "18991",
+                "STEVE_VAULT_KEYSTORE": "file"
+            }
+        }),
+    );
+    let out = f.invoke("hub", &[]);
+    let text = said(&out);
+    assert!(phases(&out).contains(&"start".to_string()), "{text}");
+    assert_eq!(
+        fs::read_to_string(f.home.join("secrets/owner.token")).unwrap(),
+        "user=fixture-owner\ntoken=fixture-token\n"
+    );
+    let receipt: Value =
+        serde_json::from_slice(&fs::read(f.home.join("setup.json")).unwrap()).unwrap();
+    assert_eq!(
+        receipt["files"]["secrets/owner.token"].as_str().unwrap(),
+        hash(&f.home.join("secrets/owner.token"))
+    );
+
+    // 2) Loose `secrets/` (0755) fails BEFORE calling `--access token create` and does NOT
+    //    write a phantom `files["secrets/owner.token"]` entry into setup.json. After fixing
+    //    `secrets/` to 0700, resuming issues and writes the token cleanly.
+    let f2 = Fixture::new("hub");
+    private(&f2.home.join("bin/steve-keyhelper"), b"fixture helper");
+    private(&f2.home.join("signing/identity.json"), b"{}");
+    let helper2 = hash(&f2.home.join("bin/steve-keyhelper"));
+    let identity2 = hash(&f2.home.join("signing/identity.json"));
+    f2.receipt(
+        "hub",
+        json!({
+            "steps": ["keychain"],
+            "keychain_started": true,
+            "signed_hub_sha256": hash(&f2.root.join("installer/bin/steve-hub")),
+            "helper_sha256": helper2,
+            "identity_sha256": identity2,
+            "environment": {
+                "STEVE_HOST": "127.0.0.1",
+                "STEVE_PORT": "18992",
+                "STEVE_PUBLIC_URL": "http://127.0.0.1:18993",
+                "STEVE_WEB_PORT": "18993",
+                "STEVE_VAULT_KEYSTORE": "file"
+            }
+        }),
+    );
+    fs::create_dir(f2.home.join("secrets")).unwrap();
+    fs::set_permissions(f2.home.join("secrets"), fs::Permissions::from_mode(0o755)).unwrap();
+
+    let failed = f2.invoke("hub", &[]);
+    let failed_text = said(&failed);
+    assert!(!failed.status.success(), "{failed_text}");
+    assert!(failed_text.contains("0700"), "{failed_text}");
+    assert!(
+        !f2.log()
+            .lines()
+            .any(|l| l.starts_with("hub|--access token create ")),
+        "must not mint a token when secrets/ permissions fail:\n{}",
+        f2.log()
+    );
+    let receipt2: Value =
+        serde_json::from_slice(&fs::read(f2.home.join("setup.json")).unwrap()).unwrap();
+    assert!(
+        receipt2["files"].get("secrets/owner.token").is_none(),
+        "failed secrets/ check must not leave a phantom receipt entry: {receipt2}"
+    );
+    assert!(!f2.home.join("secrets/owner.token").exists());
+
+    fs::set_permissions(f2.home.join("secrets"), fs::Permissions::from_mode(0o700)).unwrap();
+    let resumed = f2.invoke("hub", &[]);
+    let resumed_text = said(&resumed);
+    assert!(
+        phases(&resumed).contains(&"start".to_string()),
+        "{resumed_text}"
+    );
+    assert_eq!(
+        fs::read_to_string(f2.home.join("secrets/owner.token")).unwrap(),
+        "user=fixture-owner\ntoken=fixture-token\n"
+    );
 }

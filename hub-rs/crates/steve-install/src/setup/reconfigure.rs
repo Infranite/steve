@@ -534,13 +534,33 @@ fn check(runtime: &Runtime, home: &Path, values: &BTreeMap<String, String>) -> R
         "check_config",
         RECONFIGURE_CHECK_CONFIG_TIMEOUT,
     )?;
-    let report: Value = serde_json::from_slice(&output.stdout)
-        .context(t!("install.reconfigure.check.no_result"))?;
-    ensure!(
-        output.status.success() && report["ok"] == true,
-        "{}",
-        t!("install.reconfigure.check.rejected")
-    );
+    let report = match serde_json::from_slice::<Value>(&output.stdout) {
+        Ok(report) if report["ok"].is_boolean() => report,
+        _ if !output.status.success() => bail!(
+            "{}",
+            super::format_command_failure(
+                t!("install.setup.command_failed", status = output.status),
+                &output,
+            )
+        ),
+        _ => bail!(
+            "{}",
+            super::format_command_failure(t!("install.reconfigure.check.no_result"), &output)
+        ),
+    };
+    if !output.status.success() || report["ok"] != true {
+        let mut said = t!("install.reconfigure.check.rejected");
+        for reason in report["errors"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+        {
+            said.push_str("\n  ");
+            said.push_str(reason);
+        }
+        bail!("{said}");
+    }
     if report["warnings"]
         .as_array()
         .is_some_and(|warnings| !warnings.is_empty())

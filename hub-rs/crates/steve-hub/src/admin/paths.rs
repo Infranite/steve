@@ -69,14 +69,33 @@ pub fn socket_path(home: &Path) -> Result<PathBuf> {
         Err(e) => Err(e.into()),
     }
 }
-fn private_dir(path: &Path) -> Result<()> {
-    fs::create_dir_all(path)?;
+/// Creates `path` (and any missing parents) with mode `0700`, verifies `path` is a real
+/// directory owned by the effective user (never following a symlink), and tightens its mode
+/// to `0700`.
+pub(crate) fn ensure_private_dir(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)?;
     let meta = fs::symlink_metadata(path)?;
-    ensure!(
-        meta.is_dir() && meta.uid() == super::euid(),
-        "management directory must be owned by this user and not a symlink"
-    );
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    if !meta.is_dir() || meta.uid() != super::euid() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            format!(
+                "private directory must be owned by this user and not a symlink: {}",
+                path.display()
+            ),
+        ));
+    }
+    if meta.permissions().mode() & 0o777 != 0o700 {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
+fn private_dir(path: &Path) -> Result<()> {
+    ensure_private_dir(path)?;
     Ok(())
 }
 /// Owned by the Hub process while it holds the installation lock.

@@ -3,8 +3,9 @@ pub(crate) mod client;
 mod paths;
 mod routes;
 
-pub(crate) use paths::ReadyFile;
 pub use paths::socket_path;
+pub(crate) use paths::{ReadyFile, ensure_private_dir};
+pub(crate) use routes::StorageStatus;
 use std::{
     io,
     path::{Path, PathBuf},

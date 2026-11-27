@@ -1328,7 +1328,11 @@ impl Updates {
 
 /// Held for the Hub process lifetime, including migration before any listener exists.
 pub fn instance_lock(cfg: &Config) -> Result<File> {
-    fs::create_dir_all(cfg.home.join("updates"))?;
+    use std::os::unix::fs::DirBuilderExt;
+    fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(cfg.home.join("updates"))?;
     let file = OpenOptions::new()
         .create(true)
         .truncate(false)

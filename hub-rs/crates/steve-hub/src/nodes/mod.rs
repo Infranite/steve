@@ -110,7 +110,7 @@ pub fn identity_at(home: &std::path::Path) -> std::io::Result<steve_node_wire::I
         Ok(id) => Ok(id),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             if let Some(dir) = path.parent() {
-                std::fs::create_dir_all(dir)?;
+                crate::admin::ensure_private_dir(dir)?;
             }
             let id = steve_node_wire::Identity::generate()?;
             id.save(&path)?;

@@ -136,11 +136,23 @@ async fn revoke_token(State(store): State<Store>, Path(id): Path<String>) -> Res
 async fn revoke_client(State(store): State<Store>, Path(id): Path<String>) -> Response {
     command(store, vec!["client".into(), "revoke".into(), id]).await
 }
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct StorageStatus {
+    pub path: PathBuf,
+    pub schema_version: i64,
+    pub file_size: u64,
+}
+
 async fn status(State(store): State<Store>) -> Response {
-    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
-        let schema = steve_store::db::inspect_schema(store.path())?.schema;
-        Ok(serde_json::json!({"path": store.path(), "schema_version": schema, "file_size": std::fs::metadata(store.path())?.len()}))
-    }).await;
+    let result = tokio::task::spawn_blocking(move || -> anyhow::Result<StorageStatus> {
+        let schema_version = steve_store::db::inspect_schema(store.path())?.schema;
+        Ok(StorageStatus {
+            path: store.path().to_path_buf(),
+            schema_version,
+            file_size: std::fs::metadata(store.path())?.len(),
+        })
+    })
+    .await;
     match result {
         Ok(Ok(status)) => Json(status).into_response(),
         _ => (

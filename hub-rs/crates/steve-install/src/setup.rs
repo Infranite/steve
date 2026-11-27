@@ -399,6 +399,41 @@ fn parse_host_entries(raw: &str) -> Option<Vec<std::net::IpAddr>> {
     (!out.is_empty()).then_some(out)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct OwnerToken {
+    user: String,
+    token: String,
+}
+
+fn read_owner_token(home: &Path) -> Result<OwnerToken> {
+    let path = home.join(OWNER_TOKEN);
+    owned(&path, false)
+        .with_context(|| t!("install.setup.token.file_invalid", path = path.display()))?;
+    let saved = fs::read_to_string(&path)
+        .with_context(|| t!("install.setup.token.file_invalid", path = path.display()))?;
+    let field = |key: &str| {
+        saved
+            .lines()
+            .find_map(|l| l.strip_prefix(&format!("{key}=")))
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned)
+    };
+    let user = field("user").ok_or_else(|| {
+        anyhow::anyhow!(
+            "{}",
+            t!("install.setup.token.incomplete", path = path.display())
+        )
+    })?;
+    let token = field("token").ok_or_else(|| {
+        anyhow::anyhow!(
+            "{}",
+            t!("install.setup.token.incomplete", path = path.display())
+        )
+    })?;
+    Ok(OwnerToken { user, token })
+}
+
 fn completion_lines(
     role: &str,
     home: &Path,
@@ -474,20 +509,10 @@ fn completion_lines(
     lines.push(format!("steve {role} status {selected}"));
     lines.push(format!("steve {role} doctor {selected}"));
     if role == "hub" {
-        match fs::read_to_string(home.join(OWNER_TOKEN)) {
-            Ok(saved) => {
-                let field = |k: &str| {
-                    saved
-                        .lines()
-                        .find_map(|l| l.strip_prefix(&format!("{k}=")))
-                        .unwrap_or("")
-                        .to_string()
-                };
-                lines.push(t!("install.setup.plain.sign_in_user", user = field("user")));
-                lines.push(t!(
-                    "install.setup.plain.access_token",
-                    token = field("token")
-                ));
+        match read_owner_token(home) {
+            Ok(owner) => {
+                lines.push(t!("install.setup.plain.sign_in_user", user = owner.user));
+                lines.push(t!("install.setup.plain.access_token", token = owner.token));
                 lines.push(t!(
                     "install.setup.plain.token_saved",
                     path = home.join(OWNER_TOKEN).display(),
@@ -583,16 +608,55 @@ const SETUP_CAPTURED_TIMEOUT: Duration = Duration::from_secs(30);
 /// Upper bound for `steve-hub --check-config` during setup (unified at 120s with `release.rs`,
 /// `supervisor.rs`, and `reconfigure.rs`).
 const SETUP_CHECK_CONFIG_TIMEOUT: Duration = Duration::from_secs(120);
+/// Upper bound for `steve-hub --admin init-db` during setup (creating or migrating SQLite schema
+/// before issuing the owner access token).
+const SETUP_INIT_DB_TIMEOUT: Duration = Duration::from_secs(120);
 /// Upper bound for local `adapters list --json` inspection during setup wizard.
 const ADAPTER_LIST_TIMEOUT: Duration = Duration::from_secs(15);
 /// Upper bound for `adapters install` which downloads npm adapter packages over the network.
 const ADAPTER_INSTALL_TIMEOUT: Duration = Duration::from_secs(300);
+
+fn command_failure_detail(output: &std::process::Output) -> Option<String> {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stderr = stderr.trim();
+    if !stderr.is_empty() {
+        return Some(stderr.to_owned());
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = stdout.trim();
+    (!stdout.is_empty()).then(|| stdout.to_owned())
+}
+
+pub(crate) fn format_command_failure(base: String, output: &std::process::Output) -> String {
+    match command_failure_detail(output) {
+        Some(detail) => format!("{base}\n{detail}"),
+        None => base,
+    }
+}
 
 fn captured(
     program: &Path,
     home: &Path,
     args: &[&str],
     environment: Option<&Value>,
+) -> Result<Value> {
+    captured_with_timeout(
+        program,
+        home,
+        args,
+        environment,
+        "setup_command",
+        SETUP_CAPTURED_TIMEOUT,
+    )
+}
+
+fn captured_with_timeout(
+    program: &Path,
+    home: &Path,
+    args: &[&str],
+    environment: Option<&Value>,
+    operation: &'static str,
+    timeout: Duration,
 ) -> Result<Value> {
     let mut command = clean_command(program, Some(home));
     command.args(args);
@@ -610,16 +674,20 @@ fn captured(
     let output = steve_runtime::process::run_bounded(
         &mut command,
         &name,
-        steve_runtime::process::BoundedOptions::capture("setup_command", SETUP_CAPTURED_TIMEOUT),
+        steve_runtime::process::BoundedOptions::capture(operation, timeout),
     )
     .with_context(|| t!("install.setup.run_failed", path = program.display()))?;
     if !output.status.success() {
         bail!(
             "{}",
-            t!("install.setup.command_failed", status = output.status)
+            format_command_failure(
+                t!("install.setup.command_failed", status = output.status),
+                &output,
+            )
         );
     }
-    serde_json::from_slice(&output.stdout).context(t!("install.setup.command_no_json"))
+    serde_json::from_slice(&output.stdout)
+        .with_context(|| format_command_failure(t!("install.setup.command_no_json"), &output))
 }
 
 /// The Hub's own check of this environment (`steve-hub --check-config`): its report, also when it
@@ -649,9 +717,15 @@ fn config_report(program: &Path, home: &Path, environment: &Value) -> Result<Val
         Ok(report) if report["ok"].is_boolean() => Ok(report),
         _ if !output.status.success() => bail!(
             "{}",
-            t!("install.setup.command_failed", status = output.status)
+            format_command_failure(
+                t!("install.setup.command_failed", status = output.status),
+                &output,
+            )
         ),
-        _ => bail!("{}", t!("install.setup.command_no_json")),
+        _ => bail!(
+            "{}",
+            format_command_failure(t!("install.setup.command_no_json"), &output)
+        ),
     }
 }
 
@@ -863,6 +937,7 @@ impl<'a> Wizard<'a> {
                 );
             }
             let bytes = data.context(t!("install.setup.receipt.file_missing"))?;
+            private_dir(path.parent().unwrap())?;
             self.record["files"][name] = bytes_digest(bytes).into();
             self.save()?;
         }
@@ -1484,11 +1559,13 @@ fn install_adapters(
     )
     .map_err(|_| later.to_owned())?;
     if !output.status.success() {
-        let said = String::from_utf8_lossy(&output.stderr);
-        let last = said
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let last = stderr
             .lines()
             .rev()
             .find(|l| !l.trim().is_empty())
+            .or_else(|| stdout.lines().rev().find(|l| !l.trim().is_empty()))
             .unwrap_or(later);
         return Err(last.trim().to_owned());
     }
@@ -1636,21 +1713,14 @@ fn finish_hub(
 ) -> Result<i32> {
     let (api, web) = hub_addresses(|key| environment[key].as_str().map(str::to_owned))
         .context(t!("install.setup.listen_host_missing"))?;
-    let saved = fs::read_to_string(home.join(OWNER_TOKEN)).unwrap_or_default();
-    let field = |key: &str| {
-        saved
-            .lines()
-            .find_map(|l| l.strip_prefix(&format!("{key}=")))
-            .unwrap_or("")
-            .to_string()
-    };
+    let owner = read_owner_token(home)?;
     ui::gap();
     ui::heading(&t!("install.setup.finish.heading"));
     ui::note(&[
         (&t!("install.setup.finish.web"), web.clone()),
         (&t!("install.setup.finish.hub_address"), api.clone()),
-        (&t!("install.setup.finish.user"), field("user")),
-        ("Token", field("token")),
+        (&t!("install.setup.finish.user"), owner.user),
+        ("Token", owner.token),
         (&t!("install.setup.finish.home"), home.display().to_string()),
     ]);
     ui::info(&t!(
@@ -2018,11 +2088,24 @@ fn resume_node_pairing(
     {
         bail!("{}", t!("install.setup.node.pairing_other_hub"));
     }
-    let status = clean_command(&candidate.join("bin/steve-node"), Some(&home))
-        .arg("status")
-        .status()?;
-    if !status.success() {
-        bail!("{}", t!("install.setup.node.pairing_unknown"));
+    let program = candidate.join("bin/steve-node");
+    let mut command = clean_command(&program, Some(&home));
+    command.arg("status");
+    let name = program.to_string_lossy();
+    let output = steve_runtime::process::run_bounded(
+        &mut command,
+        &name,
+        steve_runtime::process::BoundedOptions::capture(
+            "setup_node_status",
+            SETUP_CAPTURED_TIMEOUT,
+        ),
+    )
+    .with_context(|| t!("install.setup.run_failed", path = program.display()))?;
+    if !output.status.success() {
+        bail!(
+            "{}",
+            format_command_failure(t!("install.setup.node.pairing_unknown"), &output)
+        );
     }
     Ok(())
 }
@@ -2071,8 +2154,9 @@ fn pair_setup_node(
     if let Some(pin) = pin {
         command.args(["--pin", &pin]);
     }
-    if !command.status()?.success() {
-        bail!("{}", t!("install.setup.node.pairing_unfinished"));
+    let status = command.status()?;
+    if !status.success() {
+        bail!("{} ({status})", t!("install.setup.node.pairing_unfinished"));
     }
     if read_json(&pairing)?["hub_url"] != hub {
         bail!("{}", t!("install.setup.node.pairing_readback"));
@@ -2136,6 +2220,29 @@ fn check_setup_hub(candidate: &Path, home: &Path, env: &Value) -> Result<()> {
     Ok(())
 }
 
+fn init_setup_hub_db(candidate: &Path, home: &Path, env: &Value) -> Result<()> {
+    ui::step(
+        &t!("install.setup.step.initializing_db"),
+        || {
+            let report = captured_with_timeout(
+                &candidate.join("bin/steve-hub"),
+                home,
+                &["--admin", "init-db"],
+                Some(env),
+                "setup_init_db",
+                SETUP_INIT_DB_TIMEOUT,
+            )?;
+            anyhow::ensure!(
+                report["ok"] == true,
+                "{}",
+                t!("install.setup.command_no_json")
+            );
+            Ok(())
+        },
+        |_| (t!("install.setup.step.db_initialized"), String::new()),
+    )
+}
+
 fn setup_owner_token(
     wizard: &mut Wizard<'_>,
     candidate: &Path,
@@ -2144,33 +2251,61 @@ fn setup_owner_token(
     rich: bool,
 ) -> Result<()> {
     /* the owner's first access token, once: the Hub makes this account's user its owner */
-    if wizard.record["files"].get(OWNER_TOKEN).is_none() {
-        let user = std::env::var("USER")
-            .ok()
-            .filter(|u| !u.trim().is_empty())
-            .unwrap_or_else(|| "owner".into());
-        let issued = captured(
-            &candidate.join("bin/steve-hub"),
-            &home,
-            &[
-                "--access", "token", "create", "--user", &user, "--name", "setup", "--json",
-            ],
-            Some(env),
-        )?;
-        let token = issued["token"]
-            .as_str()
-            .context(t!("install.setup.token.none"))?;
-        let body = format!(
-            "user={}\ntoken={token}\n",
-            issued["user"].as_str().unwrap_or(&user)
-        );
-        wizard.owned_file(OWNER_TOKEN, Some(body.as_bytes()))?;
-        if rich {
-            ui::done(
-                &t!("install.setup.token.issued"),
-                issued["user"].as_str().unwrap_or(&user),
-            );
+    let token_path = home.join(OWNER_TOKEN);
+    if wizard.record["files"].get(OWNER_TOKEN).is_some() {
+        if exists(&token_path) {
+            read_owner_token(home)?;
+            return Ok(());
         }
+        // A prior failed/interrupted run recorded a receipt digest without landing
+        // `secrets/owner.token` on disk (or the file disappeared before setup completed).
+        // Because access tokens are random and cannot be reconstructed from the digest,
+        // drop the stale entry so this resume issues and persists a real token.
+        if let Some(files) = wizard.record["files"].as_object_mut() {
+            files.remove(OWNER_TOKEN);
+            wizard.save()?;
+        }
+    }
+    if exists(&token_path) {
+        bail!(
+            "{}",
+            t!(
+                "install.setup.receipt.foreign_file",
+                path = token_path.display()
+            )
+        );
+    }
+    // Verify or create `secrets/` (0700) before issuing a token in SQLite so a directory
+    // permission error never leaves an unrecorded token in the DB or a phantom receipt entry.
+    private_dir(token_path.parent().unwrap())?;
+    let user = std::env::var("USER")
+        .ok()
+        .map(|u| u.trim().to_owned())
+        .filter(|u| !u.is_empty())
+        .unwrap_or_else(|| "owner".into());
+    let issued = captured(
+        &candidate.join("bin/steve-hub"),
+        home,
+        &[
+            "--access", "token", "create", "--user", &user, "--name", "setup", "--json",
+        ],
+        Some(env),
+    )?;
+    let token = issued["token"]
+        .as_str()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .context(t!("install.setup.token.none"))?;
+    let issued_user = issued["user"]
+        .as_str()
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .unwrap_or(&user);
+    let body = format!("user={issued_user}\ntoken={token}\n");
+    wizard.owned_file(OWNER_TOKEN, Some(body.as_bytes()))?;
+    read_owner_token(home)?;
+    if rich {
+        ui::done(&t!("install.setup.token.issued"), issued_user);
     }
     Ok(())
 }
@@ -2266,6 +2401,7 @@ pub fn run(source: &Path, options: Options) -> Result<i32> {
     setup_adapters(role, home, &candidate, chosen.as_deref());
     if let Some(env) = &env {
         check_setup_hub(&candidate, home, env)?;
+        init_setup_hub_db(&candidate, home, env)?;
         setup_owner_token(&mut wizard, &candidate, home, env, rich)?;
     }
     let mut service = register_setup(
@@ -2277,6 +2413,9 @@ pub fn run(source: &Path, options: Options) -> Result<i32> {
     )?;
     if let (true, Some(env)) = (rich, &env) {
         return finish_hub(&mut wizard, &mut service, &home, env, &flags);
+    }
+    if role == "hub" {
+        read_owner_token(home)?;
     }
     let fa = run_setup_file_access_guide(&mut wizard, role, home, false)?;
     ui::gap();
@@ -3008,6 +3147,70 @@ exit 2"#,
                 .iter()
                 .any(|line| line.starts_with("没有找到 owner token") && line.contains(&command)),
             "{lines:?}"
+        );
+        // An existing file with blank user or token is treated as missing/invalid, never printed blank.
+        private_file(&home.join(OWNER_TOKEN), b"user=\ntoken=\n").unwrap();
+        let lines = completion_lines("hub", home, None, &env, false).unwrap();
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.starts_with("没有找到 owner token") && line.contains(&command)),
+            "{lines:?}"
+        );
+        assert!(!lines.iter().any(|line| line == "登录用户名："));
+        assert!(!lines.iter().any(|line| line == "访问 token："));
+    }
+
+    #[test]
+    fn finish_hub_and_read_owner_token_refuse_missing_or_empty_credentials() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("package");
+        private_dir(&source).unwrap();
+        let home = temp.path().join("home");
+        let mut input = Answers(vec![]);
+        let mut wizard = Wizard::claim(&source, &home, "hub", &meta("1.0.0"), &mut input).unwrap();
+        let mut service =
+            crate::service::Service::new("hub", &home, Some("test.finish.owner")).unwrap();
+        let env = json!({
+            "STEVE_HOST": "127.0.0.1",
+            "STEVE_PORT": "18440",
+            "STEVE_PUBLIC_URL": "http://127.0.0.1:18441",
+            "STEVE_WEB_PORT": "18441"
+        });
+
+        // 1. Missing secrets/owner.token -> finish_hub refuses before prompting or reporting completion.
+        assert!(read_owner_token(&home).is_err());
+        assert!(finish_hub(&mut wizard, &mut service, &home, &env, "").is_err());
+
+        // 2. Empty user or empty token -> refused.
+        private_dir(&home.join("secrets")).unwrap();
+        for bad in [
+            b"user=\ntoken=stt_abc\n".as_slice(),
+            b"user=lee\ntoken=\n".as_slice(),
+            b"user=   \ntoken=stt_abc\n".as_slice(),
+            b"garbage\n".as_slice(),
+        ] {
+            let _ = fs::remove_file(home.join(OWNER_TOKEN));
+            private_file(&home.join(OWNER_TOKEN), bad).unwrap();
+            assert!(read_owner_token(&home).is_err());
+            assert!(finish_hub(&mut wizard, &mut service, &home, &env, "").is_err());
+        }
+
+        // 3. Loose file permissions (0644) -> refused even if content is valid.
+        let _ = fs::remove_file(home.join(OWNER_TOKEN));
+        private_file(&home.join(OWNER_TOKEN), b"user=lee\ntoken=stt_valid\n").unwrap();
+        fs::set_permissions(home.join(OWNER_TOKEN), fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(read_owner_token(&home).is_err());
+
+        // 4. Valid 0600 file -> accepted with exact trimmed fields.
+        fs::set_permissions(home.join(OWNER_TOKEN), fs::Permissions::from_mode(0o600)).unwrap();
+        assert_eq!(
+            read_owner_token(&home).unwrap(),
+            OwnerToken {
+                user: "lee".into(),
+                token: "stt_valid".into(),
+            }
         );
     }
 

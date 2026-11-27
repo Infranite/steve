@@ -511,11 +511,82 @@ impl CliOutput {
 /// Shared socket discovery for integrations that invoke the access CLI in-process.
 pub use crate::admin::socket_path as admin_socket_path;
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct InitDbReport {
+    ok: bool,
+    path: std::path::PathBuf,
+    schema_version: i64,
+}
+
+fn offline_instance_lock(cfg: &crate::config::Config) -> anyhow::Result<std::fs::File> {
+    let socket = crate::admin::socket_path(&cfg.home)?;
+    crate::upgrades::instance_lock(cfg).map_err(|e| {
+        anyhow::anyhow!(
+            "Hub 正在运行或正在升级，但管理 socket 没有响应（{}）：{e:#}",
+            socket.display()
+        )
+    })
+}
+
+fn verify_running_storage_status(status: crate::admin::StorageStatus) -> anyhow::Result<String> {
+    anyhow::ensure!(
+        status.schema_version == steve_store::db::SCHEMA_VERSION,
+        "Hub is running with database schema v{}, expected v{}; stop or upgrade the Hub first",
+        status.schema_version,
+        steve_store::db::SCHEMA_VERSION
+    );
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string(&InitDbReport {
+            ok: true,
+            path: status.path,
+            schema_version: status.schema_version,
+        })?
+    ))
+}
+
+/// Initializes and migrates the Hub database using the Hub's own `Store::open` path so offline
+/// administration (`--access token create`) can run before the Hub service starts for the first time.
+fn init_db(cfg: &crate::config::Config) -> anyhow::Result<String> {
+    use anyhow::Context as _;
+    if let Some(status) = crate::admin::client::storage_status(&cfg.home)? {
+        return verify_running_storage_status(status);
+    }
+    let _lock = offline_instance_lock(cfg)?;
+    let db_path = cfg.db_path();
+    let existing = steve_store::db::inspect_schema(&db_path)?;
+    anyhow::ensure!(
+        existing.min_reader <= steve_store::db::SCHEMA_VERSION,
+        "database requires schema v{} (this build supports up to v{}); nothing was changed",
+        existing.min_reader,
+        steve_store::db::SCHEMA_VERSION
+    );
+    let store = Store::open(&db_path, steve_store::NoPublisher)
+        .with_context(|| format!("open {}", db_path.display()))?;
+    store.ensure_workspace()?;
+    let schema_version = steve_store::db::inspect_schema(store.path())?.schema;
+    Ok(format!(
+        "{}\n",
+        serde_json::to_string(&InitDbReport {
+            ok: true,
+            path: store.path().to_path_buf(),
+            schema_version,
+        })?
+    ))
+}
+
 /// Execute the CLI against this installation. Connected requests never fall back after
 /// an error: their writes may already have committed. Offline access takes the instance lock
 /// and validates the existing schema without migrations or background recording.
 pub fn command(cfg: &crate::config::Config, args: &[String]) -> CliOutput {
     match args.first().map(String::as_str) {
+        Some("init-db") => {
+            return CliOutput::result(match args {
+                [_] => init_db(cfg),
+                [_, flag] if flag == "--json" => init_db(cfg),
+                _ => Err(usage()),
+            });
+        }
         Some("backup-list") if args.len() == 1 => {
             return CliOutput::result(
                 crate::backup::list(&cfg.home)
@@ -544,13 +615,7 @@ pub fn command(cfg: &crate::config::Config, args: &[String]) -> CliOutput {
         Ok(Some(output)) => output,
         Err(e) => CliOutput::result(Err(e)),
         Ok(None) => CliOutput::result((|| {
-            let socket = crate::admin::socket_path(&cfg.home)?;
-            let _lock = crate::upgrades::instance_lock(cfg).map_err(|e| {
-                anyhow::anyhow!(
-                    "Hub 正在运行或正在升级，但管理 socket 没有响应（{}）：{e:#}",
-                    socket.display()
-                )
-            })?;
+            let _lock = offline_instance_lock(cfg)?;
             if args.first().is_some_and(|s| s == "backup") {
                 return crate::admin::client::backup::command(&cfg.home, &cfg.db_path(), args);
             }
@@ -571,6 +636,7 @@ const USAGE: &str =
        steve-hub --access token revoke ID
        steve-hub --access client list [--json]
        steve-hub --access client revoke ID
+       steve-hub --admin init-db [--json]
        steve-hub --admin backup [--offline] [--reason daily|manual|pre-upgrade|pre-destructive|diagnostic]
        steve-hub --admin backup-list
        steve-hub --admin restore SNAPSHOT_ID (--database-only | --to PARENT_DIRECTORY)";
@@ -2193,7 +2259,7 @@ fn write_secret(home: &std::path::Path, secret: &str) -> std::io::Result<()> {
     use std::os::unix::fs::OpenOptionsExt;
     let path = home.join(OIDC_SECRET);
     if let Some(d) = path.parent() {
-        std::fs::create_dir_all(d)?;
+        crate::admin::ensure_private_dir(d)?;
     }
     let tmp = path.with_extension("tmp");
     let mut f = std::fs::OpenOptions::new()
@@ -2416,4 +2482,31 @@ pub(crate) const CACHE_SPEC: (&str, u8) = (ORIGIN_SPACE.name, ORIGIN_SPACE.share
 #[cfg(test)]
 pub(crate) fn register_cache_spaces(caches: &steve_runtime::cache::Caches) {
     let _ = caches.space(&ORIGIN_SPACE);
+}
+
+#[cfg(test)]
+mod init_db_tests {
+    use super::*;
+    use crate::admin::StorageStatus;
+
+    #[test]
+    fn running_storage_status_accepts_head_and_rejects_mismatch() {
+        let ok = verify_running_storage_status(StorageStatus {
+            path: std::path::PathBuf::from("/tmp/example/data/steve.sqlite3"),
+            schema_version: steve_store::db::SCHEMA_VERSION,
+            file_size: 4096,
+        })
+        .unwrap();
+        let report: Value = serde_json::from_str(&ok).unwrap();
+        assert_eq!(report["ok"], true);
+        assert_eq!(report["schema_version"], steve_store::db::SCHEMA_VERSION);
+
+        let err = verify_running_storage_status(StorageStatus {
+            path: std::path::PathBuf::from("/tmp/example/data/steve.sqlite3"),
+            schema_version: steve_store::db::SCHEMA_VERSION - 1,
+            file_size: 4096,
+        })
+        .unwrap_err();
+        assert!(err.to_string().contains("schema"), "{err}");
+    }
 }
