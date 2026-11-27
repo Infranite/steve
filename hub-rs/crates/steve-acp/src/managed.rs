@@ -13,6 +13,7 @@
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use steve_i18n::t;
 
@@ -60,11 +61,40 @@ pub fn home_of(command: &Path) -> Option<PathBuf> {
 /// A prefix lease shared by every Node process and the CLI. Adapter processes inherit a shared
 /// lease; npm inherits an exclusive one, so even an abruptly stopped parent cannot admit a
 /// second mutation while its child still holds the prefix. The file must never be unlinked.
-pub struct PrefixLock(std::fs::File);
+///
+/// Uninherited leases explicitly `flock(LOCK_UN)` on drop so a concurrently `fork()`ed child in
+/// another thread (which transiently shares the open file description until `O_CLOEXEC` runs at
+/// `execve`) cannot hold the prefix locked past drop. Inherited leases skip `LOCK_UN` on drop so
+/// an orphaned child retains its lock until the caller confirms the child process group is gone
+/// via [`Self::clear_inherited`].
+#[derive(Debug)]
+pub struct PrefixLock {
+    file: std::fs::File,
+    inherited: AtomicBool,
+}
 
 impl PrefixLock {
-    pub fn fd(&self) -> RawFd {
-        self.0.as_raw_fd()
+    /// Marks this lease as inherited by a child process (`F_SETFD, 0`) and returns its descriptor.
+    pub fn inherit_fd(&self) -> RawFd {
+        self.inherited.store(true, Ordering::Release);
+        self.file.as_raw_fd()
+    }
+
+    /// Re-enables explicit `LOCK_UN` on drop once the inheriting child process group is confirmed
+    /// gone (or if spawning failed before any child inherited the descriptor).
+    pub fn clear_inherited(&self) {
+        self.inherited.store(false, Ordering::Release);
+    }
+}
+
+impl Drop for PrefixLock {
+    fn drop(&mut self) {
+        if !*self.inherited.get_mut() {
+            // SAFETY: `self.file` owns a live descriptor opened by `prefix_lock`.
+            unsafe {
+                libc::flock(self.file.as_raw_fd(), libc::LOCK_UN);
+            }
+        }
     }
 }
 
@@ -95,7 +125,10 @@ pub fn prefix_lock(home: &Path, exclusive: bool) -> Result<PrefixLock, String> {
     if unsafe { libc::flock(file.as_raw_fd(), mode | libc::LOCK_NB) } != 0 {
         return Err("the adapter prefix is in use by another session, job, probe or installer; wait for it to finish".into());
     }
-    Ok(PrefixLock(file))
+    Ok(PrefixLock {
+        file,
+        inherited: AtomicBool::new(false),
+    })
 }
 
 fn selection_file(home: &Path) -> PathBuf {
@@ -184,7 +217,7 @@ fn run(
     use std::os::unix::process::CommandExt;
     let mut command = Command::new(npm);
     if let Some(lease) = lease {
-        let fd = lease.fd();
+        let fd = lease.inherit_fd();
         // Only the forked child loses CLOEXEC, never another concurrently spawning thread.
         unsafe {
             command.pre_exec(move || {
@@ -199,13 +232,29 @@ fn run(
         command.env(k, v);
     }
     command.args(args);
+    let mut spawned_pid = None;
     let out = steve_runtime::process::run_bounded_observed(
         &mut command,
         "npm",
         steve_runtime::process::BoundedOptions::capture("managed_npm", timeout),
-        on_spawn,
-    )
-    .map_err(|err| match err {
+        |pid| {
+            spawned_pid = Some(pid);
+            on_spawn(pid)
+        },
+    );
+    if let Some(lease) = lease {
+        let group_gone = match spawned_pid {
+            None => true,
+            Some(pid) => {
+                let rc = unsafe { libc::kill(-(pid as libc::pid_t), 0) };
+                rc != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+            }
+        };
+        if group_gone {
+            lease.clear_inherited();
+        }
+    }
+    let out = out.map_err(|err| match err {
         steve_runtime::process::ObservedCommandError::Hook(e) => e,
         steve_runtime::process::ObservedCommandError::Command(
             steve_runtime::process::CommandError::Spawn { source, .. },
@@ -913,5 +962,46 @@ esac
             selection(&home),
             Some(vec![first.to_string(), second.to_string()])
         );
+    }
+
+    #[test]
+    fn prefix_lock_unlocks_uninherited_leases_on_drop_despite_duplicated_fd() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+
+        // Simulate a concurrently forked pre-exec child holding a duplicate of the same open file
+        // description: dropping an uninherited lease must still unlock immediately via LOCK_UN.
+        let lease = prefix_lock(home, true).unwrap();
+        let dup_fd = lease.file.try_clone().unwrap();
+        drop(lease);
+        let reacquired = prefix_lock(home, true);
+        assert!(
+            reacquired.is_ok(),
+            "uninherited PrefixLock must unlock on drop even while a duplicated fd is open: {reacquired:?}"
+        );
+        drop(reacquired);
+        drop(dup_fd);
+
+        // An inherited lease must preserve the child's lock if the parent drops while the child
+        // still holds the descriptor, and release immediately once cleared after child exit.
+        let inherited = prefix_lock(home, true).unwrap();
+        let _ = inherited.inherit_fd();
+        let child_fd = inherited.file.try_clone().unwrap();
+        drop(inherited);
+        assert!(
+            prefix_lock(home, true).is_err(),
+            "inherited PrefixLock must stay held while child descriptor remains open"
+        );
+        drop(child_fd);
+        let after_child = prefix_lock(home, true).unwrap();
+        let _ = after_child.inherit_fd();
+        let stray_dup = after_child.file.try_clone().unwrap();
+        after_child.clear_inherited();
+        drop(after_child);
+        assert!(
+            prefix_lock(home, true).is_ok(),
+            "cleared inherited PrefixLock must unlock on drop despite a duplicated fd"
+        );
+        drop(stray_dup);
     }
 }

@@ -243,9 +243,15 @@ impl Conn {
             .transpose()
             .map_err(RpcError::msg)?;
         let mut cmd = adapter_command(&sp, prefix.as_ref());
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| RpcError::msg(format!("spawn {} {e}", sp.program.display())))?;
+        let mut child = match cmd.spawn() {
+            Ok(child) => child,
+            Err(e) => {
+                if let Some(lease) = prefix.as_ref() {
+                    lease.clear_inherited();
+                }
+                return Err(RpcError::msg(format!("spawn {} {e}", sp.program.display())));
+            }
+        };
         let pid = child.id().unwrap_or(0);
         let (Some(mut stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
@@ -577,7 +583,7 @@ impl Conn {
 fn adapter_command(sp: &Spawn, prefix: Option<&crate::managed::PrefixLock>) -> Command {
     let mut cmd = Command::new(&sp.program);
     if let Some(lease) = prefix {
-        let fd = lease.fd();
+        let fd = lease.inherit_fd();
         unsafe {
             cmd.pre_exec(move || {
                 if libc::fcntl(fd, libc::F_SETFD, 0) == -1 {

@@ -1460,10 +1460,13 @@ pub struct LocalNode(Arc<Inner>);
 
 struct NodeUpgradeHold<'a> {
     active: &'a AtomicBool,
-    _prefix: steve_acp::managed::PrefixLock,
+    prefix: Option<steve_acp::managed::PrefixLock>,
 }
 impl Drop for NodeUpgradeHold<'_> {
     fn drop(&mut self) {
+        // Release the prefix lease before clearing `active` so a concurrent caller observing
+        // `active == false` immediately sees the prefix unlocked.
+        self.prefix.take();
         self.active.store(false, Ordering::SeqCst);
     }
 }
@@ -1485,7 +1488,7 @@ impl LocalNode {
         self.0.node_upgrading.store(true, Ordering::SeqCst);
         Ok(NodeUpgradeHold {
             active: &self.0.node_upgrading,
-            _prefix: prefix,
+            prefix: Some(prefix),
         })
     }
     /// The OS sandbox this Node's runs get (`seatbelt`, `bubblewrap`), or why they get none.
