@@ -7,6 +7,7 @@ use serde::Serialize;
 reasons! {
     pub enum VaultReason = "vault" {
         ExecutionNodeUnavailable = execution_node_unavailable [Unavailable] (),
+        KeyStoreTimedOut = key_store_timed_out [Unavailable] (),
     }
     retired {}
 }

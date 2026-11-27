@@ -1,4 +1,5 @@
-//! Narrow filesystem primitives for the operator's own installation, never a session workspace.
+//! Narrow filesystem and environment helpers for the operator's own installation,
+//! never a session workspace. Bounded subprocess execution lives in `steve_runtime::process`.
 use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use sha2::{Digest, Sha256};

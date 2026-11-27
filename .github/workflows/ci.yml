@@ -243,9 +243,10 @@ jobs:
         run: |
           target=$(rustc -vV | sed -n 's/^host: //p')
           python3 scripts/package-release.py restic --target "$target" --out hub-rs/target/debug
-          cp -p hub-rs/target/debug/restic hub-rs/target/debug/deps/restic
       - name: Rust tests
         id: rust-tests
+        env:
+          STEVE_BACKUP_ENGINE: ${{ github.workspace }}/hub-rs/target/debug/restic
         run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 0 --no-fail-fast --partition "$PARTITION"
       - name: Rust test report (first-attempt failures remain failures)
         if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}

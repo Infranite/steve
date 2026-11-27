@@ -8,11 +8,12 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use steve_node_api::*;
+use steve_runtime::process::{BoundedOptions, BoundedStdin, CommandError, run_bounded};
 use steve_toolchains::ITEM_BUILD_DIR;
 
 use crate::space;
@@ -27,6 +28,8 @@ const CACHE_DEPTH: usize = 4;
 const PS_DEADLINE: Duration = Duration::from_secs(10);
 /// How long one read-only git command may take.
 const GIT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long one mutating housekeeping git command (`worktree remove/prune`, `branch -d`) may take.
+const GIT_WRITE_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long waiting for the common `.git` worktree flock may take.
 const WORKTREE_LOCK_TIMEOUT: Duration = Duration::from_secs(30);
 /// Maximum cached entries in the `landed` memo table.
@@ -146,33 +149,17 @@ pub fn process_dirs() -> Option<Vec<PathBuf>> {
     }
     #[cfg(not(target_os = "linux"))]
     {
-        let mut child = Command::new("lsof")
-            .args(["-nP", "-w", "-d", "cwd", "-Fn"])
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .ok()?;
-        let mut stdout = child.stdout.take()?;
-        let reader = std::thread::spawn(move || {
-            let mut s = String::new();
-            std::io::Read::read_to_string(&mut stdout, &mut s).map(|_| s)
-        });
-        let start = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if start.elapsed() < PS_DEADLINE => {
-                    std::thread::sleep(Duration::from_millis(50));
-                }
-                _ => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-            }
-        }
-        let text = reader.join().ok()?.ok()?;
+        let mut cmd = Command::new("lsof");
+        cmd.args(["-nP", "-w", "-d", "cwd", "-Fn"]);
+        let out = run_bounded(
+            &mut cmd,
+            "lsof",
+            BoundedOptions::capture("housekeeping_lsof", PS_DEADLINE),
+        )
+        .ok()?;
+        // `lsof` exits non-zero when inspecting processes owned by other users fails while still
+        // writing valid `n<path>` lines for this user's processes on stdout.
+        let text = String::from_utf8_lossy(&out.stdout);
         let dirs: Vec<PathBuf> = text
             .lines()
             .filter_map(|l| l.strip_prefix('n'))
@@ -337,15 +324,47 @@ fn with_worktrees_lock<T>(dir: &Path, f: impl FnOnce() -> T) -> T {
     out
 }
 
+fn run_git(
+    dir: Option<&Path>,
+    read_only: bool,
+    args: &[&str],
+    stdin: BoundedStdin<'_>,
+    operation: &'static str,
+    timeout: Duration,
+) -> Result<Output, String> {
+    let mut cmd = git_cmd();
+    if read_only {
+        cmd.env("GIT_OPTIONAL_LOCKS", "0")
+            .env("GIT_NO_LAZY_FETCH", "1");
+    }
+    if let Some(dir) = dir {
+        cmd.arg("-C").arg(dir);
+    }
+    cmd.args(args);
+    run_bounded(
+        &mut cmd,
+        "git",
+        BoundedOptions {
+            stdin,
+            ..BoundedOptions::capture(operation, timeout)
+        },
+    )
+    .map_err(|err| match err {
+        CommandError::TimedOut { .. } => format!("git {} timed out", args.join(" ")),
+        other => other.to_string(),
+    })
+}
+
 fn git_write(dir: &Path, args: &[&str]) -> Result<String, String> {
     let run = || {
-        let out = git_cmd()
-            .arg("-C")
-            .arg(dir)
-            .args(args)
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| e.to_string())?;
+        let out = run_git(
+            Some(dir),
+            false,
+            args,
+            BoundedStdin::Null,
+            "housekeeping_git_write",
+            GIT_WRITE_TIMEOUT,
+        )?;
         if out.status.success() {
             Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
         } else {
@@ -365,54 +384,18 @@ fn git_write(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn git_read(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let mut child = git_cmd()
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let out_t = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(ref mut s) = stdout {
-            let _ = std::io::Read::read_to_end(s, &mut buf);
-        }
-        buf
-    });
-    let err_t = std::thread::spawn(move || {
-        let mut buf = Vec::new();
-        if let Some(ref mut s) = stderr {
-            let _ = std::io::Read::read_to_end(s, &mut buf);
-        }
-        buf
-    });
-    let start = Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Ok(s),
-            Ok(None) if start.elapsed() < GIT_READ_TIMEOUT => {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break Err(format!("git {} timed out", args.join(" ")));
-            }
-        }
-    };
-    let out_bytes = out_t.join().unwrap_or_default();
-    let err_bytes = err_t.join().unwrap_or_default();
-    let status = status?;
-    if status.success() {
-        Ok(String::from_utf8_lossy(&out_bytes).trim().to_string())
+    let out = run_git(
+        Some(dir),
+        true,
+        args,
+        BoundedStdin::Null,
+        "housekeeping_git_read",
+        GIT_READ_TIMEOUT,
+    )?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
-        let err = String::from_utf8_lossy(&err_bytes).trim().to_string();
+        let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
         Err(if err.is_empty() {
             format!("git {} failed", args.join(" "))
         } else {
@@ -422,15 +405,14 @@ fn git_read(dir: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 fn git_test(dir: &Path, args: &[&str]) -> Result<bool, String> {
-    let out = git_cmd()
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = run_git(
+        Some(dir),
+        true,
+        args,
+        BoundedStdin::Null,
+        "housekeeping_git_read",
+        GIT_READ_TIMEOUT,
+    )?;
     match out.status.code() {
         Some(0) => Ok(true),
         Some(1) => Ok(false),
@@ -439,11 +421,15 @@ fn git_test(dir: &Path, args: &[&str]) -> Result<bool, String> {
 }
 
 fn git_version() -> Option<String> {
-    let out = git_cmd()
-        .arg("--version")
-        .stdin(Stdio::null())
-        .output()
-        .ok()?;
+    let out = run_git(
+        None,
+        false,
+        &["--version"],
+        BoundedStdin::Null,
+        "housekeeping_git_read",
+        GIT_READ_TIMEOUT,
+    )
+    .ok()?;
     if !out.status.success() {
         return None;
     }
@@ -456,14 +442,14 @@ fn git_version() -> Option<String> {
 }
 
 fn merge_base(dir: &Path, a: &str, b: &str) -> Result<Option<String>, String> {
-    let out = git_cmd()
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .arg("-C")
-        .arg(dir)
-        .args(["merge-base", a, b])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = run_git(
+        Some(dir),
+        true,
+        &["merge-base", a, b],
+        BoundedStdin::Null,
+        "housekeeping_git_read",
+        GIT_READ_TIMEOUT,
+    )?;
     match out.status.code() {
         Some(0) => Ok(Some(
             String::from_utf8_lossy(&out.stdout).trim().to_string(),
@@ -474,30 +460,26 @@ fn merge_base(dir: &Path, a: &str, b: &str) -> Result<Option<String>, String> {
 }
 
 fn patch_ids(dir: &Path, args: &[&str]) -> Result<Vec<(String, String)>, String> {
-    let mut src = git_cmd()
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .arg("-C")
-        .arg(dir)
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    let Some(out) = src.stdout.take() else {
-        let _ = src.wait();
-        return Err("git produced no output".into());
-    };
-    let ids = git_cmd()
-        .arg("-C")
-        .arg(dir)
-        .args(["patch-id", "--stable"])
-        .stdin(Stdio::from(out))
-        .stderr(Stdio::null())
-        .output();
-    let src_ok = src.wait().is_ok_and(|s| s.success());
-    let ids = ids.map_err(|e| e.to_string())?;
-    if !src_ok || !ids.status.success() {
+    let src = run_git(
+        Some(dir),
+        true,
+        args,
+        BoundedStdin::Null,
+        "housekeeping_git_read",
+        GIT_READ_TIMEOUT,
+    )?;
+    if !src.status.success() {
+        return Err(format!("git {} failed", args.first().unwrap_or(&"")));
+    }
+    let ids = run_git(
+        Some(dir),
+        true,
+        &["patch-id", "--stable"],
+        BoundedStdin::Bytes(&src.stdout),
+        "housekeeping_git_read",
+        GIT_READ_TIMEOUT,
+    )?;
+    if !ids.status.success() {
         return Err(format!("git {} failed", args.first().unwrap_or(&"")));
     }
     Ok(String::from_utf8_lossy(&ids.stdout)

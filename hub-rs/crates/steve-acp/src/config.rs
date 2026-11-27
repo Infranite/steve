@@ -4,6 +4,15 @@ use std::collections::{BTreeMap, HashMap};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::time::Duration;
+
+/// Upper bound for `npm root -g` discovery before falling back to the default global prefix.
+/// Local npm prefix lookup normally completes in <300 ms; 5s bounds cold Node startup without
+/// stalling Hub/Node boot.
+const NPM_ROOT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Maximum stdout captured from `npm root -g` (a single directory path is <4 KiB; 64 KiB bounds
+/// misbehaving shims).
+const NPM_ROOT_MAX_STDOUT: usize = 64 * 1024;
 
 /// Everything the ACP driver needs from the configuration (the Node's, built from the Hub's).
 #[derive(Debug, Clone)]
@@ -52,17 +61,22 @@ pub fn npm_root() -> PathBuf {
             }
         }
     }
-    Command::new("npm")
-        .args(["root", "-g"])
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/opt/homebrew/lib/node_modules"))
+    let mut cmd = Command::new("npm");
+    cmd.args(["root", "-g"]);
+    steve_runtime::process::run_bounded(
+        &mut cmd,
+        "npm",
+        steve_runtime::process::BoundedOptions {
+            max_output_bytes: NPM_ROOT_MAX_STDOUT,
+            ..steve_runtime::process::BoundedOptions::capture("npm_root", NPM_ROOT_TIMEOUT)
+        },
+    )
+    .ok()
+    .filter(|out| out.status.success())
+    .map(|out| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+    .filter(|s| !s.is_empty())
+    .map(PathBuf::from)
+    .unwrap_or_else(|| PathBuf::from("/opt/homebrew/lib/node_modules"))
 }
 
 pub fn default_claude_adapter(npm_root: &Path) -> PathBuf {

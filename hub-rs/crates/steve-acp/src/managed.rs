@@ -12,7 +12,7 @@
 
 use std::os::fd::{AsRawFd, RawFd};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::time::Duration;
 use steve_i18n::t;
 
@@ -198,69 +198,33 @@ fn run(
     for (k, v) in env {
         command.env(k, v);
     }
-    let mut child = command
-        .args(args)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .process_group(0)
-        .spawn()
-        .map_err(|e| format!("{}: {e}", npm.display()))?;
-    if let Err(e) = on_spawn(child.id()) {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(e);
-    }
-    let (out, err) = (child.stdout.take(), child.stderr.take());
-    let read = |r: Option<std::process::ChildStdout>| {
-        std::thread::spawn(move || {
-            let mut s = String::new();
-            if let Some(mut r) = r {
-                let _ = std::io::Read::read_to_string(&mut r, &mut s);
-            }
-            s
-        })
-    };
-    let out = read(out);
-    let err = std::thread::spawn(move || {
-        let mut s = String::new();
-        if let Some(mut r) = err {
-            let _ = std::io::Read::read_to_string(&mut r, &mut s);
-        }
-        s
-    });
-    let until = std::time::Instant::now() + timeout;
-    let status = loop {
-        if let Some(s) = child.try_wait().map_err(|e| e.to_string())? {
-            break s;
-        }
-        if std::time::Instant::now() >= until {
-            // npm's lifecycle scripts share its group. The leader is still our child here.
-            unsafe {
-                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(format!(
-                "npm {} took longer than {timeout:?}",
-                args.join(" ")
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    let (out, err) = (
-        out.join().unwrap_or_default(),
-        err.join().unwrap_or_default(),
-    );
-    if status.success() {
-        Ok(out)
+    command.args(args);
+    let out = steve_runtime::process::run_bounded_observed(
+        &mut command,
+        "npm",
+        steve_runtime::process::BoundedOptions::capture("managed_npm", timeout),
+        on_spawn,
+    )
+    .map_err(|err| match err {
+        steve_runtime::process::ObservedCommandError::Hook(e) => e,
+        steve_runtime::process::ObservedCommandError::Command(
+            steve_runtime::process::CommandError::Spawn { source, .. },
+        ) => format!("{}: {source}", npm.display()),
+        steve_runtime::process::ObservedCommandError::Command(
+            steve_runtime::process::CommandError::TimedOut { .. },
+        ) => format!("npm {} took longer than {timeout:?}", args.join(" ")),
+        steve_runtime::process::ObservedCommandError::Command(other) => other.to_string(),
+    })?;
+    if out.status.success() {
+        Ok(String::from_utf8_lossy(&out.stdout).into_owned())
     } else {
+        let err = String::from_utf8_lossy(&out.stderr);
         let last = err
             .lines()
             .rev()
             .find(|l| !l.trim().is_empty())
             .unwrap_or("");
-        Err(format!("npm {}: {status}: {last}", args.join(" ")))
+        Err(format!("npm {}: {}: {last}", args.join(" "), out.status))
     }
 }
 

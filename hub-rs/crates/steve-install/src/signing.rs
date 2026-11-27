@@ -1,6 +1,6 @@
 //! Local signing of a verified private release copy. Passwords are supplied by the
 //! signed Hub runner, never discovered by the ordinary installer CLI.
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, ensure};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::fs::{self, File, OpenOptions};
@@ -8,8 +8,25 @@ use std::io::{Read, Write};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use zeroize::Zeroizing;
+
+/// Upper bound for local `steve-hub --build-info` metadata queries (no network; allows cold start).
+const BUILD_INFO_TIMEOUT: Duration = Duration::from_secs(15);
+/// Upper bound for `codesign --verify --strict` / `-dv` hashing the binary on disk (~100 MiB).
+const CODESIGN_VERIFY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for `codesign --force --sign` hashing and writing Mach-O signatures via keychain.
+const CODESIGN_SIGN_TIMEOUT: Duration = Duration::from_secs(60);
+/// Upper bound for local `security` CLI keychain operations (`unlock`, `import`, `find-identity`).
+const SECURITY_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for RSA-3072 self-signed certificate generation during first-install setup.
+const OPENSSL_GENERATE_TIMEOUT: Duration = Duration::from_secs(60);
+/// Upper bound for `openssl x509 -fingerprint` over a single local PEM certificate.
+const OPENSSL_FINGERPRINT_TIMEOUT: Duration = Duration::from_secs(15);
+/// Upper bound for `openssl pkcs12 -export` bundling key and certificate into a temporary `.p12`.
+const OPENSSL_EXPORT_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for `steve-hub --local-release provision-signing` storing the signing password.
+const PROVISION_SIGNING_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub(crate) struct Tools {
@@ -175,51 +192,33 @@ pub(crate) fn atomic_json(path: &Path, value: &Value) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn output(command: &mut Command, timeout: Duration) -> Result<Output> {
-    // Isolate foreground maintenance children (launchctl, --admin backup/restore, codesign,
-    // security) in their own process group so terminal Ctrl-C/SIGHUP cannot tear them down mid-op.
-    std::os::unix::process::CommandExt::process_group(command, 0);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = command
-        .spawn()
-        .context("start native maintenance command")?;
-    let stdout = child.stdout.take().context("command stdout missing")?;
-    let stderr = child.stderr.take().context("command stderr missing")?;
-    let drain = |mut source: Box<dyn Read + Send>| {
-        std::thread::spawn(move || {
-            let mut bytes = Vec::new();
-            source.read_to_end(&mut bytes).map(|_| bytes)
-        })
-    };
-    let out = drain(Box::new(stdout));
-    let err = drain(Box::new(stderr));
-    let deadline = Instant::now() + timeout;
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break status;
+pub(crate) fn output(
+    command: &mut Command,
+    operation: &'static str,
+    timeout: Duration,
+) -> Result<Output> {
+    let program = command.get_program().to_string_lossy().into_owned();
+    steve_runtime::process::run_bounded(
+        command,
+        &program,
+        steve_runtime::process::BoundedOptions::capture(operation, timeout),
+    )
+    .map_err(|err| match err {
+        steve_runtime::process::CommandError::TimedOut { .. } => {
+            anyhow::anyhow!("native maintenance command timed out")
         }
-        if Instant::now() >= deadline {
-            unsafe {
-                libc::kill(-(child.id() as libc::pid_t), libc::SIGKILL);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            bail!("native maintenance command timed out");
+        steve_runtime::process::CommandError::Spawn { source, .. } => {
+            anyhow::Error::new(source).context("start native maintenance command")
         }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    Ok(Output {
-        status,
-        stdout: out
-            .join()
-            .map_err(|_| anyhow::anyhow!("stdout reader stopped"))??,
-        stderr: err
-            .join()
-            .map_err(|_| anyhow::anyhow!("stderr reader stopped"))??,
+        other => anyhow::Error::new(other),
     })
 }
-pub(crate) fn successful(command: &mut Command, timeout: Duration) -> Result<Output> {
-    let result = output(command, timeout)?;
+pub(crate) fn successful(
+    command: &mut Command,
+    operation: &'static str,
+    timeout: Duration,
+) -> Result<Output> {
+    let result = output(command, operation, timeout)?;
     // Do not include command arguments or captured output: signing commands can carry secrets on stdin.
     ensure!(
         result.status.success(),
@@ -234,7 +233,8 @@ pub(crate) fn build_info(binary: &Path) -> Result<Value> {
         Command::new(binary)
             .arg("--build-info")
             .stdin(Stdio::null()),
-        Duration::from_secs(15),
+        "build_info",
+        BUILD_INFO_TIMEOUT,
     )?;
     Ok(serde_json::from_slice(&result.stdout)?)
 }
@@ -245,7 +245,8 @@ fn identifier(binary: &Path, tools: &Tools) -> Result<String> {
             .arg("-dv")
             .arg(binary)
             .stdin(Stdio::null()),
-        Duration::from_secs(30),
+        "codesign",
+        CODESIGN_VERIFY_TIMEOUT,
     )?;
     String::from_utf8_lossy(&result.stderr)
         .lines()
@@ -258,7 +259,8 @@ pub(crate) fn verify_signature(binary: &Path, expected: &str, tools: &Tools) -> 
             .args(["--verify", "--strict"])
             .arg(binary)
             .stdin(Stdio::null()),
-        Duration::from_secs(30),
+        "codesign",
+        CODESIGN_VERIFY_TIMEOUT,
     )?;
     ensure!(
         identifier(binary, tools)? == expected,
@@ -424,7 +426,8 @@ impl Drop for Unlocked<'_> {
                 .arg("lock-keychain")
                 .arg(self.keychain)
                 .stdin(Stdio::null()),
-            Duration::from_secs(30),
+            "security",
+            SECURITY_TIMEOUT,
         );
     }
 }
@@ -457,55 +460,26 @@ fn run_security_stdin(
     timeout_msg: &str,
     failure_msg: &str,
 ) -> Result<()> {
-    use std::os::fd::AsRawFd;
-
     let mut command = Command::new(security);
-    std::os::unix::process::CommandExt::process_group(&mut command, 0);
-    command
-        .arg("-i")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    let mut child = command.spawn()?;
-    let deadline = Instant::now() + timeout;
-    let result = (|| -> Result<()> {
-        let mut stdin = child.stdin.take().context("keychain stdin missing")?;
-        let fd = stdin.as_raw_fd();
-        // Bound writing as well as waiting, even if security stops reading stdin.
-        // SAFETY: stdin keeps this descriptor valid for both flag operations.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-        ensure!(
-            flags >= 0 && unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } == 0,
-            "could not configure keychain input"
-        );
-        let mut written = 0;
-        while written < input.len() {
-            ensure!(Instant::now() < deadline, "{timeout_msg}");
-            match stdin.write(&input.as_bytes()[written..]) {
-                Ok(0) => bail!("keychain input closed"),
-                Ok(count) => written += count,
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(20));
-                }
-                Err(error) => return Err(error.into()),
-            }
+    command.arg("-i");
+    let program = security.to_string_lossy();
+    let result = steve_runtime::process::run_bounded(
+        &mut command,
+        &program,
+        steve_runtime::process::BoundedOptions {
+            stdin: steve_runtime::process::BoundedStdin::Bytes(input.as_bytes()),
+            ..steve_runtime::process::BoundedOptions::silent("security_stdin", timeout)
+        },
+    )
+    .map_err(|err| match err {
+        steve_runtime::process::CommandError::TimedOut { .. } => anyhow::anyhow!("{timeout_msg}"),
+        steve_runtime::process::CommandError::StdinConfigure { .. } => {
+            anyhow::anyhow!("could not configure keychain input")
         }
-        drop(stdin);
-        loop {
-            if let Some(status) = child.try_wait()? {
-                ensure!(status.success(), "{failure_msg}");
-                return Ok(());
-            }
-            ensure!(Instant::now() < deadline, "{timeout_msg}");
-            std::thread::sleep(Duration::from_millis(20));
-        }
-    })();
-    if result.is_err() {
-        let _ = child.kill();
-        let _ = child.wait();
-    }
-    result
+        other => anyhow::Error::new(other),
+    })?;
+    ensure!(result.status.success(), "{failure_msg}");
+    Ok(())
 }
 
 fn unlock<'a>(
@@ -531,14 +505,7 @@ fn unlock<'a>(
     Ok(guard)
 }
 fn sign(binary: &Path, keychain: &Path, password: &str, id: &str, tools: &Tools) -> Result<()> {
-    sign_with_timeout(
-        binary,
-        keychain,
-        password,
-        id,
-        tools,
-        Duration::from_secs(30),
-    )
+    sign_with_timeout(binary, keychain, password, id, tools, SECURITY_TIMEOUT)
 }
 fn sign_with_timeout(
     binary: &Path,
@@ -554,7 +521,8 @@ fn sign_with_timeout(
             .args(["set-keychain-settings", "-l", "-u", "-t", "300"])
             .arg(keychain)
             .stdin(Stdio::null()),
-        Duration::from_secs(30),
+        "security",
+        SECURITY_TIMEOUT,
     )?;
     successful(
         Command::new(&tools.codesign)
@@ -569,7 +537,8 @@ fn sign_with_timeout(
             .arg(keychain)
             .arg(binary)
             .stdin(Stdio::null()),
-        Duration::from_secs(60),
+        "codesign",
+        CODESIGN_SIGN_TIMEOUT,
     )?;
     verify_signature(binary, id, tools)
 }
@@ -655,7 +624,17 @@ fn provision_signing_password(home: &Path, candidate: &Path, staging: &Path) -> 
         .arg("provision-signing")
         .arg(home)
         .stdin(File::open(staging)?);
-    let result = output(&mut command, Duration::from_secs(30))?;
+    let result = steve_runtime::process::run_bounded(
+        &mut command,
+        "steve-hub",
+        steve_runtime::process::BoundedOptions {
+            stdin: steve_runtime::process::BoundedStdin::Preserve,
+            ..steve_runtime::process::BoundedOptions::capture(
+                "provision_signing",
+                PROVISION_SIGNING_TIMEOUT,
+            )
+        },
+    )?;
     ensure!(
         result.status.success(),
         "store first-install signing password: {}",
@@ -767,7 +746,7 @@ fn setup_with(home: &Path, candidate: &Path, label: &str, tools: &Tools) -> Resu
     check_security_token(&password, "signing password")?;
     let keychain_ready = if keychain.is_file() {
         owned_file(&keychain)?;
-        let _lock = unlock(&keychain, &password, tools, Duration::from_secs(30))?;
+        let _lock = unlock(&keychain, &password, tools, SECURITY_TIMEOUT)?;
         find_codesigning_identities(&keychain, tools)?
             .to_ascii_lowercase()
             .contains(&HUB_CERTIFICATE_NAME.to_ascii_lowercase())
@@ -883,7 +862,8 @@ fn find_codesigning_identities(keychain: &Path, tools: &Tools) -> Result<String>
             .args(["find-identity", "-p", "codesigning"])
             .arg(keychain)
             .stdin(Stdio::null()),
-        Duration::from_secs(30),
+        "security",
+        SECURITY_TIMEOUT,
     )?;
     Ok(String::from_utf8_lossy(&listed.stdout).into_owned())
 }
@@ -922,7 +902,8 @@ fn create_signing_keychain(
             .arg("-config")
             .arg(&cert_cnf)
             .stdin(Stdio::null()),
-        Duration::from_secs(60),
+        "openssl",
+        OPENSSL_GENERATE_TIMEOUT,
     )
     .with_context(|| format!("generate local signing certificate for {cert_name}"))?;
 
@@ -931,7 +912,8 @@ fn create_signing_keychain(
             .args(["x509", "-noout", "-fingerprint", "-sha1", "-in"])
             .arg(&cert_pem)
             .stdin(Stdio::null()),
-        Duration::from_secs(15),
+        "openssl",
+        OPENSSL_FINGERPRINT_TIMEOUT,
     )
     .with_context(|| format!("read local signing certificate fingerprint for {cert_name}"))?;
     let certificate_sha1 = parse_openssl_sha1(&fingerprint.stdout)?;
@@ -950,7 +932,8 @@ fn create_signing_keychain(
             .arg(&id_p12)
             .env("P12", p12_pass.as_str())
             .stdin(Stdio::null()),
-        Duration::from_secs(30),
+        "openssl",
+        OPENSSL_EXPORT_TIMEOUT,
     )?;
     if !export_legacy.status.success() {
         successful(
@@ -964,7 +947,8 @@ fn create_signing_keychain(
                 .arg(&id_p12)
                 .env("P12", p12_pass.as_str())
                 .stdin(Stdio::null()),
-            Duration::from_secs(30),
+            "openssl",
+            OPENSSL_EXPORT_TIMEOUT,
         )
         .with_context(|| format!("export local signing identity for {cert_name}"))?;
     }
@@ -976,19 +960,20 @@ fn create_signing_keychain(
         run_security_stdin(
             &tools.security,
             &create_cmd,
-            Duration::from_secs(30),
+            SECURITY_TIMEOUT,
             "signing keychain creation timed out",
             "create signing keychain",
         )?;
     }
     {
-        let _lock = unlock(keychain_path, password, tools, Duration::from_secs(30))?;
+        let _lock = unlock(keychain_path, password, tools, SECURITY_TIMEOUT)?;
         successful(
             Command::new(&tools.security)
                 .args(["set-keychain-settings", "-l", "-u", "-t", "300"])
                 .arg(keychain_path)
                 .stdin(Stdio::null()),
-            Duration::from_secs(30),
+            "security",
+            SECURITY_TIMEOUT,
         )?;
         let import_cmd = Zeroizing::new(format!(
             "import \"{p12_text}\" -k \"{keychain_text}\" -P {} -T \"{codesign_text}\"\n",
@@ -997,7 +982,7 @@ fn create_signing_keychain(
         run_security_stdin(
             &tools.security,
             &import_cmd,
-            Duration::from_secs(30),
+            SECURITY_TIMEOUT,
             "signing identity import timed out",
             "import local signing identity",
         )?;
@@ -1007,7 +992,7 @@ fn create_signing_keychain(
         run_security_stdin(
             &tools.security,
             &partition_cmd,
-            Duration::from_secs(30),
+            SECURITY_TIMEOUT,
             "signing keychain partition update timed out",
             "configure local signing keychain access",
         )?;
@@ -1104,7 +1089,8 @@ impl Drop for NodeInitCleanup<'_> {
                     .arg("delete-keychain")
                     .arg(self.keychain)
                     .stdin(Stdio::null()),
-                Duration::from_secs(30),
+                "security",
+                SECURITY_TIMEOUT,
             );
             let _ = fs::remove_file(self.keychain);
         }
@@ -1212,7 +1198,8 @@ pub(crate) fn read_node_designated_requirement(
             .args(["--display", "-r-"])
             .arg(binary)
             .stdin(Stdio::null()),
-        Duration::from_secs(30),
+        "codesign",
+        CODESIGN_VERIFY_TIMEOUT,
     )?;
     if !result.status.success() {
         return Ok(None);
@@ -1237,7 +1224,8 @@ pub(crate) fn verify_node_binary(binary: &Path, requirement: &str, tools: &Tools
             .arg(format!("={requirement}"))
             .arg(binary)
             .stdin(Stdio::null()),
-        Duration::from_secs(30),
+        "codesign",
+        CODESIGN_VERIFY_TIMEOUT,
     )
     .context("executable failed strict code-signature requirement verification")?;
     let actual = read_node_designated_requirement(binary, tools)?
@@ -1291,13 +1279,14 @@ pub(crate) fn sign_node_binary(
     }
     let sign_ref = identity.certificate_sha1.to_ascii_uppercase();
     {
-        let _lock = unlock(&keychain, &password, tools, Duration::from_secs(30))?;
+        let _lock = unlock(&keychain, &password, tools, SECURITY_TIMEOUT)?;
         successful(
             Command::new(&tools.security)
                 .args(["set-keychain-settings", "-l", "-u", "-t", "300"])
                 .arg(&keychain)
                 .stdin(Stdio::null()),
-            Duration::from_secs(30),
+            "security",
+            SECURITY_TIMEOUT,
         )?;
         successful(
             Command::new(&tools.codesign)
@@ -1308,7 +1297,8 @@ pub(crate) fn sign_node_binary(
                 .arg(format!("=designated => {requirement}"))
                 .arg(&staged)
                 .stdin(Stdio::null()),
-            Duration::from_secs(60),
+            "codesign",
+            CODESIGN_SIGN_TIMEOUT,
         )
         .context("sign macOS Node executable with local identity")?;
     }
@@ -1354,6 +1344,7 @@ pub(crate) fn stage_signed_node_runner(
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use std::time::Instant;
     pub(crate) fn executable(path: &Path, text: &str) {
         fs::write(path, text).unwrap();
         fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -2107,7 +2098,7 @@ esac
         let mut cmd = Command::new("python3");
         cmd.args(["-c", "import os; print(os.getpid(), os.getpgrp())"])
             .stdin(Stdio::null());
-        let out = output(&mut cmd, Duration::from_secs(10)).unwrap();
+        let out = output(&mut cmd, "signing_test", Duration::from_secs(10)).unwrap();
         assert!(out.status.success());
         let text = String::from_utf8_lossy(&out.stdout);
         let parts: Vec<i32> = text

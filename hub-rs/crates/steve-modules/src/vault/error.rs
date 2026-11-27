@@ -29,6 +29,8 @@ pub enum VaultError {
     KeyMissing,
     /// `503`: the keychain refused this binary.
     Denied,
+    /// `503`: the external key store helper timed out before answering.
+    TimedOut,
     /// `401`: registering a passkey needs a login from the last 10 minutes.
     StaleLogin,
     /// `503`: no execution Node is available for this session; Hub never runs secret commands locally.
@@ -49,6 +51,7 @@ impl std::fmt::Display for VaultError {
             Self::Locked => t!("modules.vault.locked"),
             Self::KeyMissing => t!("modules.vault.key_missing"),
             Self::Denied => t!("modules.vault.denied"),
+            Self::TimedOut => t!("modules.vault.timed_out"),
             Self::StaleLogin => t!("modules.vault.stale_login"),
             Self::NoExecutionNode => t!("modules.vault.no_execution_node"),
             Self::Api(e) => return e.fmt(f),
@@ -65,7 +68,11 @@ impl VaultError {
             Self::NotInitialized | Self::BadRecoveryCode => 400,
             Self::AlreadyInitialized | Self::KeyExists | Self::Rotating => 409,
             Self::StaleLogin => 401,
-            Self::Locked | Self::KeyMissing | Self::Denied | Self::NoExecutionNode => 503,
+            Self::Locked
+            | Self::KeyMissing
+            | Self::Denied
+            | Self::TimedOut
+            | Self::NoExecutionNode => 503,
             Self::Api(e) => e.status(),
         }
     }
@@ -92,6 +99,7 @@ impl From<KeyStoreError> for VaultError {
         match e {
             KeyStoreError::Locked => Self::Locked,
             KeyStoreError::Denied => Self::Denied,
+            KeyStoreError::TimedOut(_) => Self::TimedOut,
             e => Self::internal(format!("key store: {e}")),
         }
     }
@@ -116,6 +124,15 @@ impl IntoResponse for VaultError {
                 )
                     .into_response()
             }
+            Self::TimedOut => {
+                let err = steve_types::VaultReason::key_store_timed_out(self.to_string());
+                (
+                    StatusCode::from_u16(err.code.http_status())
+                        .unwrap_or(StatusCode::SERVICE_UNAVAILABLE),
+                    Json(err.to_http()),
+                )
+                    .into_response()
+            }
             e => {
                 let code =
                     StatusCode::from_u16(e.status()).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
@@ -126,3 +143,18 @@ impl IntoResponse for VaultError {
 }
 
 pub type VaultResult<T> = Result<T, VaultError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn keystore_timeout_maps_to_503_unavailable_reason() {
+        let err = VaultError::from(KeyStoreError::TimedOut(Duration::from_secs(15)));
+        assert_eq!(err, VaultError::TimedOut);
+        assert_eq!(err.status(), 503);
+        let resp = err.into_response();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+}

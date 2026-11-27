@@ -5620,6 +5620,7 @@ dependencies = [
  "steve-harness-spec",
  "steve-i18n",
  "steve-node-api",
+ "steve-runtime",
  "steve-vault",
  "tempfile",
  "thiserror 2.0.21",
@@ -5983,7 +5984,6 @@ dependencies = [
  "tempfile",
  "url",
  "uuid",
- "wait-timeout",
  "zeroize",
  "zip",
 ]
@@ -6271,6 +6271,7 @@ dependencies = [
  "steve-runtime",
  "tokio",
  "tracing",
+ "zeroize",
 ]
 
 [[package]]

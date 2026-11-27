@@ -99,6 +99,11 @@ pub(crate) struct Requirements {
     pub npm_error: Option<String>,
 }
 
+/// Bound for probing the configured Node.js executable's `--version`.
+const NODE_VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-stream output ceiling for `node --version` (64 KiB leaves ample margin for version text).
+const NODE_VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
 /// Probe the actual configured executable, not npm metadata or the Hub's process environment.
 pub(crate) async fn requirements(cfg: &AcpConfig, id: &str) -> Requirements {
     let mut r = Requirements {
@@ -110,18 +115,22 @@ pub(crate) async fn requirements(cfg: &AcpConfig, id: &str) -> Requirements {
         r.node_error = Some("Node.js is missing; install Node.js and set STEVE_NODE in the Node service environment".into());
         return r;
     };
-    let output = tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio::process::Command::new(node)
-            .arg("--version")
-            .stdin(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .output(),
+    let mut cmd = std::process::Command::new(node);
+    cmd.arg("--version");
+    let output = steve_runtime::process::run_bounded_async(
+        cmd,
+        "node --version",
+        steve_runtime::process::BoundedOptions {
+            max_output_bytes: NODE_VERSION_PROBE_MAX_OUTPUT_BYTES,
+            ..steve_runtime::process::BoundedOptions::capture(
+                "node_version_probe",
+                NODE_VERSION_PROBE_TIMEOUT,
+            )
+        },
     )
     .await;
     let version = match output {
-        Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout)
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout)
             .trim()
             .trim_start_matches('v')
             .split('.')

@@ -10,7 +10,7 @@ description = "Steve's runtime facilities: clock, time zones, schedules, retry a
 default = ["tz", "schedule", "policy", "due", "jobs", "machine"]
 machine = []
 # Shared eventual conditions for dev-dependencies only.
-testkit = ["tokio/process", "tokio/rt", "tokio/test-util"]
+testkit = ["process", "tokio/process", "tokio/rt", "tokio/test-util"]
 tz = ["dep:chrono", "dep:chrono-tz", "dep:iana-time-zone"]
 schedule = ["tz", "dep:croner"]
 policy = ["dep:backon", "dep:governor", "dep:rand"]
@@ -20,8 +20,8 @@ due-contract = ["due"]
 # In-process cache: the Hub turns it on, a Node does not.
 cache = ["dep:moka", "dep:metrics"]
 jobs = ["dep:metrics", "dep:tracing", "tokio/rt"]
-# What a process or a process group uses (CPU, memory, descriptors, threads, disk): Hub and Node.
-process = ["dep:libc"]
+# Process accounting and unified bounded subprocess execution (sync + async).
+process = ["dep:libc", "dep:metrics", "dep:zeroize", "tokio/rt"]
 
 [dependencies]
 futures = "=0.3.34"
@@ -39,6 +39,7 @@ governor = { version = "=0.10.4", optional = true }
 metrics = { version = "=0.24.6", optional = true }
 tracing = { version = "=0.1.44", optional = true }
 libc = { version = "=0.2.191", optional = true }
+zeroize = { version = "=1.9.1", optional = true }
 moka = { version = "=0.12.16", default-features = false, features = ["future", "sync"], optional = true }
 
 [dev-dependencies]

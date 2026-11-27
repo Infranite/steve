@@ -1,4 +1,4 @@
-fn main() {
+pub fn main() {
     println!("cargo:rerun-if-changed=../../build-identity.rs");
     println!(
         "cargo:rustc-env=STEVE_BUILD_TARGET={}",

@@ -123,6 +123,50 @@ pub(crate) struct Observation {
     pub failure: Option<Failure>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SupervisorStep {
+    BuildInfo,
+    CheckConfig,
+    Drain,
+    Stop,
+    StartupGate,
+    VaultProbe,
+}
+
+impl SupervisorStep {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::BuildInfo => "build_info",
+            Self::CheckConfig => "check_config",
+            Self::Drain => "drain",
+            Self::Stop => "stop",
+            Self::StartupGate => "startup_gate",
+            Self::VaultProbe => "vault_probe",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum SupervisorOutcome {
+    Ok,
+    Timeout,
+    PipeDrainTimeout,
+    Error,
+}
+
+impl SupervisorOutcome {
+    pub(crate) fn code(self) -> &'static str {
+        match self {
+            Self::Ok => "ok",
+            Self::Timeout => "timeout",
+            Self::PipeDrainTimeout => "pipe_drain_timeout",
+            Self::Error => "error",
+        }
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum Event {
@@ -149,6 +193,11 @@ pub(crate) enum Event {
     },
     Reclaimed {
         bytes: u64,
+    },
+    Supervisor {
+        step: SupervisorStep,
+        outcome: SupervisorOutcome,
+        elapsed: Duration,
     },
 }
 
@@ -244,6 +293,21 @@ impl Event {
                 if bytes > 0 {
                     metrics::counter!("steve_backup_reclaimed_bytes_total").increment(bytes);
                 }
+            }
+            Self::Supervisor {
+                step,
+                outcome,
+                elapsed,
+            } => {
+                let step = step.code();
+                metrics::counter!(
+                    "steve_supervisor_step_total",
+                    "step" => step,
+                    "result" => outcome.code()
+                )
+                .increment(1);
+                metrics::histogram!("steve_supervisor_step_seconds", "step" => step)
+                    .record(elapsed.as_secs_f64());
             }
         }
     }
@@ -480,6 +544,43 @@ mod tests {
                 &["command=\"restore\""],
                 " 1"
             ),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn offline_supervisor_events_drain_into_hub_recorder() {
+        let home = tempfile::tempdir_in("/tmp").unwrap();
+        emit(
+            home.path(),
+            Event::Supervisor {
+                step: SupervisorStep::CheckConfig,
+                outcome: SupervisorOutcome::Timeout,
+                elapsed: Duration::from_secs(120),
+            },
+        );
+        let recorder = super::super::recorder();
+        let handle = recorder.handle();
+        metrics::with_local_recorder(&recorder, || {
+            drain(home.path()).unwrap();
+        });
+        handle.run_upkeep();
+        let text = handle.render();
+        assert!(
+            text.lines().any(|line| {
+                line.starts_with("steve_supervisor_step_total{")
+                    && line.contains("step=\"check_config\"")
+                    && line.contains("result=\"timeout\"")
+                    && line.ends_with(" 1")
+            }),
+            "{text}"
+        );
+        assert!(
+            text.lines().any(|line| {
+                line.starts_with("steve_supervisor_step_seconds_count{")
+                    && line.contains("step=\"check_config\"")
+                    && line.ends_with(" 1")
+            }),
             "{text}"
         );
     }

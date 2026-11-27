@@ -22,6 +22,40 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use steve_store::db::inspect_schema;
 use steve_types::backup::{BackupPurpose, BackupReceipt, SnapshotId};
 
+/// Upper bound for local `launchctl bootout/bootstrap` service-manager calls.
+const LAUNCHCTL_TIMEOUT: Duration = Duration::from_secs(30);
+/// Upper bound for candidate `steve-hub --check-config` validation (unified at 120s across
+/// `release.rs`, `supervisor.rs`, `setup.rs`, and `reconfigure.rs`).
+const CHECK_CONFIG_TIMEOUT: Duration = Duration::from_secs(120);
+/// Pre-upgrade SQLite+state restic backup budget before switching versions; if exceeded, the
+/// existing Hub stays untouched.
+const PRE_UPGRADE_BACKUP_TIMEOUT: Duration = Duration::from_secs(120);
+/// Upper bound for `steve-hub --admin backup-list` verifying that a recorded pre-upgrade snapshot
+/// still exists in the local restic repository before resuming or rolling back.
+const BACKUP_LIST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Database restore budget during rollback (matches `BACKUP_BUDGET` = 3600s and exceeds
+/// `migration::TOTAL_TIMEOUT` = 15min so large databases are never stranded after mutation).
+const DATABASE_RESTORE_TIMEOUT: Duration = Duration::from_secs(3600);
+/// Loopback HTTP timeout for `/internal/upgrade/drain` control requests.
+const CONTROL_HTTP_TIMEOUT: Duration = Duration::from_secs(10);
+/// Idle health verification window without forward migration progress (extended up to
+/// `migration::TOTAL_TIMEOUT` while SQLite `vm_steps` advances).
+const DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(60);
+/// Single loopback `GET /healthz` probe timeout.
+const HEALTH_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Polling interval for local health and drain checks.
+const POLL_INTERVAL: Duration = Duration::from_millis(200);
+/// Polling cadence while waiting for a persisted orphan probe PID to exit after `SIGTERM`.
+const ORPHAN_PROBE_POLL_INTERVAL: Duration = Duration::from_millis(25);
+/// Maximum wait after `launchctl bootout` for the old Hub's loopback port to close (matches `STOP_GRACE`).
+const STOP_PORT_WAIT_MAX: Duration = Duration::from_secs(15);
+/// TCP connect timeout and polling cadence while waiting for the Hub port to close.
+const STOP_PORT_POLL_INTERVAL: Duration = Duration::from_millis(100);
+/// Graceful `SIGTERM` window for the temporary maintenance-probe Hub before forcing `SIGKILL`.
+const PROBE_STOP_GRACE: Duration = Duration::from_secs(10);
+/// Bounded wait to reap the probe child after `SIGKILL` (unified with `PROCESS_KILL_REAP_TIMEOUT`).
+const PROBE_KILL_REAP_TIMEOUT: Duration = steve_runtime::process::PROCESS_KILL_REAP_TIMEOUT;
+
 #[derive(Debug)]
 pub struct DeployOutcome {
     pub exit_code: i32,
@@ -351,13 +385,13 @@ impl Runtime {
             client: Client::builder()
                 .no_proxy()
                 .redirect(reqwest::redirect::Policy::none())
-                .timeout(Duration::from_secs(10))
+                .timeout(CONTROL_HTTP_TIMEOUT)
                 .build()?,
             address,
             tools,
             launchctl: "/bin/launchctl".into(),
             service_home,
-            health_timeout: Duration::from_secs(60),
+            health_timeout: DEFAULT_HEALTH_TIMEOUT,
             interrupt: Arc::new(AtomicBool::new(false)),
             watch_global_signal: true,
             #[cfg(test)]
@@ -403,7 +437,7 @@ impl Runtime {
     fn health(&self) -> Option<Value> {
         self.client
             .get(format!("http://{}/healthz", self.address))
-            .timeout(Duration::from_secs(2))
+            .timeout(HEALTH_PROBE_TIMEOUT)
             .send()
             .ok()?
             .error_for_status()
@@ -423,7 +457,7 @@ impl Runtime {
                 Instant::now() < deadline,
                 "Hub did not answer with the expected health identity"
             );
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(POLL_INTERVAL);
         }
     }
     fn lift(&self) -> Result<()> {
@@ -440,7 +474,7 @@ impl Runtime {
                 Instant::now() < deadline,
                 "maintenance drain could not be lifted"
             );
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(POLL_INTERVAL);
         }
     }
     fn service(&self, action: &str, ident: &Value) -> Result<()> {
@@ -456,18 +490,18 @@ impl Runtime {
         if self.simulated_service {
             return Ok(());
         }
-        let deadline = Instant::now() + self.health_timeout.min(Duration::from_secs(15));
+        let deadline = Instant::now() + self.health_timeout.min(STOP_PORT_WAIT_MAX);
         let addresses: Vec<_> = self.address.to_socket_addrs()?.collect();
         ensure!(!addresses.is_empty(), "local Hub address did not resolve");
         while addresses
             .iter()
-            .any(|address| TcpStream::connect_timeout(address, Duration::from_millis(100)).is_ok())
+            .any(|address| TcpStream::connect_timeout(address, STOP_PORT_POLL_INTERVAL).is_ok())
         {
             ensure!(
                 Instant::now() < deadline,
                 "old Hub still listens after bootout"
             );
-            std::thread::sleep(Duration::from_millis(100));
+            std::thread::sleep(STOP_PORT_POLL_INTERVAL);
         }
         Ok(())
     }
@@ -484,7 +518,7 @@ impl Runtime {
         }
         command.stdin(Stdio::null());
         if allow_unloaded {
-            let out = signing::output(&mut command, Duration::from_secs(30))?;
+            let out = signing::output(&mut command, "launchctl", LAUNCHCTL_TIMEOUT)?;
             if !out.status.success() {
                 let stderr = String::from_utf8_lossy(&out.stderr);
                 let unloaded = stderr.contains("Could not find service")
@@ -495,7 +529,7 @@ impl Runtime {
             }
             Ok(())
         } else {
-            successful(&mut command, Duration::from_secs(30))?;
+            successful(&mut command, "launchctl", LAUNCHCTL_TIMEOUT)?;
             Ok(())
         }
     }
@@ -527,7 +561,10 @@ impl Runtime {
         env: &BTreeMap<String, String>,
         working_dir: Option<&Path>,
     ) -> Command {
-        let mut command = Command::new(candidate.join("bin/steve-hub"));
+        let bin = candidate.join("bin/steve-hub");
+        let program =
+            steve_runtime::process::resolve_program(bin.as_os_str(), None, None).unwrap_or(bin);
+        let mut command = Command::new(program);
         command
             .env_clear()
             .envs(env)
@@ -555,7 +592,7 @@ impl Runtime {
         }
         let mut command = self.hub_command_with_env(candidate, env, working_dir);
         command.arg("--check-config").stdin(Stdio::null());
-        let output = signing::output(&mut command, Duration::from_secs(120))?;
+        let output = signing::output(&mut command, "check_config", CHECK_CONFIG_TIMEOUT)?;
         let report: Value = serde_json::from_slice(&output.stdout)
             .context("candidate returned no configuration report")?;
         ensure!(
@@ -629,22 +666,24 @@ impl Runtime {
             .stderr(log)
             .process_group(0);
         let result = (|| -> Result<Value> {
-            let mut process = ProbeProcess(command.spawn()?);
-            let pid = process.0.id();
+            let process = ProbeProcess::new(command.spawn()?);
+            let pid = process.id();
             on_probe_pid(Some(pid))?;
             let mut budget =
                 crate::migration::Budget::new(&id.to_string(), pid, self.health_timeout);
             loop {
                 self.check_interrupted()?;
+                // Observe exit without reaping so `ProbeProcess::drop` can still kill any
+                // lingering descendants under `-pid` safely before reaping the leader.
                 ensure!(
-                    process.0.try_wait()?.is_none(),
+                    !process.has_exited()?,
                     "candidate exited during its maintenance probe"
                 );
                 budget.check(crate::migration::read(&self.home, &id.to_string()))?;
                 let health = self
                     .client
                     .get(format!("http://127.0.0.1:{port}/healthz"))
-                    .timeout(Duration::from_secs(2))
+                    .timeout(HEALTH_PROBE_TIMEOUT)
                     .send()
                     .and_then(|r| r.error_for_status())
                     .and_then(|r| r.json::<Value>());
@@ -657,7 +696,7 @@ impl Runtime {
                         let response = self
                             .client
                             .get(format!("http://127.0.0.1:{port}/api/summary"))
-                            .timeout(Duration::from_secs(2))
+                            .timeout(HEALTH_PROBE_TIMEOUT)
                             .send()?;
                         ensure!(
                             response.status().as_u16() == 503,
@@ -666,7 +705,7 @@ impl Runtime {
                         return Ok(health);
                     }
                 }
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(POLL_INTERVAL);
             }
         })();
         let _ = on_probe_pid(None);
@@ -674,21 +713,36 @@ impl Runtime {
         result
     }
 }
-struct ProbeProcess(Child);
+struct ProbeProcess {
+    child: Child,
+    reaped: bool,
+}
+impl ProbeProcess {
+    fn new(child: Child) -> Self {
+        Self {
+            child,
+            reaped: false,
+        }
+    }
+    fn id(&self) -> u32 {
+        self.child.id()
+    }
+    fn has_exited(&self) -> std::io::Result<bool> {
+        if self.reaped {
+            return Ok(true);
+        }
+        steve_runtime::process::exited_unreaped(self.child.id(), true)
+    }
+}
 impl Drop for ProbeProcess {
     fn drop(&mut self) {
-        let group = self.0.id() as i32;
-        unsafe {
-            libc::kill(-group, libc::SIGTERM);
-        }
-        let until = Instant::now() + Duration::from_secs(10);
-        while self.0.try_wait().ok().flatten().is_none() && Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(20));
-        }
-        unsafe {
-            libc::kill(-group, libc::SIGKILL);
-        }
-        let _ = self.0.wait();
+        let _ = steve_runtime::process::stop_child_group_sync(
+            &mut self.child,
+            &mut self.reaped,
+            steve_runtime::process::TermTarget::Group,
+            PROBE_STOP_GRACE,
+            PROBE_KILL_REAP_TIMEOUT,
+        );
     }
 }
 /// Take the pre-upgrade snapshot with the verified candidate, after stopping the running Hub.
@@ -705,7 +759,7 @@ fn backup_with_env(
     command
         .args(["--admin", "backup", "--reason", "pre-upgrade", "--offline"])
         .stdin(Stdio::null());
-    let output = signing::output(&mut command, Duration::from_secs(120))?;
+    let output = signing::output(&mut command, "backup", PRE_UPGRADE_BACKUP_TIMEOUT)?;
     ensure!(
         output.status.success(),
         "candidate backup failed: {}",
@@ -964,7 +1018,7 @@ fn deploy_with(
                 Instant::now() < until,
                 "Hub did not drain before its deadline"
             );
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(POLL_INTERVAL);
         }
         phase = "backup";
         journal.update("stopping", None, None, json!({}))?;
@@ -1134,7 +1188,7 @@ fn restore_snapshot(runtime: &Runtime, helper_release: &Path, saved: &SnapshotId
     command
         .args(["--admin", "restore", saved.as_str(), "--database-only"])
         .stdin(Stdio::null());
-    let output = signing::output(&mut command, Duration::from_secs(3600))?;
+    let output = signing::output(&mut command, "restore", DATABASE_RESTORE_TIMEOUT)?;
     ensure!(
         output.status.success(),
         "candidate restore failed: {}",
@@ -1379,7 +1433,7 @@ fn reap_orphan_probe(
         if !alive {
             return;
         }
-        std::thread::sleep(Duration::from_millis(25));
+        std::thread::sleep(ORPHAN_PROBE_POLL_INTERVAL);
     }
     unsafe {
         libc::kill(-pgid, libc::SIGKILL);
@@ -1396,7 +1450,7 @@ fn verify_snapshot_exists(
     command
         .args(["--admin", "backup-list"])
         .stdin(Stdio::null());
-    let output = signing::output(&mut command, Duration::from_secs(30))?;
+    let output = signing::output(&mut command, "backup_list", BACKUP_LIST_TIMEOUT)?;
     ensure!(
         output.status.success(),
         "cannot verify backup snapshot {} in repository: {}",
@@ -1715,7 +1769,7 @@ where
                     Instant::now() < until,
                     "Hub did not drain before its deadline"
                 );
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(POLL_INTERVAL);
             }
             phase = "stop";
             changed.stopped = true;
@@ -2180,7 +2234,7 @@ fn rollback_macos_with(
                     Instant::now() < until,
                     "Hub did not drain before rollback deadline"
                 );
-                std::thread::sleep(Duration::from_millis(200));
+                std::thread::sleep(POLL_INTERVAL);
             }
             Ok(())
         })();
