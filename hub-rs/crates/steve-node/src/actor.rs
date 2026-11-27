@@ -36,6 +36,11 @@ use crate::journal::{Tx, internal};
 use crate::procs::{self, Stopped};
 use crate::{Inner, now};
 
+/// Periodic workspace change sensing interval while a turn is prompting.
+const WORKSPACE_POLL_INTERVAL: Duration = Duration::from_secs(15);
+/// Minimum gap between tool-triggered workspace fingerprint probes.
+const WORKSPACE_PROBE_DEBOUNCE: Duration = Duration::from_secs(2);
+
 pub(crate) enum Msg {
     /// Start the harness as configured now and confirm it; finish `op` (open, configure).
     Open {
@@ -106,6 +111,11 @@ pub(crate) enum Msg {
     UsageSettled {
         token: u64,
         facts: Vec<Fact>,
+    },
+    WorkspaceChanged {
+        token: u64,
+        workspace: WorkspaceRef,
+        revision: Revision,
     },
     /// Still running after its grace: its group is stopped.
     Kill {
@@ -405,6 +415,8 @@ struct Run {
     usage_stop: Option<oneshot::Sender<Vec<Fact>>>,
     usage_task: Option<UsageTask>,
     usage_pending: bool,
+    workspace_task: Option<UsageTask>,
+    workspace_poke: Option<Arc<tokio::sync::Notify>>,
     unknown: Option<String>,
     images: crate::inline_images::Images,
     image_scope: crate::inline_images::Scope,
@@ -703,6 +715,27 @@ impl Actor {
                         let _ = self.tx(|t| crate::emit_all(&self.inner, t, diagnostics));
                     }
                     self.commit_end();
+                }
+            }
+            Msg::WorkspaceChanged {
+                token,
+                workspace,
+                revision,
+            } => {
+                if let Some(run) = self.run.as_ref().filter(|r| {
+                    r.token == token && r.phase == Phase::Prompting && r.ending.is_none()
+                }) {
+                    let mut evs = vec![(
+                        Subject::Execution(run.exec.clone()),
+                        EventBody::WorkspaceChanged {
+                            workspace,
+                            revision,
+                        },
+                    )];
+                    let session = self.session.clone();
+                    if let Err(error) = self.record_update(&session, &mut evs, &[]) {
+                        self.update_failed(error, evs, true);
+                    }
                 }
             }
             Msg::Kill { token } => {
@@ -1183,6 +1216,8 @@ impl Actor {
             usage_stop: None,
             usage_task: None,
             usage_pending: false,
+            workspace_task: None,
+            workspace_poke: None,
             unknown: None,
             images: crate::inline_images::Images::for_replies(),
             image_scope,
@@ -1327,6 +1362,63 @@ impl Actor {
         });
         if let Some(r) = self.run.as_mut() {
             r.usage_task = Some(UsageTask(usage_task));
+            if let RunDirectory::Workspace { workspace } = &r.spec.run.directory {
+                let cwd = r.image_scope.cwd.clone();
+                let workspace = workspace.clone();
+                let poke = Arc::new(tokio::sync::Notify::new());
+                let poke_rx = poke.clone();
+                let tx = self.tx.clone();
+                let workspace_task = tokio::spawn(async move {
+                    let mut last = tokio::task::spawn_blocking({
+                        let cwd = cwd.clone();
+                        move || crate::workspace::fingerprint(&cwd)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    let mut tick = tokio::time::interval(WORKSPACE_POLL_INTERVAL);
+                    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                    // First tick fires immediately; wait one interval unless poked by a mutating tool.
+                    tick.tick().await;
+                    let mut last_probe = tokio::time::Instant::now();
+                    loop {
+                        tokio::select! {
+                            _ = tick.tick() => {}
+                            _ = poke_rx.notified() => {
+                                let elapsed = last_probe.elapsed();
+                                if elapsed < WORKSPACE_PROBE_DEBOUNCE {
+                                    tokio::time::sleep(WORKSPACE_PROBE_DEBOUNCE - elapsed).await;
+                                }
+                            }
+                        }
+                        last_probe = tokio::time::Instant::now();
+                        let next = tokio::task::spawn_blocking({
+                            let cwd = cwd.clone();
+                            move || crate::workspace::fingerprint(&cwd)
+                        })
+                        .await
+                        .ok()
+                        .flatten();
+                        if let Some(rev) = next
+                            && last.as_ref() != Some(&rev)
+                        {
+                            last = Some(rev.clone());
+                            if tx
+                                .send(Msg::WorkspaceChanged {
+                                    token,
+                                    workspace: workspace.clone(),
+                                    revision: rev,
+                                })
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                });
+                r.workspace_poke = Some(poke);
+                r.workspace_task = Some(UsageTask(workspace_task));
+            }
             r.phase = Phase::Prompting;
         }
         // from here the adapter's messages are this attempt's
@@ -1514,6 +1606,18 @@ impl Actor {
                     Fact::Event(mut e) => {
                         if let EventBody::ToolChanged { tool } = &mut e {
                             run.acted = true;
+                            if tool.phase == ToolPhase::Succeeded
+                                && matches!(
+                                    tool.category,
+                                    ToolCategory::Edit
+                                        | ToolCategory::Delete
+                                        | ToolCategory::Move
+                                        | ToolCategory::Exec
+                                )
+                                && let Some(poke) = &run.workspace_poke
+                            {
+                                poke.notify_one();
+                            }
                             if let RunDirectory::Workspace { workspace } = &run.spec.run.directory
                                 && let Some(fact) = u
                                     .get("toolCallId")
@@ -3148,6 +3252,8 @@ mod journal_regressions {
             usage_stop: None,
             usage_task: None,
             usage_pending: false,
+            workspace_task: None,
+            workspace_poke: None,
             unknown: None,
             images: crate::inline_images::Images::for_replies(),
             image_scope: crate::inline_images::Scope::new(dir.into(), vec![dir.into()], vec![]),

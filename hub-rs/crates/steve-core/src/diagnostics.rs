@@ -18,14 +18,14 @@ impl Core {
                 Some(s) => t.db().store().sessions().stop(&s.id)?,
                 None => None,
             };
-            let (stopped, yours) = crate::turn_wait::stopped(stop.as_ref());
+            let cause = crate::turn_wait::StopCause::classify(stop.as_ref());
             (
                 steve_store::now(),
                 item.cycle,
                 item.delivery_revision,
                 crate::cycle::lifecycle_view(&t, &item)?,
                 t.dependency_view(item_id)?,
-                json!({"why": stopped, "yours": yours}),
+                json!({"why": cause.text(), "reason": cause.code(), "yours": cause.is_yours()}),
             )
         };
         let current = self.store().item(item_id)?;

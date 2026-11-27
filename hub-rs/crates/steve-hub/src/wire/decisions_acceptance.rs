@@ -1878,7 +1878,10 @@ async fn every_registered_decision_subject_has_success_and_refusal_contract() {
                 subject_id: ts_item.id.clone(),
                 item_id: Some(ts_item.id.clone()),
                 question: String::new(),
-                question_template: Some(steve_types::DecisionPrompt::TurnNoProgress),
+                question_template: Some(steve_types::DecisionPrompt::TurnNoProgress {
+                    minutes: None,
+                    blocker: None,
+                }),
                 options: Some(vec!["continue".into(), "drop".into()]),
                 requested_by: "steve".into(),
                 source: Some(DecisionSource::TurnStall {

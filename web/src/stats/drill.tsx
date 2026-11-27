@@ -16,7 +16,7 @@ import { useHubQuery } from "@/data/use-hub-query"
 import { fmtMs, fmtN, fmtUsage, fmtUsageCost, fmtPct, fmtUsd, tickLabel, time, timeTicks } from "@/stats/format"
 
 /* labels for the Hub's values, built at render so they follow the language */
-export const STOP = (): Record<string, string> => ({ end_turn: t("stats:drill.stop.endTurn"), cancelled: t("stats:drill.stop.cancelled"), max_tokens: t("stats:drill.stop.maxTokens"), refusal: t("stats:drill.stop.refusal"), error: t("stats:drill.stop.error"), interrupted: t("stats:drill.stop.interrupted") })
+export const STOP = (): Record<string, string> => ({ end_turn: t("stats:drill.stop.endTurn"), cancelled: t("stats:drill.stop.cancelled"), turn_stall_no_progress: t("stats:drill.stop.stallNoProgress"), turn_stall_repeated_failure: t("stats:drill.stop.stallRepeatedFailure"), max_tokens: t("stats:drill.stop.maxTokens"), refusal: t("stats:drill.stop.refusal"), error: t("stats:drill.stop.error"), interrupted: t("stats:drill.stop.interrupted") })
 export const DECISION = (): Record<string, string> => ({ accept: t("stats:drill.decision.accept"), ask: t("stats:drill.decision.ask"), approve: t("stats:drill.decision.approve"), fail: t("stats:drill.decision.fail"), propose: t("stats:drill.decision.propose"), confirm: t("stats:drill.decision.confirm") })
 const CHOICE = (): Record<string, string> => ({ pass: t("stats:drill.choice.pass"), rework: t("stats:drill.choice.rework") })
 export const RELEASE = (): Record<string, string> => ({ released: t("stats:drill.release.released"), failed: t("stats:drill.release.failed"), not_released: t("stats:drill.release.notReleased"), rolled_back: t("stats:drill.release.rolledBack"), unknown: t("stats:drill.release.unknown") })
@@ -109,7 +109,7 @@ function Timeline({ d }: { d: ItemDetail }) {
             <line x1={L} x2={L + W} y1={Y[k]} y2={Y[k]} stroke="var(--border)" strokeOpacity={0.6} />
           </g>)}
           <g>{turns.map((tn) => {
-            const a = x(tn.started), b = x(tn.ended ?? now), bad = tn.stop_reason === "error" || tn.transient
+            const a = x(tn.started), b = x(tn.ended ?? now), bad = tn.stop_reason === "error" || tn.stop_reason === "turn_stall_no_progress" || tn.stop_reason === "turn_stall_repeated_failure" || tn.transient
             return <rect key={tn.id} x={a} y={Y.turns - 6} width={Math.max(3, b - a)} height={12} rx={4} className={cn("cursor-default transition-[fill] duration-120", bad ? "fill-destructive/80" : tn.ended ? "fill-blue/70 hover:fill-blue" : "fill-blue")}
               onMouseEnter={() => show(tn.started, Y.turns, t("stats:drill.turnTip", { time: time(tn.started), dur: tn.ended ? fmtMs(tn.ended - tn.started) : t("stats:word.running"), tokens: fmtUsage(tn.usage), tools: tn.tools }))} />
           })}</g>

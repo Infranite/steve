@@ -10,6 +10,7 @@ use steve_runtime::FakeClock;
 struct Seen {
     finished: Mutex<Vec<String>>,
     ended: Mutex<Vec<String>>,
+    ended_reasons: Mutex<Vec<String>>,
     started: Mutex<Vec<String>>,
     workspaces: Mutex<Vec<WorkspaceFact>>,
 }
@@ -18,8 +19,9 @@ impl NodeDomain for Seen {
     fn workspace_changed(&self, fact: WorkspaceFact) {
         self.workspaces.lock().unwrap().push(fact);
     }
-    fn turn_ended(&self, session: &str, _: Option<&str>, _: &str, _: Option<String>) {
+    fn turn_ended(&self, session: &str, _: Option<&str>, stop_reason: &str, _: Option<String>) {
         self.ended.lock().unwrap().push(session.into());
+        self.ended_reasons.lock().unwrap().push(stop_reason.into());
     }
     fn attempt_started(&self, _: &str, attempt: &str, _: i64, _: Option<i64>, _: i64) {
         self.started.lock().unwrap().push(attempt.into());
@@ -1333,4 +1335,530 @@ async fn upgrade_only_node_skips_reconcile_until_normal_link() {
     up_peer_conn.close(None, steve_node_wire::close::GOODBYE, "test done");
     norm_hub_conn.close(None, steve_node_wire::close::GOODBYE, "test done");
     norm_peer_conn.close(None, steve_node_wire::close::GOODBYE, "test done");
+}
+
+async fn start_reconciled_turn() -> (
+    tempfile::TempDir,
+    Arc<FakeNode>,
+    Arc<NodeRuntime>,
+    Arc<Seen>,
+    Arc<FakeClock>,
+    ExecutionRef,
+) {
+    let (dir, node, original, seen) = retry_fixture();
+    let clock = Arc::new(FakeClock::new(steve_store::now()));
+    let rt = NodeRuntime::with_clock(
+        original.store.clone(),
+        node.clone(),
+        seen.clone(),
+        clock.clone(),
+    );
+    rt.reconciled.store(true, Ordering::SeqCst);
+    node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+    assert!(rt.send_one().await);
+    assert!(rt.send_one().await);
+    rt.prompt("s1", "long task", "user", &[]).unwrap();
+    assert!(rt.send_one().await);
+    let execution: ExecutionRef =
+        serde_json::from_str(&node_checks::attempt_execution(&rt.store).unwrap()).unwrap();
+    (dir, node, rt, seen, clock, execution)
+}
+
+fn stall_cards(rt: &NodeRuntime) -> i64 {
+    node_checks::decision_count_by_subject_type(&rt.store, steve_types::orchestration::TURN_STALL)
+        .unwrap()
+}
+
+#[tokio::test]
+async fn agy_background_task_survives_past_fifteen_minutes() {
+    let (_dir, node, rt, _seen, clock, execution) = start_reconciled_turn().await;
+    let mut norm =
+        steve_acp::normalize::Normalizer::new("/tmp/repo", "a1", Epoch::new("m1").unwrap())
+            .for_harness("antigravity")
+            .root_session("agy-1");
+
+    for frame in [
+        json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-bg-1",
+            "name": "run_command",
+            "kind": "execute",
+            "status": "in_progress",
+            "title": "cargo test --workspace",
+            "rawInput": {
+                "CommandLine": "cargo test --workspace",
+                "WaitMsBeforeAsync": 500,
+                "toolSummary": "Workspace test run"
+            }
+        }),
+        json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call-bg-1",
+            "name": "run_command",
+            "kind": "execute",
+            "status": "completed",
+            "title": "cargo test --workspace",
+            "rawInput": {
+                "CommandLine": "cargo test --workspace",
+                "WaitMsBeforeAsync": 500,
+                "toolSummary": "Workspace test run"
+            },
+            "rawOutput": {
+                "output": "Tool is running as a background task with task id: agy-1/task-7"
+            }
+        }),
+    ] {
+        for fact in norm.update_for_session(Some("agy-1"), &frame) {
+            if let steve_acp::normalize::Fact::Event(body) = fact {
+                node.emit(Subject::Execution(execution.clone()), body)
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    for _ in 0..20 {
+        clock.advance(60_000);
+        rt.observe_turns().unwrap();
+    }
+    assert_eq!(
+        stall_cards(&rt),
+        0,
+        "active agy background task must not be killed at 15 minutes"
+    );
+    assert_eq!(retry_count(&rt, "cancel"), 0);
+}
+
+#[tokio::test]
+async fn agy_async_subagent_survives_past_fifteen_minutes() {
+    let (_dir, node, rt, _seen, clock, execution) = start_reconciled_turn().await;
+    let mut norm =
+        steve_acp::normalize::Normalizer::new("/tmp/repo", "a1", Epoch::new("m1").unwrap())
+            .for_harness("antigravity")
+            .root_session("agy-1");
+
+    for frame in [
+        json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-sub-1",
+            "name": "invoke_subagent",
+            "kind": "other",
+            "status": "in_progress",
+            "title": "Run invoke_subagent",
+            "rawInput": {
+                "TypeName": "research",
+                "Role": "Codebase Researcher",
+                "Prompt": "Inspect all crates and report findings."
+            }
+        }),
+        json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call-sub-1",
+            "name": "invoke_subagent",
+            "kind": "other",
+            "status": "completed",
+            "title": "Run invoke_subagent",
+            "rawInput": {
+                "TypeName": "research",
+                "Role": "Codebase Researcher",
+                "Prompt": "Inspect all crates and report findings."
+            }
+        }),
+    ] {
+        for fact in norm.update_for_session(Some("agy-1"), &frame) {
+            if let steve_acp::normalize::Fact::Event(body) = fact {
+                node.emit(Subject::Execution(execution.clone()), body)
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    for _ in 0..20 {
+        clock.advance(60_000);
+        rt.observe_turns().unwrap();
+    }
+    assert_eq!(
+        stall_cards(&rt),
+        0,
+        "running agy subagent must not be killed at 15 minutes"
+    );
+    assert_eq!(retry_count(&rt, "cancel"), 0);
+}
+
+#[tokio::test]
+async fn long_running_compile_tool_survives_past_fifteen_minutes() {
+    let (_dir, node, rt, _seen, clock, execution) = start_reconciled_turn().await;
+    node.emit(
+        Subject::Execution(execution.clone()),
+        EventBody::ToolChanged {
+            tool: ToolView {
+                id: CallId::new("call-build-1").unwrap(),
+                parent: None,
+                origin: ToolOrigin::Harness,
+                name: "run_command".into(),
+                category: ToolCategory::Exec,
+                title: "cargo build --release".into(),
+                description: None,
+                target: Some("cargo build --release".into()),
+                phase: ToolPhase::Running,
+                action: Some(Action::Exec {
+                    command: "cargo build --release".into(),
+                    cwd: None,
+                    network: NetworkScope::Unrestricted,
+                }),
+                evidence: None,
+                result: vec![],
+                error: None,
+                duration_ms: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+
+    for _ in 0..20 {
+        clock.advance(60_000);
+        rt.observe_turns().unwrap();
+    }
+    assert_eq!(
+        stall_cards(&rt),
+        0,
+        "long-running compile command must not be killed at 15 minutes"
+    );
+    assert_eq!(retry_count(&rt, "cancel"), 0);
+}
+
+#[tokio::test]
+async fn pure_steve_mcp_sequence_survives_past_fifteen_minutes() {
+    let (_dir, node, rt, _seen, clock, execution) = start_reconciled_turn().await;
+    for step in 0..5 {
+        clock.advance(4 * 60_000);
+        rt.observe_turns().unwrap();
+        node.emit(
+            Subject::Execution(execution.clone()),
+            EventBody::ToolChanged {
+                tool: ToolView {
+                    id: CallId::new(format!("call-mcp-{step}")).unwrap(),
+                    parent: None,
+                    origin: ToolOrigin::Steve,
+                    name: "steve_item_read".into(),
+                    category: ToolCategory::Steve,
+                    title: format!("Read ST-{step}"),
+                    description: None,
+                    target: None,
+                    phase: ToolPhase::Succeeded,
+                    action: Some(Action::Tool {
+                        name: "steve_item_read".into(),
+                        args: json!({ "id": format!("ST-{step}") }),
+                    }),
+                    evidence: None,
+                    result: vec![Part::Text {
+                        text: format!("item ST-{step} details"),
+                    }],
+                    error: None,
+                    duration_ms: Some(120),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+    clock.advance(4 * 60_000);
+    rt.observe_turns().unwrap();
+    assert_eq!(
+        stall_cards(&rt),
+        0,
+        "distinct Steve MCP calls across 24 minutes must not be killed at 15 minutes"
+    );
+    assert_eq!(retry_count(&rt, "cancel"), 0);
+}
+
+#[tokio::test]
+async fn plan_and_read_search_advance_progress_while_spin_loop_still_stalls_at_fifteen_minutes() {
+    let (_dir, node, rt, _seen, clock, execution) = start_reconciled_turn().await;
+
+    // Distinct Plan updates and Read/Search calls across 20 minutes keep the turn alive.
+    for step in 0..5 {
+        clock.advance(4 * 60_000);
+        rt.observe_turns().unwrap();
+        node.emit(
+            Subject::Execution(execution.clone()),
+            EventBody::Plan {
+                entries: vec![PlanEntry {
+                    content: format!("Inspect module {step}"),
+                    status: if step > 0 {
+                        "completed".into()
+                    } else {
+                        "in_progress".into()
+                    },
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        node.emit(
+            Subject::Execution(execution.clone()),
+            EventBody::ToolChanged {
+                tool: ToolView {
+                    id: CallId::new(format!("call-read-{step}")).unwrap(),
+                    parent: None,
+                    origin: ToolOrigin::Harness,
+                    name: "read_file".into(),
+                    category: ToolCategory::Read,
+                    title: format!("Read src/m{step}.rs"),
+                    description: None,
+                    target: Some(format!("src/m{step}.rs")),
+                    phase: ToolPhase::Succeeded,
+                    action: Some(Action::Read {
+                        paths: vec![PathRef {
+                            workspace: WorkspaceRef {
+                                node: NodeId::new("local").unwrap(),
+                                id: WorkspaceId::new("w1").unwrap(),
+                            },
+                            rel: RelPath::new(format!("src/m{step}.rs")).unwrap(),
+                        }],
+                    }),
+                    evidence: None,
+                    result: vec![Part::Text {
+                        text: format!("contents of module {step}"),
+                    }],
+                    error: None,
+                    duration_ms: Some(40),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(stall_cards(&rt), 0);
+
+    // Repeating the exact same Read + Plan without any workspace mutation is deduplicated and
+    // caught at 15 minutes.
+    for min in 1..=15 {
+        clock.advance(60_000);
+        node.emit(
+            Subject::Execution(execution.clone()),
+            EventBody::Plan {
+                entries: vec![PlanEntry {
+                    content: "Inspect module 4".into(),
+                    status: "completed".into(),
+                }],
+            },
+        )
+        .await
+        .unwrap();
+        node.emit(
+            Subject::Execution(execution.clone()),
+            EventBody::ToolChanged {
+                tool: ToolView {
+                    id: CallId::new(format!("call-spin-{min}")).unwrap(),
+                    parent: None,
+                    origin: ToolOrigin::Harness,
+                    name: "read_file".into(),
+                    category: ToolCategory::Read,
+                    title: "Read src/m4.rs".into(),
+                    description: None,
+                    target: Some("src/m4.rs".into()),
+                    phase: ToolPhase::Succeeded,
+                    action: Some(Action::Read {
+                        paths: vec![PathRef {
+                            workspace: WorkspaceRef {
+                                node: NodeId::new("local").unwrap(),
+                                id: WorkspaceId::new("w1").unwrap(),
+                            },
+                            rel: RelPath::new("src/m4.rs").unwrap(),
+                        }],
+                    }),
+                    evidence: None,
+                    result: vec![Part::Text {
+                        text: "contents of module 4".into(),
+                    }],
+                    error: None,
+                    duration_ms: Some(40),
+                },
+            },
+        )
+        .await
+        .unwrap();
+        rt.observe_turns().unwrap();
+    }
+    assert_eq!(
+        stall_cards(&rt),
+        1,
+        "spin loop must still stall at 15 minutes"
+    );
+    assert_eq!(retry_count(&rt, "cancel"), 1);
+}
+
+#[tokio::test]
+async fn hung_active_subagent_stalls_at_extended_limit_with_real_blocker_and_typed_stop_reason() {
+    let (_dir, node, rt, seen, clock, execution) = start_reconciled_turn().await;
+    let mut norm =
+        steve_acp::normalize::Normalizer::new("/tmp/repo", "a1", Epoch::new("m1").unwrap())
+            .for_harness("antigravity")
+            .root_session("agy-1");
+
+    for frame in [
+        json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "call-sub-hung",
+            "name": "invoke_subagent",
+            "kind": "other",
+            "status": "in_progress",
+            "title": "Run invoke_subagent",
+            "rawInput": {
+                "TypeName": "research",
+                "Role": "Codebase Researcher",
+                "Prompt": "Deep audit"
+            }
+        }),
+        json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "call-sub-hung",
+            "name": "invoke_subagent",
+            "kind": "other",
+            "status": "completed",
+            "title": "Run invoke_subagent",
+            "rawInput": {
+                "TypeName": "research",
+                "Role": "Codebase Researcher",
+                "Prompt": "Deep audit"
+            },
+            "rawOutput": {
+                "conversationId": "sub-conv-99"
+            }
+        }),
+    ] {
+        for fact in norm.update_for_session(Some("agy-1"), &frame) {
+            if let steve_acp::normalize::Fact::Event(body) = fact {
+                node.emit(Subject::Execution(execution.clone()), body)
+                    .await
+                    .unwrap();
+            }
+        }
+    }
+
+    // Active subagent survives 59 minutes, then stalls at the 60-minute active-work ceiling.
+    for _ in 0..59 {
+        clock.advance(60_000);
+        rt.observe_turns().unwrap();
+    }
+    assert_eq!(stall_cards(&rt), 0);
+
+    clock.advance(60_000);
+    rt.observe_turns().unwrap();
+    assert_eq!(stall_cards(&rt), 1);
+    assert_eq!(retry_count(&rt, "cancel"), 1);
+
+    let decisions = rt.store.decisions().open(steve_store::WS).unwrap();
+    let stall_card = decisions
+        .iter()
+        .find(|d| d.subject_type == steve_types::orchestration::TURN_STALL)
+        .expect("turn_stall decision card");
+    assert_eq!(
+        stall_card.question_template,
+        Some(steve_types::DecisionPrompt::TurnNoProgress {
+            minutes: Some(60),
+            blocker: Some(steve_types::StallBlocker {
+                kind: steve_types::StallBlockerKind::Subagent,
+                label: "Codebase Researcher".into(),
+            }),
+        })
+    );
+
+    // When the Node confirms cancellation with generic `"cancelled"`, Hub rewrites it to the
+    // strongly-typed stall stop reason across turn_end and NodeDomain::turn_ended.
+    node.emit(
+        Subject::Execution(execution.clone()),
+        EventBody::AttemptEnded {
+            completion: Completion {
+                outcome: Outcome::Cancelled,
+                stop_reason: "cancelled".into(),
+                error: None,
+                result: vec![],
+                continuation: None,
+                transient: false,
+                acted: false,
+                job: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    rt.tell_later();
+
+    assert_eq!(
+        seen.ended_reasons.lock().unwrap().as_slice(),
+        &[steve_types::orchestration::STOP_REASON_STALL_NO_PROGRESS.to_owned()]
+    );
+    let events = rt.store.events().after("s1", 0, 100).unwrap();
+    let turn_end = events
+        .iter()
+        .rev()
+        .find(|e| e.kind == "turn_end")
+        .expect("turn_end event");
+    assert_eq!(
+        turn_end.data["stopReason"],
+        steve_types::orchestration::STOP_REASON_STALL_NO_PROGRESS
+    );
+}
+
+#[tokio::test]
+async fn repeated_failure_cancel_emits_typed_stall_stop_reason() {
+    let (_dir, node, rt, seen, _clock, execution) = start_reconciled_turn().await;
+    for step in 0..5 {
+        node.emit(
+            Subject::Execution(execution.clone()),
+            EventBody::ToolChanged {
+                tool: ToolView {
+                    id: CallId::new(format!("call-fail-{step}")).unwrap(),
+                    parent: None,
+                    origin: ToolOrigin::Steve,
+                    name: "steve_item_read".into(),
+                    category: ToolCategory::Steve,
+                    title: "Read ST-999".into(),
+                    description: None,
+                    target: None,
+                    phase: ToolPhase::Failed,
+                    action: Some(Action::Tool {
+                        name: "steve_item_read".into(),
+                        args: json!({ "id": "ST-999" }),
+                    }),
+                    evidence: None,
+                    result: vec![],
+                    error: Some("not found".into()),
+                    duration_ms: Some(10),
+                },
+            },
+        )
+        .await
+        .unwrap();
+    }
+    assert_eq!(stall_cards(&rt), 1);
+    assert_eq!(retry_count(&rt, "cancel"), 1);
+
+    node.emit(
+        Subject::Execution(execution.clone()),
+        EventBody::AttemptEnded {
+            completion: Completion {
+                outcome: Outcome::Cancelled,
+                stop_reason: "cancelled".into(),
+                error: None,
+                result: vec![],
+                continuation: None,
+                transient: false,
+                acted: false,
+                job: None,
+            },
+        },
+    )
+    .await
+    .unwrap();
+    rt.tell_later();
+
+    assert_eq!(
+        seen.ended_reasons.lock().unwrap().as_slice(),
+        &[steve_types::orchestration::STOP_REASON_STALL_REPEATED_FAILURE.to_owned()]
+    );
 }

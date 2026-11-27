@@ -62,6 +62,10 @@ pub use event::{
 };
 pub use fact::{AlarmFired, AlarmLine, DurableFact, MailDelivery, PrSupplement};
 pub use id::*;
+pub use orchestration::{
+    STOP_REASON_STALL_NO_PROGRESS, STOP_REASON_STALL_REPEATED_FAILURE, StallBlocker,
+    StallBlockerKind, StallEvidence, StallReason, TURN_STALL,
+};
 pub use placement::*;
 pub use raw::RawJson;
 pub use stream::StreamControl;

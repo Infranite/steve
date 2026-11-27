@@ -3195,19 +3195,41 @@ impl Tx<'_> {
             );
             return Ok(());
         }
+        let stop_reason: std::borrow::Cow<'_, str> = if t.stop_reason == "cancelled"
+            && !asked_yours
+            && let Some(attempt) = t.attempt.as_deref()
+            && let Some(reason) = self
+                .db()
+                .store()
+                .read(|r| steve_store::node_write::stall::stalled_reason(r, attempt))?
+        {
+            std::borrow::Cow::Borrowed(reason.stop_reason())
+        } else {
+            std::borrow::Cow::Borrowed(t.stop_reason.as_str())
+        };
         sessions.stop_ended(
             &session.id,
             t.attempt.as_deref(),
-            &t.stop_reason,
+            &stop_reason,
             t.error.as_deref().filter(|e| !e.is_empty()),
             asked_yours,
         )?;
+        let is_stall_stop =
+            steve_types::orchestration::StallReason::from_stop_reason(&stop_reason).is_some();
         if let Some(attempt) = t.attempt.as_deref()
             && self
                 .db()
                 .store()
                 .read(|r| steve_store::node_write::stall::held_attempt(r, attempt))?
         {
+            self.diagnostic_session(
+                &session.id,
+                Some(attempt),
+                "turn.end_evaluated",
+                "turn_stalled",
+                false,
+                Default::default(),
+            );
             self.st.pending.remove(&session.id);
             return Ok(());
         }
@@ -3224,10 +3246,9 @@ impl Tx<'_> {
         });
         /* the turn answered something forwarded from the conversation: its reply goes back there.
          * A question you asked it there (not an instruction) is answered on purpose, not continued */
+        let is_cancelled_or_stalled = stop_reason == "cancelled" || is_stall_stop;
         let mut answered_you = false;
-        if t.stop_reason != "cancelled"
-            && let Some(f) = self.c.forwarded_take(item_id)
-        {
+        if !is_cancelled_or_stalled && let Some(f) = self.c.forwarded_take(item_id) {
             answered_you = f.asked;
             let r = f.mid;
             let last = self.last_agent_text(&session.id)?;
@@ -3287,8 +3308,8 @@ impl Tx<'_> {
         let error = t.error.as_deref().filter(|e| !e.is_empty());
         if mark.is_some()
             || (receipt.is_some()
-                && (error.is_none() || crate::runtime::is_model_service_failure(&t.stop_reason))
-                && t.stop_reason != "cancelled")
+                && (error.is_none() || crate::runtime::is_model_service_failure(&stop_reason))
+                && !is_cancelled_or_stalled)
         {
             self.diagnostic_session(
                 &session.id,
@@ -3304,7 +3325,7 @@ impl Tx<'_> {
             );
             return Ok(());
         }
-        if t.stop_reason != "cancelled" && self.wf_run_parent_waiting(&item)? {
+        if !is_cancelled_or_stalled && self.wf_run_parent_waiting(&item)? {
             self.diagnostic_session(
                 &session.id,
                 t.attempt.as_deref(),
@@ -3315,12 +3336,16 @@ impl Tx<'_> {
             );
             return Ok(());
         }
-        if t.stop_reason == "cancelled" {
+        if is_cancelled_or_stalled {
             self.diagnostic_session(
                 &session.id,
                 t.attempt.as_deref(),
                 "turn.end_evaluated",
-                "cancelled",
+                if is_stall_stop {
+                    "turn_stalled"
+                } else {
+                    "cancelled"
+                },
                 false,
                 Default::default(),
             );

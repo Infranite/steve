@@ -890,6 +890,232 @@ pub(crate) fn display(path: &Path) -> String {
     }
 }
 
+/// Bounded timeout for one lightweight workspace fingerprint probe.
+const WORKSPACE_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+/// Output cap for `git status --porcelain=v2 --branch -z` during progress observation.
+const WORKSPACE_PROBE_OUTPUT_CAP: usize = 256 * 1024;
+/// Maximum dirty/untracked paths stat'd to detect repeated edits on the same dirty file.
+const WORKSPACE_STAT_PATHS_MAX: usize = 256;
+/// Maximum directory entries visited when fingerprinting a non-git workspace.
+const WORKSPACE_WALK_ENTRIES_MAX: usize = 1024;
+
+/// Directories the progress fingerprint never walks: every toolchain's in-tree build and cache
+/// directories, named in the toolchain data rather than here.
+static WALK_SKIPPED_DIRS: std::sync::LazyLock<Vec<String>> = std::sync::LazyLock::new(|| {
+    steve_toolchains::Toolchains::builtin()
+        .in_tree_names()
+        .into_iter()
+        .map(str::to_owned)
+        .collect()
+});
+/// Maximum recursion depth when fingerprinting a non-git workspace.
+const WORKSPACE_WALK_DEPTH_MAX: usize = 4;
+
+/// Lightweight, deterministic fingerprint of the workspace's current state (HEAD, tracked/untracked
+/// changes, and dirty file metadata in git repos; bounded directory stat walk otherwise).
+/// Returns `None` if the workspace cannot be probed within its timeout or output cap.
+pub(crate) fn fingerprint(dir: &Path) -> Option<Revision> {
+    if dir.join(".git").exists() {
+        git_fingerprint(dir)
+    } else {
+        dir_fingerprint(dir)
+    }
+}
+
+fn git_fingerprint(dir: &Path) -> Option<Revision> {
+    use std::io::Read;
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    let mut child = Command::new("git")
+        .args([
+            "status",
+            "--porcelain=v2",
+            "--branch",
+            "-z",
+            "--untracked-files=normal",
+        ])
+        .current_dir(dir)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .process_group(0)
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut pipe = child.stdout.take()?;
+    let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
+    if flags < 0
+        || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
+    {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    }
+    let until = std::time::Instant::now() + WORKSPACE_PROBE_TIMEOUT;
+    let mut output = Vec::new();
+    let mut bytes = [0u8; 4096];
+    let ok = loop {
+        for _ in 0..16 {
+            match pipe.read(&mut bytes) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => output.extend_from_slice(&bytes[..n]),
+            }
+        }
+        if std::time::Instant::now() >= until || output.len() > WORKSPACE_PROBE_OUTPUT_CAP {
+            unsafe {
+                libc::kill(-(child.id() as i32), libc::SIGKILL);
+            }
+            let _ = child.kill();
+            let _ = child.wait();
+            return None;
+        }
+        match child.try_wait().ok()? {
+            Some(status) => {
+                while let Ok(n) = pipe.read(&mut bytes) {
+                    if n == 0 || output.len() + n > WORKSPACE_PROBE_OUTPUT_CAP {
+                        break;
+                    }
+                    output.extend_from_slice(&bytes[..n]);
+                }
+                break status.success();
+            }
+            None => std::thread::sleep(std::time::Duration::from_millis(10)),
+        }
+    };
+    if !ok {
+        return None;
+    }
+
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"git-v2\0");
+    hasher.update(&output);
+    let mut stat_count = 0usize;
+    let mut records = output.split(|b| *b == 0);
+    while let Some(raw) = records.next() {
+        if raw.is_empty() {
+            continue;
+        }
+        let Ok(entry) = std::str::from_utf8(raw) else {
+            continue;
+        };
+        let path = if entry.starts_with("1 ") {
+            entry.splitn(9, ' ').nth(8)
+        } else if entry.starts_with("2 ") {
+            let _orig = records.next();
+            entry.splitn(10, ' ').nth(9)
+        } else if entry.starts_with("u ") {
+            entry.splitn(11, ' ').nth(10)
+        } else if let Some(p) = entry.strip_prefix("? ") {
+            Some(p)
+        } else {
+            None
+        };
+        if let Some(rel) = path {
+            stat_count += 1;
+            if stat_count > WORKSPACE_STAT_PATHS_MAX {
+                break;
+            }
+            hasher.update(b"\0stat\0");
+            hasher.update(rel.as_bytes());
+            update_meta_hash(&mut hasher, &dir.join(rel));
+        }
+    }
+    let hex = hex::encode(hasher.finalize());
+    Revision::new(format!("ws_{}", &hex[..32])).ok()
+}
+
+fn dir_fingerprint(dir: &Path) -> Option<Revision> {
+    let mut entries = Vec::new();
+    collect_dir_entries(dir, Path::new(""), 0, &mut entries);
+    entries.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    let mut hasher = sha2::Sha256::new();
+    hasher.update(b"dir-v1\0");
+    for (rel, tag, len, mtime) in entries {
+        hasher.update(rel.as_bytes());
+        hasher.update([0, tag]);
+        hasher.update(len.to_le_bytes());
+        hasher.update(mtime.to_le_bytes());
+    }
+    let hex = hex::encode(hasher.finalize());
+    Revision::new(format!("ws_{}", &hex[..32])).ok()
+}
+
+fn collect_dir_entries(
+    base: &Path,
+    rel: &Path,
+    depth: usize,
+    out: &mut Vec<(String, u8, u64, u128)>,
+) {
+    if depth > WORKSPACE_WALK_DEPTH_MAX || out.len() >= WORKSPACE_WALK_ENTRIES_MAX {
+        return;
+    }
+    let Ok(rd) = std::fs::read_dir(base.join(rel)) else {
+        return;
+    };
+    let mut names: Vec<std::ffi::OsString> = rd.flatten().map(|e| e.file_name()).collect();
+    names.sort_unstable();
+    for name in names {
+        if out.len() >= WORKSPACE_WALK_ENTRIES_MAX {
+            break;
+        }
+        let s = name.to_string_lossy();
+        if s == ".git" || WALK_SKIPPED_DIRS.iter().any(|d| *d == s.as_ref()) {
+            continue;
+        }
+        let child_rel = if rel.as_os_str().is_empty() {
+            PathBuf::from(&name)
+        } else {
+            rel.join(&name)
+        };
+        let full = base.join(&child_rel);
+        let Ok(meta) = std::fs::symlink_metadata(&full) else {
+            continue;
+        };
+        let tag = if meta.is_dir() {
+            1
+        } else if meta.file_type().is_symlink() {
+            2
+        } else {
+            0
+        };
+        let mtime = meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        out.push((
+            child_rel.to_string_lossy().into_owned(),
+            tag,
+            meta.len(),
+            mtime,
+        ));
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            collect_dir_entries(base, &child_rel, depth + 1, out);
+        }
+    }
+}
+
+fn update_meta_hash(hasher: &mut sha2::Sha256, path: &Path) {
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) => {
+            hasher.update([1u8]);
+            hasher.update(meta.len().to_le_bytes());
+            let mtime = meta
+                .modified()
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            hasher.update(mtime.to_le_bytes());
+        }
+        Err(_) => hasher.update([0u8]),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,6 +1229,59 @@ mod tests {
             second_branch.starts_with("steve/") && second_branch.ends_with("-st-1"),
             "unexpected namespaced branch: {second_branch}"
         );
+    }
+
+    #[test]
+    fn workspace_fingerprint_detects_git_and_non_git_mutations() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("scratch");
+        std::fs::create_dir_all(&plain).unwrap();
+        std::fs::write(plain.join("a.txt"), "hello").unwrap();
+        let f0 = fingerprint(&plain).expect("non-git fingerprint");
+        assert_eq!(fingerprint(&plain), Some(f0.clone()));
+        std::fs::write(plain.join("a.txt"), "hello world").unwrap();
+        let f1 = fingerprint(&plain).expect("non-git fingerprint after edit");
+        assert_ne!(f0, f1);
+
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        let run_git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(args)
+                .current_dir(&repo)
+                .env("GIT_AUTHOR_NAME", "test")
+                .env("GIT_AUTHOR_EMAIL", "test@example.com")
+                .env("GIT_COMMITTER_NAME", "test")
+                .env("GIT_COMMITTER_EMAIL", "test@example.com")
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run_git(&["init", "-q"]);
+        std::fs::write(repo.join("src.rs"), "fn main() {}\n").unwrap();
+        run_git(&["add", "src.rs"]);
+        run_git(&["commit", "-q", "-m", "init"]);
+        let g0 = fingerprint(&repo).expect("clean git fingerprint");
+        assert_eq!(fingerprint(&repo), Some(g0.clone()));
+
+        // Untracked file changes fingerprint
+        std::fs::write(repo.join("note.md"), "draft 1\n").unwrap();
+        let g1 = fingerprint(&repo).expect("untracked file fingerprint");
+        assert_ne!(g0, g1);
+
+        // Editing an already-dirty tracked file (same porcelain status) changes fingerprint
+        std::fs::write(repo.join("src.rs"), "fn main() { println!(\"1\"); }\n").unwrap();
+        let g2 = fingerprint(&repo).expect("dirty tracked fingerprint");
+        assert_ne!(g1, g2);
+        std::fs::write(repo.join("src.rs"), "fn main() { println!(\"12345\"); }\n").unwrap();
+        let g3 = fingerprint(&repo).expect("re-edited tracked fingerprint");
+        assert_ne!(g2, g3);
+
+        // Committing changes HEAD -> new fingerprint
+        run_git(&["add", "src.rs"]);
+        run_git(&["commit", "-q", "-m", "update"]);
+        let g4 = fingerprint(&repo).expect("post-commit fingerprint");
+        assert_ne!(g3, g4);
     }
 
     #[test]

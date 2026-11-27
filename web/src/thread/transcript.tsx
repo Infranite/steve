@@ -233,6 +233,10 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
   const setView = (v: "steps" | "timeline") => { workView.set(key, v); setViewS(v) }
   const stats = useMemo(() => workStats(g.evs), [g.evs, t])
   const cancelled = g.end === "cancelled"
+  const stalled = g.end === "turn_stall_no_progress" || g.end === "turn_stall_repeated_failure"
+  const endLabel = stalled
+    ? t(g.end === "turn_stall_repeated_failure" ? "core:transcript.stalledRepeatedFailure" : "core:transcript.stalledNoProgress")
+    : t(cancelled ? "core:transcript.interrupted" : "core:transcript.handled")
   const sess = getSession(k)
   const ro = !!sess?.ro
   const hasSteps = g.evs.length > 0
@@ -250,7 +254,7 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
     <Collapsible open={open} onOpenChange={setOpen} data-work={live ? "live" : "done"} data-work-view={open ? view : undefined} className="relative anim-in">
       <CollapsibleTrigger className={cn("group/work flex w-full min-w-0 items-center gap-1.5 rounded-lg py-1 text-left type-callout hover:[&>svg]:text-foreground", open && hasSteps && "sm:pr-36")}>
         <ChevronDownIcon className="size-4 shrink-0 -rotate-90 text-muted-foreground transition-transform duration-180 ease-(--ease-out) group-aria-expanded/work:rotate-0" />
-        <span className={cn("shrink-0", live ? "text-foreground" : "text-foreground/85")}>{live ? <span className="shimmer">{t("core:transcript.working")}</span> : t(cancelled ? "core:transcript.interrupted" : "core:transcript.handled")}</span>
+        <span className={cn("shrink-0", live ? "text-foreground" : "text-foreground/85")}>{live ? <span className="shimmer">{t("core:transcript.working")}</span> : endLabel}</span>
         <WorkClock t0={g.t0} t1={g.t1} live={live} />
         {stats.length > 0 && <span className="min-w-0 truncate text-muted-foreground">· {stats.join(" · ")}</span>}
         {usage && <span className="ml-auto hidden shrink-0 pl-2 type-footnote tabular-nums text-tertiary sm:inline" data-work-usage>{usage.coverage.total === null ? fmtUsage(usage) : t("views:sessionPanel.turnUsage", { tokens: fmtUsage(usage), usd: fmtUsageCost(usage) })}</span>}
@@ -263,8 +267,8 @@ function WorkBlock({ k, g, live }: { k: string; g: Seg; live: boolean }) {
           options={[["steps", t("core:trace.view.steps")], ["timeline", t("core:trace.view.timeline")]] as const} />}
         {open && <div className="mt-1 flex flex-col">
           {view === "timeline"
-            ? <Suspense fallback={<div className="flex items-center gap-2 py-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("common:state.loading")}</div>}><TurnTrace k={k} prompt={g.prompt} evs={g.evs} at={g.at ?? []} items={traceItems} t0={g.t0} t1={g.t1} live={live} cancelled={cancelled} /></Suspense>
-            : <Trail items={items} live={live} tail={live ? 12 : undefined} end={live || !g.end ? undefined : cancelled ? { s: "cancel", label: t("core:transcript.interrupted") } : { s: "end", label: t("core:trail.finished") }} />}
+            ? <Suspense fallback={<div className="flex items-center gap-2 py-2 type-callout text-muted-foreground"><Spinner className="size-3.5" />{t("common:state.loading")}</div>}><TurnTrace k={k} prompt={g.prompt} evs={g.evs} at={g.at ?? []} items={traceItems} t0={g.t0} t1={g.t1} live={live} cancelled={cancelled || stalled} /></Suspense>
+            : <Trail items={items} live={live} tail={live ? 12 : undefined} end={live || !g.end ? undefined : cancelled || stalled ? { s: "cancel", label: endLabel } : { s: "end", label: t("core:trail.finished") }} />}
         </div>}
       </CollapsibleContent>
     </Collapsible>
@@ -495,8 +499,15 @@ export function RunBar({ k }: { k: string }) {
   if (!s || !slice.hasData || (!slice.newest && !run)) return null
   const starting = run && !!s.starting && !slice.hasLatest
   const t0 = (starting && s.since) || slice.t0 || 0
-  const tone = run ? "run" : s.st === "wait" ? "wait" : slice.endStop === "cancelled" ? "stop" : s.st === "ended" ? "ended" : "done"
-  const label = run && s.room ? roomLine(s.room) : starting ? t("core:transcript.startingShort") : t(`core:runBar.${tone}`)
+  const stalled = slice.endStop === "turn_stall_no_progress" || slice.endStop === "turn_stall_repeated_failure"
+  const tone = run ? "run" : s.st === "wait" ? "wait" : slice.endStop === "cancelled" || stalled ? "stop" : s.st === "ended" ? "ended" : "done"
+  const label = run && s.room
+    ? roomLine(s.room)
+    : starting
+      ? t("core:transcript.startingShort")
+      : !run && s.st !== "wait" && stalled
+        ? t(slice.endStop === "turn_stall_repeated_failure" ? "core:runBar.stalledRepeatedFailure" : "core:runBar.stalledNoProgress")
+        : t(`core:runBar.${tone}`)
   const what = run ? null : tone === "wait" ? t("core:runBar.waitWhat") : slice.stats.join(" · ")
   return (
     /* running, the Thinking Loader inside is the live region that speaks each step; the bar itself would say it twice */

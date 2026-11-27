@@ -220,6 +220,14 @@ impl NodeRuntime {
                                 / 1000.0,
                         );
                 }
+                Tell::StallEval { outcome, reason } => {
+                    metrics::counter!(
+                        "steve_orchestration_stall_evaluations_total",
+                        "outcome" => outcome,
+                        "reason" => reason,
+                    )
+                    .increment(1);
+                }
                 Tell::StalledUsage(reason, tokens) => {
                     for (kind, count) in ["input", "cache_read", "cache_write", "output"]
                         .into_iter()
@@ -303,6 +311,25 @@ impl NodeRuntime {
         }
     }
 
+    /// Rewrites a generic `"cancelled"` stop reason to the strongly-typed stall stop reason when
+    /// this attempt was cancelled by the Hub's stall detector.
+    pub(super) fn effective_completion_in(
+        &self,
+        w: &mut W<'_>,
+        attempt: &str,
+        completion: &Completion,
+    ) -> Result<Completion, StoreError> {
+        if completion.outcome == Outcome::Cancelled
+            && completion.stop_reason == "cancelled"
+            && let Some(stall) = self.stall_evidence_in(w, attempt)?
+        {
+            let mut out = completion.clone();
+            out.stop_reason = stall.reason.stop_reason().to_owned();
+            return Ok(out);
+        }
+        Ok(completion.clone())
+    }
+
     /// What an event means for the session row and for statistics, in `w` (before it is applied,
     /// so an attempt's start or end counts once): the context and cost it reports, the model in
     /// force, the tools and permissions of its attempt, and the attempts that begin and end.
@@ -326,7 +353,9 @@ impl NodeRuntime {
                 let mut k = facts_so_far(w, a)?;
                 let prior = k.tools.get(tool.id.as_str()).map(|fact| fact.phase);
                 if !matches!(prior, Some(ToolPhase::Succeeded | ToolPhase::Failed)) {
-                    if prior != Some(tool.phase) {
+                    if prior != Some(tool.phase)
+                        || matches!(tool.phase, ToolPhase::Pending | ToolPhase::Running)
+                    {
                         self.observe_tool_in(w, a, tool, ev)?;
                     }
                     k.tools.insert(
@@ -341,7 +370,7 @@ impl NodeRuntime {
                 }
                 w.attempts().keep_facts(a, &k)?;
             }
-            (EventBody::SubtaskChanged { subtask }, _) => {
+            (EventBody::SubtaskChanged { subtask }, attempt) => {
                 let origin = match subtask.origin {
                     SubtaskOrigin::Subagent => "subagent",
                     SubtaskOrigin::BackgroundTask => "background_task",
@@ -361,6 +390,12 @@ impl NodeRuntime {
                     "status" => status,
                 )
                 .increment(1);
+                if let Some(a) = attempt {
+                    self.observe_subtask_in(w, a, subtask)?;
+                }
+            }
+            (EventBody::Plan { entries }, Some(a)) => {
+                self.observe_plan_in(w, a, entries)?;
             }
             (
                 EventBody::WorkspaceChanged {
@@ -475,20 +510,21 @@ impl NodeRuntime {
                 if let Some(node_turns::Attempt { state, .. }) = self.attempt_row(a)?
                     && state != "finished"
                 {
+                    let effective = self.effective_completion_in(w, a, completion)?;
                     let mut facts = take_facts(w, a)?;
                     facts.context_peak = self.context_peaks.lock().unwrap().get(a).copied();
                     let measure = super::super::acp_stats::try_node_attempt_finished(
                         &self.store,
                         &session,
                         a,
-                        completion,
+                        &effective,
                         &facts,
                         ev.at.0,
                     )?;
                     out.push(After::Finished {
                         session,
                         attempt: a.to_string(),
-                        completion: completion.clone(),
+                        completion: effective,
                         facts,
                         at: ev.at.0,
                         measure,
@@ -588,6 +624,7 @@ impl NodeRuntime {
         let active = match &ev.body {
             EventBody::ToolChanged { .. }
             | EventBody::SubtaskChanged { .. }
+            | EventBody::WorkspaceChanged { .. }
             | EventBody::PermissionRequested { .. }
             | EventBody::PermissionResolved { .. }
             | EventBody::Plan { .. } => true,
@@ -653,6 +690,7 @@ impl NodeRuntime {
                 if state == "finished" {
                     return Ok(None);
                 }
+                let effective = self.effective_completion_in(w, attempt, completion)?;
                 if let Some(stall) = self.stall_evidence_in(w, attempt)? {
                     let elapsed = self.clock.now().saturating_sub(stall.detected_at).max(0);
                     self.staged
@@ -666,7 +704,7 @@ impl NodeRuntime {
                     rev,
                     "finished",
                     None,
-                    Some(&serde_json::to_value(completion).map_err(conflict)?),
+                    Some(&serde_json::to_value(&effective).map_err(conflict)?),
                     self.clock.now(),
                 )?;
                 self.close_cards_of_attempt_in(w, attempt)?;
@@ -686,15 +724,15 @@ impl NodeRuntime {
                         &Receipt {
                             operation: idv(op)?,
                             state: Observed::Finished {
-                                outcome: completion.outcome,
-                                result: Some(OperationResult::Execution(completion.clone())),
-                                error: completion.error.clone(),
+                                outcome: effective.outcome,
+                                result: Some(OperationResult::Execution(effective.clone())),
+                                error: effective.error.clone(),
                             },
                         },
                     )?;
                 }
                 self.store_event_in(w, &s, ev)?;
-                end = self.after_attempt_in(w, &s, &turn, completion)?;
+                end = self.after_attempt_in(w, &s, &turn, &effective)?;
                 return Ok(end);
             }
             EventBody::Diagnostic { code, .. } if code == STEVE_TOOLS_MISSING => {
