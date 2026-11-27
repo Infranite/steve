@@ -6820,7 +6820,6 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
             .join("\n")
     };
 
-    let mut seen_events = 0usize;
     let mut perm_seq = 0usize;
     let steve_dir_str = steve_dir.display().to_string();
     let mut exec_and_collect = async |session: &str,
@@ -6830,6 +6829,11 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
                                       attempt: &str,
                                       prompt: &str,
                                       mut approve_budget: usize| {
+        let expected_subject = Subject::Execution(ExecutionRef::Turn {
+            session: SessionId::new(session).unwrap(),
+            turn: TurnId::new(turn_id).unwrap(),
+            attempt: AttemptId::new(attempt).unwrap(),
+        });
         let mut tr = turn(session, turn_id, attempt, prompt);
         tr.run.choice.harness = "codex".into();
         tr.run.choice.model = model.clone();
@@ -6839,10 +6843,26 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
         let mut perms = Vec::new();
         let mut tool_views: std::collections::BTreeMap<String, ToolView> =
             std::collections::BTreeMap::new();
+        let mut turn_events: Vec<EventBody> = Vec::new();
+        // RecordingSink stores events in a BTreeMap keyed by (stream, epoch, seq), so a new
+        // session stream can sort before earlier sessions. Filter by this turn's Subject and
+        // deduplicate by (stream, epoch, seq) instead of skipping by slice index.
+        let mut seen_event_keys: std::collections::HashSet<(String, String, u64)> =
+            std::collections::HashSet::new();
         let mut answered_ids = std::collections::HashSet::new();
         loop {
-            let evs = t.sink.events();
-            for ev in evs.iter().skip(seen_events) {
+            for ev in t.sink.events() {
+                if ev.subject != expected_subject {
+                    continue;
+                }
+                if !seen_event_keys.insert((
+                    ev.cursor.stream.as_str().to_string(),
+                    ev.cursor.epoch.as_str().to_string(),
+                    ev.cursor.seq,
+                )) {
+                    continue;
+                }
+                turn_events.push(ev.body.clone());
                 match &ev.body {
                     EventBody::PermissionRequested { request } => {
                         if answered_ids.insert(request.id.as_str().to_string()) {
@@ -6859,12 +6879,22 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
                             } else {
                                 PermissionDecision::Reject
                             };
-                            n.resolve_permission(now_cmd(
-                                &format!("op_perm_{perm_seq}"),
-                                answer(request, decision),
-                            ))
-                            .await
-                            .unwrap();
+                            eprintln!(
+                                "[codex {mode:?} {op}] perm id={} title={:?} choices={:?} action={:?} -> {decision:?}",
+                                request.id.as_str(),
+                                request.title,
+                                request.choices,
+                                request.action
+                            );
+                            let perm_op = format!("op_perm_{perm_seq}");
+                            n.resolve_permission(now_cmd(&perm_op, answer(request, decision)))
+                                .await
+                                .unwrap();
+                            let perm_state = finished(&n, &perm_op).await;
+                            assert!(
+                                ok(&perm_state),
+                                "resolve_permission {perm_op} ({decision:?}) failed: {perm_state:?}"
+                            );
                         }
                     }
                     EventBody::ToolChanged { tool } => {
@@ -6873,7 +6903,6 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
                     _ => {}
                 }
             }
-            seen_events = evs.len();
             let state = n
                 .operation(OperationId::new(op).unwrap())
                 .await
@@ -6881,11 +6910,30 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
                 .state;
             if state.is_finished() {
                 assert!(ok(&state), "{op} failed: {state:?}");
+                // Drain any final committed events for this turn after completion.
+                for ev in t.sink.events() {
+                    if ev.subject != expected_subject {
+                        continue;
+                    }
+                    if !seen_event_keys.insert((
+                        ev.cursor.stream.as_str().to_string(),
+                        ev.cursor.epoch.as_str().to_string(),
+                        ev.cursor.seq,
+                    )) {
+                        continue;
+                    }
+                    turn_events.push(ev.body.clone());
+                    if let EventBody::ToolChanged { tool } = &ev.body {
+                        tool_views.insert(tool.id.as_str().to_string(), tool.clone());
+                    }
+                }
                 break;
             }
             assert!(
                 t0.elapsed() < Duration::from_secs(180),
-                "{op} timed out: {state:?}"
+                "{op} timed out: {state:?} (perms={}, views={})",
+                perms.len(),
+                tool_views.len()
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
@@ -6908,7 +6956,7 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
                 tv.result
             );
         }
-        (perms, views)
+        (perms, views, turn_events)
     };
 
     let open_codex = async |sid: &str, op: &str, mode: PermissionMode| {
@@ -6935,7 +6983,7 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
     )
     .await;
 
-    let (perms1, views1) = exec_and_collect(
+    let (perms1, views1, _) = exec_and_collect(
         "s_codex_real_full",
         PermissionMode::FullAccess,
         "op_t_cx_full_1",
@@ -6977,7 +7025,7 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
 
     // 1b. Sealed releases README remains readable in its own clean turn: exit_code == 0
     //     (ToolPhase::Succeeded, no error) AND stdout merged into ToolView.result.
-    let (perms1b, views1b) = exec_and_collect(
+    let (perms1b, views1b, _) = exec_and_collect(
         "s_codex_real_full",
         PermissionMode::FullAccess,
         "op_t_cx_full_1b",
@@ -7005,8 +7053,7 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
     // 1c. Control-plane files under FullAccess are blocked by Steve's OS sandbox: commands
     //     targeting protected files fail with non-zero exit / error, no canary leaks anywhere,
     //     and sealed `releases/` stays non-writable.
-    let evs_before_1c = t.sink.events().len();
-    let (perms1c, views1c) = exec_and_collect(
+    let (perms1c, views1c, events1c) = exec_and_collect(
         "s_codex_real_full",
         PermissionMode::FullAccess,
         "op_t_cx_full_1c",
@@ -7028,13 +7075,12 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
         perms1c.is_empty(),
         "FullAccess protected turn must not prompt: {perms1c:?}"
     );
-    for ev in t.sink.events().iter().skip(evs_before_1c) {
-        let rendered = format!("{:?}", ev.body);
+    for body in &events1c {
+        let rendered = format!("{body:?}");
         for canary in ["SECRET_SIGNING_CANARY_888", "SECRET_ENV_CANARY"] {
             assert!(
                 !rendered.contains(canary),
-                "protected secret {canary} leaked in Node event: {:?}",
-                ev.body
+                "protected secret {canary} leaked in Node event: {body:?}"
             );
         }
     }
@@ -7060,7 +7106,7 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
     // 2. Ask (`read-only`) inside Steve's OS sandbox: inner Seatbelt fails and Codex escalates
     //    to an ACP permission prompt; once approved, the command succeeds inside Steve's sandbox.
     open_codex("s_codex_real_ask", "op_open_codex_ask", PermissionMode::Ask).await;
-    let (perms2, views2) = exec_and_collect(
+    let (perms2, views2, _) = exec_and_collect(
         "s_codex_real_ask",
         PermissionMode::Ask,
         "op_t_cx_ask_1",
@@ -7090,7 +7136,7 @@ async fn real_codex_in_steve_sandbox_modes_and_control_plane() {
         PermissionMode::Auto,
     )
     .await;
-    let (perms3, views3) = exec_and_collect(
+    let (perms3, views3, _) = exec_and_collect(
         "s_codex_real_auto",
         PermissionMode::Auto,
         "op_t_cx_auto_1",
