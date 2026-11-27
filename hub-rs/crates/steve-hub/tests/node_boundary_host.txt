@@ -84,7 +84,7 @@ Fs	steve-hub/src/wire/node_files.rs	1
 Fs	steve-install/src/common.rs	18
 Fs	steve-install/src/main.rs	3
 Fs	steve-install/src/publish.rs	11
-Fs	steve-install/src/release.rs	25
+Fs	steve-install/src/release.rs	28
 Fs	steve-install/src/service.rs	61
 Fs	steve-install/src/service/boot.rs	7
 Fs	steve-install/src/service/file_access.rs	2

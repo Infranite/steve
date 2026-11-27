@@ -7,7 +7,7 @@ use std::time::Duration;
 use steve_hub::{api::AppState, bus::Bus, config::Config};
 use steve_node::{LocalNode, NodeConfig, PolicyCeiling, Storage};
 use steve_node_api::*;
-use steve_runtime::testkit::{eventually, on_timeout};
+use steve_runtime::testkit::{eventually, eventually_sync, on_timeout};
 #[path = "../../steve-node/tests/fixtures/harness_updates.rs"]
 mod fixture;
 use fixture::*;
@@ -535,12 +535,20 @@ async fn auto_upgrade_policy_is_owner_only_and_idle_auto_upgrade_notifies_and_st
     // Auto-upgrade pass sees pi available & idle -> upgrades and writes notification.
     steve_hub::api::harness_updates::run_auto_upgrade_pass(&e.store, Some(&node_dyn), None, None)
         .await;
+    let latest_ok = std::sync::Mutex::new(None::<Value>);
     eventually(
-        on_timeout(|| async { "auto-upgrade finishes and records notification".into() }),
+        on_timeout(|| async {
+            format!(
+                "auto-upgrade finishes and records notification; last report: {:?}",
+                latest_ok.lock().unwrap()
+            )
+        }),
         || async {
             let r = e.report("local").await;
-            r["runs"]["pi"]["state"]["state"] == "finished"
-                && r["runs"]["pi"]["state"]["outcome"] == "succeeded"
+            let done = r["runs"]["pi"]["state"]["state"] == "finished"
+                && r["runs"]["pi"]["state"]["outcome"] == "succeeded";
+            *latest_ok.lock().unwrap() = Some(r);
+            done
         },
     )
     .await;
@@ -555,18 +563,65 @@ async fn auto_upgrade_policy_is_owner_only_and_idle_auto_upgrade_notifies_and_st
         "expected success notification for Pi auto-upgrade, got {notices}"
     );
 
+    // Wait for the watcher's post-upgrade `reprobe_after_upgrade` (which runs `node.probe(true)`
+    // under a shared prefix lock and then persists the refreshed 2.0.0 report) to finish before
+    // staging the next version and invoking another auto-upgrade pass.
+    eventually_sync(
+        on_timeout(|| async {
+            let raw = e
+                .store
+                .read(|db| {
+                    steve_store::WorkspaceSettings(db).get(steve_store::WS, "harness.updates.local")
+                })
+                .ok()
+                .flatten();
+            format!("post-upgrade reprobe persists 2.0.0 report; saved={raw:?}")
+        }),
+        || {
+            let Ok(Some(raw)) = e.store.read(|db| {
+                steve_store::WorkspaceSettings(db).get(steve_store::WS, "harness.updates.local")
+            }) else {
+                return false;
+            };
+            let Ok(saved) = serde_json::from_str::<Value>(&raw) else {
+                return false;
+            };
+            saved["report"]["harnesses"]
+                .as_array()
+                .and_then(|hs| hs.iter().find(|h| h["harness"] == "pi"))
+                .and_then(|h| h["components"].as_array())
+                .is_some_and(|cs| !cs.is_empty() && cs.iter().all(|c| c["installed"] == "2.0.0"))
+        },
+    )
+    .await;
+
     // Simulate a new version whose upgrade fails -> notifies failure and does NOT retry in a loop.
     std::fs::write(local.dir.path().join("latest"), "3.0.0").unwrap();
-    checked(n.as_ref()).await;
+    let refreshed = checked(n.as_ref()).await;
+    assert!(
+        refreshed.harnesses[0]
+            .components
+            .iter()
+            .all(|c| c.latest.as_deref() == Some("3.0.0")),
+        "fresh check must observe 3.0.0 before second auto-upgrade pass: {refreshed:?}"
+    );
     local.mark("fail");
     steve_hub::api::harness_updates::run_auto_upgrade_pass(&e.store, Some(&node_dyn), None, None)
         .await;
+    let latest_fail = std::sync::Mutex::new(None::<Value>);
     eventually(
-        on_timeout(|| async { "failed auto-upgrade finishes".into() }),
+        on_timeout(|| async {
+            format!(
+                "failed auto-upgrade finishes; last report: {:?}",
+                latest_fail.lock().unwrap()
+            )
+        }),
         || async {
             let r = e.report("local").await;
-            r["runs"]["pi"]["state"]["state"] == "finished"
-                && r["runs"]["pi"]["state"]["outcome"] == "failed"
+            let done = r["runs"]["pi"]["state"]["state"] == "finished"
+                && r["runs"]["pi"]["state"]["outcome"] == "failed";
+            *latest_fail.lock().unwrap() = Some(r);
+            done
         },
     )
     .await;

@@ -326,7 +326,7 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-install/src/signing.rs", Hub, "signer preserves the Hub identity and helper, manages the macOS Node's own local self-signed identity, keychain, private 0600 key-store password, and atomic signed binary/runner copies, reads the installation key-store selection, and hands its private staging password to the signed Hub on stdin before removing it"),
     e(Spawn, "steve-install/src/release.rs", Hub, "trusted updater uses the installation's environment, launchd service and candidate maintenance probe"),
     e(Dir, "steve-install/src/release.rs", Hub, "trusted updater inventories only the installation’s release receipts and retired bundles"),
-    e(Fs, "steve-install/src/release.rs", Hub, "trusted updater uses the release lock, atomic links and protected deployment receipts"),
+    e(Fs, "steve-install/src/release.rs", Hub, "trusted updater uses the release lock, atomic links and protected deployment receipts, and reads `/proc` on Linux to confirm an orphaned maintenance probe's identity before it signals it"),
     e(Spawn, "steve-hub/src/upgrades/supervisor.rs", Hub, "the supervisor starts the Hub, verifies the candidate's sibling steve-node binary, and asks a candidate's binary about this environment first"),
     e(Spawn, "steve-keyhelper/src/mac.rs", Hub, "the keychain helper"),
     e(Spawn, "steve-modules/src/vault/keystore/helper.rs", Hub, "the vault keystore helper"),

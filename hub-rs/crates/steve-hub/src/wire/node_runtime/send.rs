@@ -57,10 +57,15 @@ impl NodeRuntime {
 
     /// Leases one command, sends it and merges what came back. False: nothing to send.
     pub(super) async fn send_one(&self) -> bool {
-        if !self.node.observes_execution() {
+        if !self.is_reconciled() || !self.node.observes_execution() {
             return false;
         }
         let lease = match self.send_tx(|tx| {
+            // Re-check inside the commit lock so a concurrent disconnect, `reconcile_again()`,
+            // or test observation freeze cannot race past the pre-check and lease a command.
+            if !self.is_reconciled() || !self.node.observes_execution() {
+                return Ok(None);
+            }
             self.note_waiting_in(tx)?;
             match node_write::lease_command_in(
                 tx,

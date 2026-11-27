@@ -398,6 +398,7 @@ pub(crate) async fn install_packages(
         });
         if let Some((pid, started)) = process {
             if !crate::procs::wait_gone(pid, started).gone() { return Err("Installer process exit could not be confirmed; reconcile the Node before retrying".into()); }
+            lease.clear_inherited();
             inner.j.tx(|t| t.drop_proc(&key, pid)).map_err(|_| "Could not record installer exit".to_string())?;
         }
         // npm errors can contain authenticated registry URLs and local log paths. Keep them out

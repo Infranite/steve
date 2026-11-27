@@ -7,7 +7,7 @@ use std::ffi::CString;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::process::Command as StdCommand;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -46,10 +46,16 @@ struct Check {
 }
 
 #[derive(Default)]
+struct CheckState {
+    checking: bool,
+    rerun_fresh: bool,
+    finished: Option<i64>,
+}
+
+#[derive(Default)]
 pub(crate) struct Updates {
     checks: Mutex<HashMap<(String, String), Check>>,
-    checking: AtomicBool,
-    finished: Mutex<Option<i64>>,
+    state: Mutex<CheckState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -430,85 +436,95 @@ fn parse_brew_latest_json(kind: BrewKind, raw_json: &str) -> Option<String> {
 impl Updates {
     pub(crate) fn schedule(node: &LocalNode, fresh: bool) {
         let this = &node.0.harness_updates;
-        if !fresh
-            && this
-                .finished
-                .lock()
-                .unwrap()
-                .is_some_and(|t| now() - t < CHECK_FRESHNESS_MS)
         {
-            return;
-        }
-        if this.checking.swap(true, Ordering::SeqCst) {
-            return;
+            let mut st = this.state.lock().unwrap();
+            if st.checking {
+                if fresh {
+                    // Never drop an explicit fresh check while an older sweep is in flight;
+                    // coalesce into one immediate follow-up pass before clearing `checking`.
+                    st.rerun_fresh = true;
+                }
+                return;
+            }
+            if !fresh && st.finished.is_some_and(|t| now() - t < CHECK_FRESHNESS_MS) {
+                return;
+            }
+            st.checking = true;
+            st.rerun_fresh = false;
         }
         let inner = node.0.clone();
         // The guard also clears checking if shutdown cancels the owned task.
         struct Guard(Arc<Inner>);
         impl Drop for Guard {
             fn drop(&mut self) {
-                self.0
-                    .harness_updates
-                    .checking
-                    .store(false, Ordering::SeqCst);
+                let mut st = self.0.harness_updates.state.lock().unwrap();
+                st.checking = false;
+                st.rerun_fresh = false;
             }
         }
         let guard = Guard(inner.clone());
         node.spawn_owned(async move {
             let _guard = guard;
-            let cfg = &inner.cfg.acp;
-            let npm = managed::npm(Some(&cfg.node));
-            let brew = find_brew(&cfg.node);
-            let mut tasks = tokio::task::JoinSet::new();
-            let limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CHECKS));
-            for id in cfg.adapters.keys() {
-                // The manifest may name arbitrary programs; neither execute nor query them.
-                if !cfg.adapter_spec(id).builtin || cfg.declared.contains_key(id) {
-                    continue;
-                }
-                for c in adapters::update_components(cfg, id) {
-                    if command(&c).is_none() {
+            loop {
+                let cfg = &inner.cfg.acp;
+                let npm = managed::npm(Some(&cfg.node));
+                let brew = find_brew(&cfg.node);
+                let mut tasks = tokio::task::JoinSet::new();
+                let limit = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CHECKS));
+                for id in cfg.adapters.keys() {
+                    // The manifest may name arbitrary programs; neither execute nor query them.
+                    if !cfg.adapter_spec(id).builtin || cfg.declared.contains_key(id) {
                         continue;
                     }
-                    let resolved = resolve_component(cfg, id, &c);
-                    let (id, cfg, npm, brew, limit) = (
-                        id.clone(),
-                        cfg.clone(),
-                        npm.clone(),
-                        brew.clone(),
-                        limit.clone(),
-                    );
-                    tasks.spawn(async move {
-                        let _permit = limit.acquire_owned().await.expect("open semaphore");
-                        let installed = executable_version(&cfg, &c).await;
-                        let (latest, error) =
-                            query_latest(&resolved, npm.clone(), brew.clone()).await;
-                        let check = Check {
-                            latest,
-                            installed,
-                            at: now(),
-                            error,
-                        };
-                        ((id, c.id.to_string()), check)
-                    });
+                    for c in adapters::update_components(cfg, id) {
+                        if command(&c).is_none() {
+                            continue;
+                        }
+                        let resolved = resolve_component(cfg, id, &c);
+                        let (id, cfg, npm, brew, limit) = (
+                            id.clone(),
+                            cfg.clone(),
+                            npm.clone(),
+                            brew.clone(),
+                            limit.clone(),
+                        );
+                        tasks.spawn(async move {
+                            let _permit = limit.acquire_owned().await.expect("open semaphore");
+                            let installed = executable_version(&cfg, &c).await;
+                            let (latest, error) =
+                                query_latest(&resolved, npm.clone(), brew.clone()).await;
+                            let check = Check {
+                                latest,
+                                installed,
+                                at: now(),
+                                error,
+                            };
+                            ((id, c.id.to_string()), check)
+                        });
+                    }
+                }
+                while let Some(Ok((key, check))) = tasks.join_next().await {
+                    inner
+                        .harness_updates
+                        .checks
+                        .lock()
+                        .unwrap()
+                        .insert(key, check);
+                }
+                let mut st = inner.harness_updates.state.lock().unwrap();
+                st.finished = Some(now());
+                if !std::mem::take(&mut st.rerun_fresh) {
+                    st.checking = false;
+                    break;
                 }
             }
-            while let Some(Ok((key, check))) = tasks.join_next().await {
-                inner
-                    .harness_updates
-                    .checks
-                    .lock()
-                    .unwrap()
-                    .insert(key, check);
-            }
-            *inner.harness_updates.finished.lock().unwrap() = Some(now());
         });
     }
 
     pub(crate) async fn report(&self, inner: &Arc<Inner>) -> ApiResult<HarnessUpdateReport> {
         let cfg = &inner.cfg.acp;
         // Read the flag before the snapshot so a finishing check never labels an older map complete.
-        let checking = self.checking.load(Ordering::SeqCst);
+        let checking = self.state.lock().unwrap().checking;
         let checks = self.checks.lock().unwrap().clone();
         let maintenance = inner.adapter_maintenance.lock().unwrap().clone();
         let (active_sessions, receipts) = inner.j.read(|t| {
@@ -1343,6 +1359,7 @@ fn run_managed_npm(
         if !crate::procs::wait_gone(pid, started).gone() {
             return Err("Installer exit is unknown; reconcile this Node before retrying".into());
         }
+        prefix.clear_inherited();
         task_inner
             .j
             .tx(|t| t.drop_proc(process_key, pid))
