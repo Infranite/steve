@@ -457,6 +457,10 @@ impl Capabilities {
         self.capacity.jobs > 0 && self.has_feature(FEATURE_RESEARCH_JOBS)
     }
 
+    pub fn supports_think_steve_tools(&self) -> bool {
+        self.capacity.jobs > 0 && self.has_feature(FEATURE_THINK_STEVE_TOOLS)
+    }
+
     pub fn supports_colocated_host(&self) -> bool {
         self.has_feature(FEATURE_COLOCATED_HOST)
     }
@@ -477,6 +481,9 @@ pub const FEATURE_COLOCATED_HOST: &str = "colocated-host-v1";
 pub const FEATURE_RESUME_PROBE: &str = "resume-probe-v1";
 /// The Node has research job execution enabled (`JobKind::Research` on `job.start`).
 pub const FEATURE_RESEARCH_JOBS: &str = "research-jobs-v1";
+/// The Node supports mounting Steve's read-only dispatch MCP tools on a `JobWork::Think` job
+/// (`ThinkJob::steve_tools`) and auto-approving only those exact Steve MCP tools over ACP.
+pub const FEATURE_THINK_STEVE_TOOLS: &str = "think-steve-tools-v1";
 /// Stage a release on the Node (H→N upgrade-v1 `upgrade_stage`), under `operation`: the Node pulls the archive
 /// `artifact` from the Hub over its link (`blob.fetch`, [`crate::FileAccess::Operation`]), checks
 /// its size and SHA256 and the build identity of what it unpacks, and keeps it next to its current

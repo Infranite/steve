@@ -196,37 +196,24 @@ steve-core/src/changes.rs	"不自动归档"	1
 steve-core/src/changes.rs	"中"	1
 steve-core/src/changes.rs	"主题"	2
 steve-core/src/changes.rs	"事项"	1
-steve-core/src/changes.rs	"事项一轮结束后判断做没做完；默认避开干活 Bot 的模型（目前只记录，不改变事项）"	1
-steve-core/src/changes.rs	"从对话和资料里提取值得记住的知识"	1
 steve-core/src/changes.rs	"低"	1
 steve-core/src/changes.rs	"使用中"	2
 steve-core/src/changes.rs	"停用"	1
 steve-core/src/changes.rs	"关"	1
 steve-core/src/changes.rs	"关闭"	1
-steve-core/src/changes.rs	"分流"	1
-steve-core/src/changes.rs	"判断一条消息该聊天、研究还是建事项，也判断渠道规则的意图"	1
 steve-core/src/changes.rs	"加载"	1
 steve-core/src/changes.rs	"只在必要时"	1
 steve-core/src/changes.rs	"只读：只出方案，不改文件"	1
 steve-core/src/changes.rs	"可以改文件、运行命令；对外操作仍需你批准"	1
 steve-core/src/changes.rs	"可以改项目目录里的文件，运行命令要问你"	1
 steve-core/src/changes.rs	"启用"	1
-steve-core/src/changes.rs	"在对话里直接回答你"	1
-steve-core/src/changes.rs	"在对话里翻项目和资料后回答；你自己的对话里还能直接在本机动手，前一个模型失败才换下一个"	1
-steve-core/src/changes.rs	"在渠道里替你写回复"	1
 steve-core/src/changes.rs	"大"	1
-steve-core/src/changes.rs	"完成判定"	1
 steve-core/src/changes.rs	"客户"	2
-steve-core/src/changes.rs	"对外回复前检查有没有说出不该说的"	1
 steve-core/src/changes.rs	"对话"	1
-steve-core/src/changes.rs	"对话回答"	1
-steve-core/src/changes.rs	"就地研究"	1
 steve-core/src/changes.rs	"已归档"	2
 steve-core/src/changes.rs	"开"	1
 steve-core/src/changes.rs	"待处理"	1
 steve-core/src/changes.rs	"很高"	1
-steve-core/src/changes.rs	"披露检查"	1
-steve-core/src/changes.rs	"按你的一句话起草 Bot、流程和设置的改动"	1
 steve-core/src/changes.rs	"提醒我开始"	1
 steve-core/src/changes.rs	"无"	2
 steve-core/src/changes.rs	"最低"	1
@@ -236,21 +223,12 @@ steve-core/src/changes.rs	"标准"	1
 steve-core/src/changes.rs	"每次改文件或运行命令都问你"	1
 steve-core/src/changes.rs	"永久"	1
 steve-core/src/changes.rs	"没认出"	1
-steve-core/src/changes.rs	"流程 Bot 节点"	1
-steve-core/src/changes.rs	"流程里 Bot 节点的判断和汇报"	1
-steve-core/src/changes.rs	"渠道回复"	1
 steve-core/src/changes.rs	"积极"	1
-steve-core/src/changes.rs	"给新项目起名字、写一句说明"	1
 steve-core/src/changes.rs	"自动开始"	1
 steve-core/src/changes.rs	"自动验收"	1
-steve-core/src/changes.rs	"草稿/配置"	1
-steve-core/src/changes.rs	"记忆提取"	1
-steve-core/src/changes.rs	"起标题"	1
-steve-core/src/changes.rs	"起草邮件回复"	1
 steve-core/src/changes.rs	"跟随 Steve"	1
 steve-core/src/changes.rs	"跟随全局"	1
 steve-core/src/changes.rs	"适中"	1
-steve-core/src/changes.rs	"邮件起草"	1
 steve-core/src/changes.rs	"需要你验收"	1
 steve-core/src/changes.rs	"项目"	2
 steve-core/src/changes.rs	"领域"	2
@@ -358,28 +336,6 @@ steve-core/src/kinds.rs	"错误"	1
 steve-core/src/kinds.rs	"闪退"	1
 steve-core/src/kinds.rs	"页面"	1
 steve-core/src/marks.rs	"已回到"	1
-steve-core/src/models.rs	"事项一轮结束后判断做没做完；默认避开干活 Bot 的模型（目前只记录，不改变事项）"	3
-steve-core/src/models.rs	"从对话和资料里提取值得记住的知识"	3
-steve-core/src/models.rs	"分流"	3
-steve-core/src/models.rs	"判断一条消息该聊天、研究还是建事项，也判断渠道规则的意图"	3
-steve-core/src/models.rs	"在对话里直接回答你"	3
-steve-core/src/models.rs	"在对话里翻项目和资料后回答；你自己的对话里还能直接在本机动手，前一个模型失败才换下一个"	3
-steve-core/src/models.rs	"在渠道里替你写回复"	3
-steve-core/src/models.rs	"完成判定"	3
-steve-core/src/models.rs	"对外回复前检查有没有说出不该说的"	3
-steve-core/src/models.rs	"对话回答"	3
-steve-core/src/models.rs	"就地研究"	3
-steve-core/src/models.rs	"披露检查"	3
-steve-core/src/models.rs	"按你的一句话起草 Bot、流程和设置的改动"	3
-steve-core/src/models.rs	"流程 Bot 节点"	3
-steve-core/src/models.rs	"流程里 Bot 节点的判断和汇报"	3
-steve-core/src/models.rs	"渠道回复"	3
-steve-core/src/models.rs	"给新项目起名字、写一句说明"	3
-steve-core/src/models.rs	"草稿/配置"	3
-steve-core/src/models.rs	"记忆提取"	3
-steve-core/src/models.rs	"起标题"	3
-steve-core/src/models.rs	"起草邮件回复"	3
-steve-core/src/models.rs	"邮件起草"	3
 steve-core/src/orchestrator.rs	"交付正文"	1
 steve-core/src/orchestrator.rs	"修改设计"	1
 steve-core/src/orchestrator.rs	"只保留设计"	1

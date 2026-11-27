@@ -309,6 +309,7 @@ fn think(attempt: &str, harness: &str, text: &str) -> JobSpec {
     j.work = JobWork::Think(ThinkJob {
         instructions: Some("你是 Steve。".into()),
         tools: ThinkToolMode::None,
+        steve_tools: false,
     });
     j
 }
@@ -495,6 +496,7 @@ async fn a_read_attached_job_reads_its_file_and_nothing_else() {
     j.work = JobWork::Think(ThinkJob {
         instructions: Some("你是 Steve。".into()),
         tools: ThinkToolMode::ReadAttached,
+        steve_tools: false,
     });
     n.start_job(now_cmd("op_j", j)).await.unwrap();
     let c = completion(finished(&n, "op_j").await);

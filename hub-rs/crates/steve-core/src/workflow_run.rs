@@ -2,8 +2,8 @@
 //!
 //! Coordinates sandboxed single-step JS replay (`WorkflowStepExecutor`) against the normalized
 //! `wf_runs` / `wf_script_versions` / `wf_calls` / `wf_call_attempts` / `wf_version_calls` ledger,
-//! W3.1 deterministic placement (`placement::select` / `placement::select_coordinator` + unified
-//! `NO_EXECUTOR` coordinator waits), W3.2 two-phase cycle settlement (`cycle.rs`), W3.3 owner
+//! W3.1 hard-constraint placement (`placement::eligible` / `placement::validate` /
+//! `placement::validate_coordinator` + unified `NO_EXECUTOR` coordinator waits), W3.2 two-phase
 //! decisions (`subject_type = "wf_run"`), live SQL `COUNT(*)` cycle budgets, and Hub-authoritative
 //! 4-rule independent final review.
 
@@ -2862,49 +2862,68 @@ impl Tx<'_> {
         };
 
         let mut dispatch_rev = run.run_revision;
-        let created = self.create_item_with(create_req, |w, child, placement, blocked| {
-            if let Some(placement) = placement {
-                dispatch_rev = WorkflowRuns(w).bump_run_revision(&run.id)?;
-                WorkflowRuns(w).create_attempt(&NewWfAttempt {
-                    call_id: &call.id,
-                    run_id: &run.id,
-                    parent_item_id: &run.parent_item_id,
-                    parent_cycle: run.parent_cycle,
-                    attempt_no,
-                    child_item_id: Some(&child.id),
-                    bot_id: Some(placement.explanation.bot.as_str()),
-                    placement_id: None,
-                    harness: Some(&placement.harness),
-                    model: placement.model.as_deref(),
-                    status: WfAttemptStatus::Dispatched,
-                    dispatched_at_revision: dispatch_rev,
-                    error_code: None,
-                    error_message: None,
-                })?;
-            } else if let Some(blocked) = blocked {
-                let current_rev = WorkflowRuns(w)
-                    .get_run(&run.id)?
-                    .map(|r| r.run_revision)
-                    .unwrap_or(run.run_revision);
-                WorkflowRuns(w).create_attempt(&NewWfAttempt {
-                    call_id: &call.id,
-                    run_id: &run.id,
-                    parent_item_id: &run.parent_item_id,
-                    parent_cycle: run.parent_cycle,
-                    attempt_no,
-                    child_item_id: Some(&child.id),
-                    bot_id: None,
-                    placement_id: None,
-                    harness: None,
-                    model: None,
-                    status: WfAttemptStatus::Blocked,
-                    dispatched_at_revision: current_rev,
-                    error_code: Some(blocked.reason.as_str()),
-                    error_message: None,
-                })?;
-            }
-            Ok(())
-        })?;
+        let created =
+            self.create_item_with(create_req, |w, child, placement, blocked, dispatching| {
+                if let Some(placement) = placement {
+                    dispatch_rev = WorkflowRuns(w).bump_run_revision(&run.id)?;
+                    WorkflowRuns(w).create_attempt(&NewWfAttempt {
+                        call_id: &call.id,
+                        run_id: &run.id,
+                        parent_item_id: &run.parent_item_id,
+                        parent_cycle: run.parent_cycle,
+                        attempt_no,
+                        child_item_id: Some(&child.id),
+                        bot_id: Some(placement.explanation.bot.as_str()),
+                        placement_id: None,
+                        harness: Some(&placement.harness),
+                        model: placement.model.as_deref(),
+                        status: WfAttemptStatus::Dispatched,
+                        dispatched_at_revision: dispatch_rev,
+                        error_code: None,
+                        error_message: None,
+                    })?;
+                } else if dispatching {
+                    dispatch_rev = WorkflowRuns(w).bump_run_revision(&run.id)?;
+                    WorkflowRuns(w).create_attempt(&NewWfAttempt {
+                        call_id: &call.id,
+                        run_id: &run.id,
+                        parent_item_id: &run.parent_item_id,
+                        parent_cycle: run.parent_cycle,
+                        attempt_no,
+                        child_item_id: Some(&child.id),
+                        bot_id: None,
+                        placement_id: None,
+                        harness: None,
+                        model: None,
+                        status: WfAttemptStatus::Dispatched,
+                        dispatched_at_revision: dispatch_rev,
+                        error_code: None,
+                        error_message: None,
+                    })?;
+                } else if let Some(blocked) = blocked {
+                    let current_rev = WorkflowRuns(w)
+                        .get_run(&run.id)?
+                        .map(|r| r.run_revision)
+                        .unwrap_or(run.run_revision);
+                    WorkflowRuns(w).create_attempt(&NewWfAttempt {
+                        call_id: &call.id,
+                        run_id: &run.id,
+                        parent_item_id: &run.parent_item_id,
+                        parent_cycle: run.parent_cycle,
+                        attempt_no,
+                        child_item_id: Some(&child.id),
+                        bot_id: None,
+                        placement_id: None,
+                        harness: None,
+                        model: None,
+                        status: WfAttemptStatus::Blocked,
+                        dispatched_at_revision: current_rev,
+                        error_code: Some(blocked.reason.as_str()),
+                        error_message: None,
+                    })?;
+                }
+                Ok(())
+            })?;
 
         if created.blocked.is_some() {
             metrics::counter!(
@@ -2916,6 +2935,8 @@ impl Tx<'_> {
             .increment(1);
             return Ok(DispatchCallResult::Blocked);
         }
+
+        let _ = created.dispatching;
 
         let duration_ms = started.elapsed().as_millis() as u64;
         tracing::info_span!(
@@ -2948,6 +2969,15 @@ impl Tx<'_> {
         let Some(attempt) = WorkflowRuns(w).attempt_by_child_item(item_id)? else {
             return Ok(None);
         };
+        if attempt.status == WfAttemptStatus::Dispatched && attempt.bot_id.is_none() {
+            WorkflowRuns(w).settle_dispatching_attempt(
+                &attempt.id,
+                placement.explanation.bot.as_str(),
+                Some(&placement.harness),
+                placement.model.as_deref(),
+            )?;
+            return Ok(None);
+        }
         if attempt.status != WfAttemptStatus::Blocked {
             return Ok(None);
         }
@@ -2972,6 +3002,93 @@ impl Tx<'_> {
             return Ok(Some(attempt.run_id));
         }
         Ok(None)
+    }
+
+    /// Completes an in-flight async-dispatch workflow attempt with the Bot/harness/model chosen by Steve.
+    pub(crate) fn settle_wf_dispatching_child_in(
+        w: &mut steve_store::W<'_>,
+        item_id: &str,
+        placement: &steve_types::BotPlacement,
+    ) -> Result<()> {
+        let Some(attempt) = WorkflowRuns(w).attempt_by_child_item(item_id)? else {
+            return Ok(());
+        };
+        if attempt.status == WfAttemptStatus::Dispatched && attempt.bot_id.is_none() {
+            WorkflowRuns(w).settle_dispatching_attempt(
+                &attempt.id,
+                placement.explanation.bot.as_str(),
+                Some(&placement.harness),
+                placement.model.as_deref(),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Transitions an async-dispatch workflow attempt to `Blocked` and pauses its parent run
+    /// when Steve's dispatch job fails or returns an invalid Bot choice.
+    pub(crate) fn block_wf_dispatching_child_in(
+        w: &mut steve_store::W<'_>,
+        item_id: &str,
+        error_code: &str,
+    ) -> Result<bool> {
+        let Some(attempt) = WorkflowRuns(w).attempt_by_child_item(item_id)? else {
+            return Ok(false);
+        };
+        if attempt.status != WfAttemptStatus::Dispatched || attempt.bot_id.is_some() {
+            return Ok(false);
+        }
+        WorkflowRuns(w).block_dispatching_attempt(&attempt.id, error_code)?;
+        if let Some(run) = WorkflowRuns(w).get_run(&attempt.run_id)?
+            && run.status == WfRunStatus::Running
+        {
+            WorkflowRuns(w).pause_run(&attempt.run_id, WfPauseReason::PlacementBlocked)?;
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    /// Re-promotes a `Blocked` workflow attempt back to `Dispatched` (with `bot_id = None`) when
+    /// the owner clicks `retry_dispatch` and multiple Bots are eligible.
+    pub(crate) fn requeue_wf_blocked_child_for_dispatch_in(
+        w: &mut steve_store::W<'_>,
+        item_id: &str,
+    ) -> Result<Option<String>> {
+        let Some(attempt) = WorkflowRuns(w).attempt_by_child_item(item_id)? else {
+            return Ok(None);
+        };
+        if attempt.status != WfAttemptStatus::Blocked {
+            return Ok(None);
+        }
+        let dispatch_rev = WorkflowRuns(w).bump_run_revision(&attempt.run_id)?;
+        WorkflowRuns(w).requeue_blocked_attempt_for_dispatch(&attempt.id, dispatch_rev)?;
+        if let Some(run) = WorkflowRuns(w).get_run(&attempt.run_id)?
+            && run.status == WfRunStatus::Paused
+            && run.pause_reason_code == Some(WfPauseReason::PlacementBlocked)
+            && WorkflowRuns(w)
+                .blocked_attempt_for_run(&attempt.run_id)?
+                .is_none()
+        {
+            WorkflowRuns(w).resume_run(&attempt.run_id)?;
+            return Ok(Some(attempt.run_id));
+        }
+        Ok(None)
+    }
+
+    /// Returns any explicit `(node, required_specialties)` constraints from a workflow child call.
+    pub(crate) fn wf_child_dispatch_constraints_in(
+        w: &mut steve_store::W<'_>,
+        item_id: &str,
+    ) -> Result<(Option<String>, Vec<String>)> {
+        let Some(attempt) = WorkflowRuns(w).attempt_by_child_item(item_id)? else {
+            return Ok((None, vec![]));
+        };
+        let Some(call) = WorkflowRuns(w).get_call(&attempt.call_id)? else {
+            return Ok((None, vec![]));
+        };
+        let Ok(options) = serde_json::from_str::<CallOptions>(&call.options_canonical_json) else {
+            return Ok((None, vec![]));
+        };
+        Ok((options.node, options.specialties.unwrap_or_default()))
     }
 
     fn pause_and_open_decision(

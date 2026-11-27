@@ -6,6 +6,7 @@
   "stats.label.route": "Routing",
   "stats.label.chat": "Chat answers",
   "stats.label.research": "In-place research",
+  "stats.label.dispatch": "Bot dispatch",
   "stats.label.title": "Titling",
   "stats.label.draft": "Drafts/config",
   "stats.label.extract": "Memory extraction",

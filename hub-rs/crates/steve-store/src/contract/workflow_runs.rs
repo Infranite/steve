@@ -1776,6 +1776,85 @@ impl WorkflowRuns<'_, W<'_>> {
             .ok_or(StoreError::NotFound("wf_call_attempt"))
     }
 
+    /// Fills in Bot/harness/model on an already-`dispatched` attempt once async Steve dispatch picks a Bot.
+    pub fn settle_dispatching_attempt(
+        &mut self,
+        attempt_id: &str,
+        bot_id: &str,
+        harness: Option<&str>,
+        model: Option<&str>,
+    ) -> Result<WfCallAttempt> {
+        self.0.exec(
+            Query::update()
+                .table("wf_call_attempts")
+                .values([
+                    ("bot_id", Some(bot_id.to_owned()).into()),
+                    ("harness", harness.map(str::to_owned).into()),
+                    ("model", model.map(str::to_owned).into()),
+                    ("error_code", Option::<String>::None.into()),
+                    ("error_message", Option::<String>::None.into()),
+                ])
+                .and_where(Expr::col("id").eq(attempt_id))
+                .and_where(Expr::col("status").eq(WfAttemptStatus::Dispatched.as_str())),
+        )?;
+        self.get_attempt(attempt_id)?
+            .ok_or(StoreError::NotFound("wf_call_attempt"))
+    }
+
+    /// Transitions a `dispatched` attempt whose async Steve dispatch failed back to `blocked`.
+    pub fn block_dispatching_attempt(
+        &mut self,
+        attempt_id: &str,
+        error_code: &str,
+    ) -> Result<WfCallAttempt> {
+        let attempt = self
+            .get_attempt(attempt_id)?
+            .ok_or(StoreError::NotFound("wf_call_attempt"))?;
+        self.0.exec(
+            Query::update()
+                .table("wf_call_attempts")
+                .values([
+                    ("status", WfAttemptStatus::Blocked.as_str().into()),
+                    ("error_code", Some(error_code.to_owned()).into()),
+                    ("error_message", Option::<String>::None.into()),
+                ])
+                .and_where(Expr::col("id").eq(attempt_id))
+                .and_where(Expr::col("status").eq(WfAttemptStatus::Dispatched.as_str())),
+        )?;
+        self.set_call_status(&attempt.call_id, WfCallStatus::Queued)?;
+        self.get_attempt(attempt_id)?
+            .ok_or(StoreError::NotFound("wf_call_attempt"))
+    }
+
+    /// Re-promotes a `blocked` attempt back to `dispatched` while async Steve dispatch retries choosing a Bot.
+    pub fn requeue_blocked_attempt_for_dispatch(
+        &mut self,
+        attempt_id: &str,
+        dispatched_at_revision: i64,
+    ) -> Result<WfCallAttempt> {
+        let attempt = self
+            .get_attempt(attempt_id)?
+            .ok_or(StoreError::NotFound("wf_call_attempt"))?;
+        self.0.exec(
+            Query::update()
+                .table("wf_call_attempts")
+                .values([
+                    ("bot_id", Option::<String>::None.into()),
+                    ("harness", Option::<String>::None.into()),
+                    ("model", Option::<String>::None.into()),
+                    ("status", WfAttemptStatus::Dispatched.as_str().into()),
+                    ("dispatched_at_revision", dispatched_at_revision.into()),
+                    ("error_code", Option::<String>::None.into()),
+                    ("error_message", Option::<String>::None.into()),
+                ])
+                .and_where(Expr::col("id").eq(attempt_id))
+                .and_where(Expr::col("status").eq(WfAttemptStatus::Blocked.as_str())),
+        )?;
+        self.set_call_status(&attempt.call_id, WfCallStatus::Dispatched)?;
+        self.get_attempt(attempt_id)?
+            .ok_or(StoreError::NotFound("wf_call_attempt"))
+    }
+
     /// Cancels a call and any active attempt (`blocked` / `dispatched` / `closing`) in one write.
     /// Returns the child item ID to stop if one was already dispatched.
     pub fn cancel_call(&mut self, call_id: &str) -> Result<Option<String>> {

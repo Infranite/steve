@@ -23,13 +23,15 @@ pub struct Decision {
 pub fn for_guest(d: Decision, r: &Route, research: bool, items: bool) -> Decision {
     let offer = || {
         d.offer.clone().or_else(|| {
-            (!r.title.trim().is_empty()).then(|| Offer {
-                title: r.title.clone(),
-                goal: if r.goal.trim().is_empty() {
-                    r.title.clone()
-                } else {
-                    r.goal.clone()
-                },
+            (!r.title.trim().is_empty()).then(|| {
+                Offer::new(
+                    r.title.clone(),
+                    if r.goal.trim().is_empty() {
+                        r.title.clone()
+                    } else {
+                        r.goal.clone()
+                    },
+                )
             })
         })
     };
@@ -234,13 +236,15 @@ pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
         guard: guard.filter(|_| kind != model),
         offer: r.offer.clone(),
     };
-    let work = || Offer {
-        title: r.title.clone(),
-        goal: if r.goal.trim().is_empty() {
-            r.title.clone()
-        } else {
-            r.goal.clone()
-        },
+    let work = || {
+        Offer::new(
+            r.title.clone(),
+            if r.goal.trim().is_empty() {
+                r.title.clone()
+            } else {
+                r.goal.clone()
+            },
+        )
     };
     let work_offer = || {
         r.offer
@@ -439,26 +443,14 @@ mod tests {
             DecideCtx::default(),
         );
         assert_eq!((d1.kind.as_str(), d1.guard), ("research", Some("3")));
-        assert_eq!(
-            d1.offer,
-            Some(Offer {
-                title: "标题".into(),
-                goal: "目标".into()
-            })
-        );
+        assert_eq!(d1.offer, Some(Offer::new("标题", "目标")));
         let d2 = decide(
             &route("item", 0.6, &["change"]),
             "事项页面信息太散了",
             DecideCtx::default(),
         );
         assert_eq!((d2.kind.as_str(), d2.guard), ("research", Some("3")));
-        assert_eq!(
-            d2.offer,
-            Some(Offer {
-                title: "标题".into(),
-                goal: "目标".into()
-            })
-        );
+        assert_eq!(d2.offer, Some(Offer::new("标题", "目标")));
         assert_eq!(
             go("item", 0.8, &["change"], "把菜单里的视觉规范页面删掉"),
             ("item".into(), None)
@@ -478,13 +470,7 @@ mod tests {
             DecideCtx::default(),
         );
         assert_eq!((d.kind.as_str(), d.guard), ("research", Some("4")));
-        assert_eq!(
-            d.offer,
-            Some(Offer {
-                title: "标题".into(),
-                goal: "目标".into()
-            })
-        );
+        assert_eq!(d.offer, Some(Offer::new("标题", "目标")));
         for t in [
             "这对agent感知有影响吗？",
             "为什么这么慢",
@@ -522,13 +508,7 @@ mod tests {
             DecideCtx::default(),
         );
         assert_eq!((d.kind.as_str(), d.guard), ("research", Some("5")));
-        assert_eq!(
-            d.offer,
-            Some(Offer {
-                title: "标题".into(),
-                goal: "目标".into()
-            })
-        );
+        assert_eq!(d.offer, Some(Offer::new("标题", "目标")));
         assert_eq!(
             go("supplement", 0.85, &[], "先别改列表页"),
             ("supplement".into(), None)

@@ -2233,10 +2233,7 @@ async fn run_cancel(report: &mut Report) {
             ignore_stop: true,
             outcome_end: RunEnd::Done,
             outcome_text: "迟到正文",
-            outcome_offer: Some(crate::gateway::Offer {
-                title: "迟到提议".into(),
-                goal: "不该出现".into(),
-            }),
+            outcome_offer: Some(crate::gateway::Offer::new("迟到提议", "不该出现")),
             outcome_error: None,
             in_flight: AtomicUsize::new(0),
             max_in_flight: AtomicUsize::new(0),

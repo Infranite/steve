@@ -2184,8 +2184,32 @@ mod tests {
         let handle = recorder.handle();
         metrics::with_local_recorder(&recorder, || {
             catalog::describe();
-            metrics::counter!("steve_bot_selection_total", "reason" => "stable_order").increment(1);
-            metrics::counter!("steve_offer_preview_total", "result" => "placed").increment(1);
+            metrics::counter!("steve_bot_selection_total", "reason" => "steve_selected")
+                .increment(1);
+            metrics::histogram!("steve_dispatch_job_duration_seconds", "outcome" => "selected")
+                .record(0.25);
+            metrics::counter!("steve_dispatch_job_total", "outcome" => "selected").increment(1);
+            metrics::counter!("steve_dispatch_job_total", "outcome" => "cancelled").increment(1);
+            metrics::counter!(
+                "steve_permission_oneshot_allowed_total",
+                "harness" => "antigravity",
+                "tool" => "steve_bots_list"
+            )
+            .increment(1);
+            metrics::counter!(
+                "steve_permission_refused_total",
+                "surface" => "oneshot",
+                "harness" => "claude-code",
+                "category" => "exec"
+            )
+            .increment(1);
+            metrics::counter!(
+                "steve_dispatch_invalid_choice_total",
+                "source" => "offer",
+                "reason" => "offline"
+            )
+            .increment(1);
+            metrics::counter!("steve_offer_bot_override_total", "from" => "valid").increment(1);
             metrics::counter!(
                 "steve_offer_action_total",
                 "action" => "take",
@@ -2196,10 +2220,20 @@ mod tests {
         let text = handle.render();
         for line in [
             "# HELP steve_bot_selection_total ",
-            "# HELP steve_offer_preview_total ",
+            "# HELP steve_dispatch_job_duration_seconds ",
+            "# HELP steve_dispatch_job_total ",
+            "# HELP steve_permission_oneshot_allowed_total ",
+            "# HELP steve_permission_refused_total ",
+            "# HELP steve_dispatch_invalid_choice_total ",
+            "# HELP steve_offer_bot_override_total ",
             "# HELP steve_offer_action_total ",
-            "steve_bot_selection_total{reason=\"stable_order\"} 1",
-            "steve_offer_preview_total{result=\"placed\"} 1",
+            "steve_bot_selection_total{reason=\"steve_selected\"} 1",
+            "steve_dispatch_job_total{outcome=\"selected\"} 1",
+            "steve_dispatch_job_total{outcome=\"cancelled\"} 1",
+            "steve_permission_oneshot_allowed_total{harness=\"antigravity\",tool=\"steve_bots_list\"} 1",
+            "steve_permission_refused_total{surface=\"oneshot\",harness=\"claude-code\",category=\"exec\"} 1",
+            "steve_dispatch_invalid_choice_total{source=\"offer\",reason=\"offline\"} 1",
+            "steve_offer_bot_override_total{from=\"valid\"} 1",
             "steve_offer_action_total{action=\"take\",bot_override=\"explicit\"} 1",
         ] {
             assert!(text.contains(line), "missing `{line}` in:\n{text}");

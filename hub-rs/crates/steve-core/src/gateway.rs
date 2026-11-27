@@ -281,6 +281,7 @@ impl CallSpec<'_> {
     pub fn authorize(&self) -> Result<()> {
         match (self.required_tools, self.auth_scope) {
             (ThinkTools::None, _) => Ok(()),
+            (ThinkTools::Dispatch, ThinkTools::Dispatch) => Ok(()),
             (ThinkTools::Read(required), ThinkTools::Read(granted))
                 if !required.is_empty() && required.iter().all(|file| granted.contains(file)) =>
             {
@@ -436,13 +437,155 @@ pub enum ThinkTools {
     None,
     /// The Read tool only, for these files (copied into the job directory).
     Read(Vec<Readable>),
+    /// Read-only Steve Bot/Node inspection tools (`steve_bots_list`, `steve_nodes_list`) via MCP.
+    Dispatch,
 }
 
 impl ThinkTools {
     /// Whether the call has any tool.
     pub fn any(&self) -> bool {
-        matches!(self, ThinkTools::Read(_))
+        matches!(self, ThinkTools::Read(_) | ThinkTools::Dispatch)
     }
+}
+
+/// Time limit for Steve's async Bot-selection Think job.
+pub const DISPATCH_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Parsed result of Steve's async Bot-selection Think job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchChoice {
+    pub bot: Option<String>,
+    pub why: Option<String>,
+}
+
+/// Prompt input describing an unassigned item and its hard dispatch constraints for Steve.
+pub struct DispatchPromptInput<'a> {
+    pub title: &'a str,
+    pub goal: &'a str,
+    pub tags: &'a [String],
+    pub project_id: Option<&'a str>,
+    pub project_name: Option<&'a str>,
+    pub team: Option<&'a steve_store::bot_dispatch::Team>,
+    pub required_node: Option<&'a str>,
+    pub node_tag: Option<&'a str>,
+    pub required_specialties: &'a [String],
+}
+
+/// Build the cached-head prompt for Steve's async Bot-selection Think job.
+pub fn dispatch_prompt(input: &DispatchPromptInput<'_>) -> String {
+    let head = concat!(
+        "你是 Steve，这个工作空间的协调者。现在有一个新建事项需要你思考并选出最合适的执行 Bot。\n",
+        "1. 先调用只读工具 steve_bots_list 和 steve_nodes_list，查看各 Bot 的角色描述、专长、默认项目、所属 Team、绑定 Node、当前负载与最近成果，以及各 Node 的在线状态、已就绪 harness、权限档位和负载容量。\n",
+        "2. 严格遵守下面给出的所有硬性约束（所属 Team、指定 Node、Node 标签、必需专长、项目、权限档位），不得选择主协调者 Bot（main=true）、已停用 Bot、不在 Team 里的 Bot，或所绑定 Node 离线 / harness 不可用的 Bot。\n",
+        "3. 结合任务目标、Bot 定位与当前负载做出真实判断，只输出一行 JSON，不要输出其他解释或 Markdown：\n",
+        "   {\"bot\":\"<bot_id>\",\"why\":\"<一句话说明为什么选这个 Bot>\"}\n",
+        "   如果核实后确实没有任何 Bot 满足条件，输出：{\"bot\":null,\"why\":\"<一句话原因>\"}"
+    );
+    let mut lines = vec![
+        format!("事项标题：{}", input.title.trim()),
+        format!("事项目标：{}", js_head(input.goal.trim(), 2000)),
+    ];
+    if !input.tags.is_empty() {
+        lines.push(format!("标签：{}", input.tags.join("、")));
+    }
+    if let Some(pid) = input.project_id {
+        let pname = input.project_name.unwrap_or(pid);
+        lines.push(format!("项目：{pname} ({pid})"));
+    }
+    if let Some(team) = input.team {
+        let members: Vec<String> = team
+            .members
+            .iter()
+            .map(|m| match m.nodes.as_deref() {
+                Some(nodes) if !nodes.is_empty() => {
+                    format!("{} (nodes: {})", m.bot, nodes.join(", "))
+                }
+                Some(_) => format!("{} (nodes: none)", m.bot),
+                None => m.bot.clone(),
+            })
+            .collect();
+        lines.push(format!(
+            "限定 Team：{} ({})，成员 Bot ID：[{}]",
+            team.name,
+            team.id,
+            members.join(", ")
+        ));
+    }
+    if let Some(node) = input.required_node {
+        lines.push(format!("指定 Node：{node}"));
+    }
+    if let Some(tag) = input.node_tag {
+        lines.push(format!("要求 Node 标签：{tag}"));
+    }
+    if !input.required_specialties.is_empty() {
+        lines.push(format!(
+            "必需专长：{}",
+            input.required_specialties.join("、")
+        ));
+    }
+    with_static(head, &lines.join("\n"))
+}
+
+/// Strictly parse Steve's JSON choice `{"bot": "<id>" | null, "why": "..."}` from Think output.
+///
+/// Requires a JSON object with an explicit `"bot"` key (`null` or non-empty trimmed string).
+/// Missing `"bot"`, empty strings, or wrong field types return `None` so callers fail honestly
+/// with `DispatchFailed` instead of misinterpreting malformed output as "no candidates".
+pub fn parse_dispatch_choice(text: &str) -> Option<DispatchChoice> {
+    fn parse_obj(raw: &str) -> Option<DispatchChoice> {
+        let value: Value = serde_json::from_str(raw).ok()?;
+        let obj = value.as_object()?;
+        let bot = match obj.get("bot")? {
+            Value::Null => None,
+            Value::String(s) => {
+                let trimmed = s.trim();
+                if trimmed.is_empty() {
+                    return None;
+                }
+                Some(trimmed.to_owned())
+            }
+            _ => return None,
+        };
+        let why = match obj.get("why") {
+            None | Some(Value::Null) => None,
+            Some(Value::String(s)) => {
+                let trimmed = s.trim();
+                (!trimmed.is_empty()).then(|| js_head(trimmed, MAX_OFFER_WHY_CHARS).to_owned())
+            }
+            Some(_) => return None,
+        };
+        Some(DispatchChoice { bot, why })
+    }
+
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(str::trim)
+        .and_then(|s| s.strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    if let Some(choice) = parse_obj(stripped) {
+        return Some(choice);
+    }
+    if let Some(fence_end) = trimmed.rfind("```") {
+        let before_end = trimmed[..fence_end].trim_end();
+        if let Some(fence_start) = before_end.rfind("```") {
+            let block = before_end[fence_start + 3..].trim();
+            let block = block.strip_prefix("json").map(str::trim).unwrap_or(block);
+            if let Some(choice) = parse_obj(block) {
+                return Some(choice);
+            }
+        }
+    }
+    let start = stripped.rfind('{')?;
+    let end = stripped.rfind('}')?;
+    (start < end)
+        .then(|| parse_obj(&stripped[start..=end]))
+        .flatten()
 }
 
 /// The tools of a chat answer: none without readable attachments, else Read for those files.
@@ -840,11 +983,31 @@ pub struct NewTag {
     pub description: String,
 }
 
+/// Maximum characters kept for an OFFER title.
+pub const MAX_OFFER_TITLE_CHARS: usize = 40;
+/// Maximum characters kept for Steve's one-sentence OFFER bot-selection rationale.
+pub const MAX_OFFER_WHY_CHARS: usize = 200;
+
 /// Work an answer or research run leads to; the user decides whether it becomes an item.
-#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Offer {
     pub title: String,
     pub goal: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bot: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub why: Option<String>,
+}
+
+impl Offer {
+    pub fn new(title: impl Into<String>, goal: impl Into<String>) -> Self {
+        Self {
+            title: title.into(),
+            goal: goal.into(),
+            bot: None,
+            why: None,
+        }
+    }
 }
 
 /// The router's decision for a message.
@@ -1159,40 +1322,59 @@ pub fn strip_tag_note(reply: &str) -> String {
     TAG_NOTE.replace_all(reply, "").trim().to_string()
 }
 
-/// An `{title, goal}` object as an [`Offer`]; `None` without a title.
+/// An `{title, goal, bot?, why?}` object as an [`Offer`]; `None` without a title.
 pub fn offer_of(o: &Value) -> Option<Offer> {
     if !o.is_object() {
         return None;
     }
     let title = o.get("title").map(jstr).unwrap_or_default();
     let title = title.trim();
-    (!title.is_empty()).then(|| Offer {
-        title: js_head(title, 40).to_string(),
-        goal: match o.get("goal").map(jstr) {
-            Some(g) if !g.trim().is_empty() => g.trim().to_string(),
-            _ => title.to_string(),
-        },
+    if title.is_empty() {
+        return None;
+    }
+    let goal = match o.get("goal").map(jstr) {
+        Some(g) if !g.trim().is_empty() => g.trim().to_string(),
+        _ => title.to_string(),
+    };
+    let bot = o
+        .get("bot")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_owned);
+    let why = o
+        .get("why")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| js_head(s, MAX_OFFER_WHY_CHARS).to_string());
+    Some(Offer {
+        title: js_head(title, MAX_OFFER_TITLE_CHARS).to_string(),
+        goal,
+        bot,
+        why,
     })
 }
 
-/// The answer without its closing `OFFER: {…}` line, and the offer it names.
+/// Lift standalone `OFFER: {…}` JSON lines from an answer, returning the cleaned text and the
+/// last valid [`Offer`]. Non-JSON lines and inline mentions of `OFFER:` stay untouched.
 pub fn split_offer(text: &str) -> (String, Option<Offer>) {
-    let t = text.trim_end();
-    let Some(at) = t.rfind("OFFER:") else {
-        return (t.to_string(), None);
-    };
-    let line_start = t[..at].rfind('\n').map(|i| i + 1).unwrap_or(0);
-    if !t[line_start..at].trim().is_empty() {
-        return (t.to_string(), None);
+    let mut offer = None;
+    let mut kept: Vec<&str> = Vec::new();
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(rest) = trimmed.strip_prefix("OFFER:")
+            && let Some(parsed) = serde_json::from_str::<Value>(rest.trim())
+                .ok()
+                .as_ref()
+                .and_then(offer_of)
+        {
+            offer = Some(parsed);
+            continue;
+        }
+        kept.push(line);
     }
-    let offer = serde_json::from_str::<Value>(t[at + "OFFER:".len()..].trim())
-        .ok()
-        .as_ref()
-        .and_then(offer_of);
-    match offer {
-        Some(o) => (t[..line_start].trim_end().to_string(), Some(o)),
-        None => (t.to_string(), None),
-    }
+    (kept.join("\n").trim_end().to_string(), offer)
 }
 
 /// Validate a router reply against what exists; `None` when it is unusable (the caller falls back).
@@ -2433,13 +2615,7 @@ mod tests {
         assert_eq!(r.kind, "research");
         assert_eq!(r.confidence, 0.82);
         assert_eq!(r.signals, vec!["question", "lookup"]);
-        assert_eq!(
-            r.offer,
-            Some(Offer {
-                title: "修评论渲染".into(),
-                goal: "修评论渲染".into()
-            })
-        );
+        assert_eq!(r.offer, Some(Offer::new("修评论渲染", "修评论渲染")));
         let r = parse_route(&c, "x", r#"{"kind":"answer"}"#, false).unwrap();
         assert_eq!((r.kind.as_str(), r.confidence), ("answer", 0.5));
         let r = parse_route(
@@ -2502,10 +2678,13 @@ mod tests {
     #[test]
     fn an_offer_line_is_taken_off_the_answer() {
         let (t, o) = split_offer(
-            "结论在前。\n\n细节。\nOFFER: {\"title\":\"修评论\",\"goal\":\"让评论支持 markdown\"}\n",
+            "结论在前。\n\n细节。\nOFFER: {\"title\":\"修评论\",\"goal\":\"让评论支持 markdown\",\"bot\":\"dev\",\"why\":\"熟悉前端渲染\"}\n",
         );
         assert_eq!(t, "结论在前。\n\n细节。");
-        assert_eq!(o.unwrap().goal, "让评论支持 markdown");
+        let o = o.unwrap();
+        assert_eq!(o.goal, "让评论支持 markdown");
+        assert_eq!(o.bot.as_deref(), Some("dev"));
+        assert_eq!(o.why.as_deref(), Some("熟悉前端渲染"));
         let (t, o) = split_offer("说到 OFFER: 这个词");
         assert_eq!((t.as_str(), o), ("说到 OFFER: 这个词", None));
         let (t, o) = split_offer("答\nOFFER: 不是 JSON");
@@ -2650,5 +2829,81 @@ mod tests {
         })
         .await;
         assert_eq!(picked.models, vec!["claude-haiku-5-5"]);
+    }
+
+    #[test]
+    fn parse_dispatch_choice_requires_explicit_bot_field_and_prompt_includes_team_node_limits() {
+        assert_eq!(
+            parse_dispatch_choice(r#"{"bot":"dev","why":"owns migrations"}"#),
+            Some(DispatchChoice {
+                bot: Some("dev".into()),
+                why: Some("owns migrations".into()),
+            })
+        );
+        assert_eq!(
+            parse_dispatch_choice(r#"{"bot":null,"why":"all bots busy"}"#),
+            Some(DispatchChoice {
+                bot: None,
+                why: Some("all bots busy".into()),
+            })
+        );
+        assert_eq!(
+            parse_dispatch_choice(
+                "Checked tools.\n```json\n{\"bot\":\"dev\",\"why\":\"fit\"}\n```"
+            ),
+            Some(DispatchChoice {
+                bot: Some("dev".into()),
+                why: Some("fit".into()),
+            })
+        );
+        for invalid in [
+            "",
+            "{}",
+            r#"{"error":"rate limit"}"#,
+            r#"{"bot":""}"#,
+            r#"{"bot":"   "}"#,
+            r#"{"bot":123}"#,
+            r#"{"bot":"dev","why":123}"#,
+            r#"Some prose ending in {"foo":"bar"}"#,
+        ] {
+            assert_eq!(
+                parse_dispatch_choice(invalid),
+                None,
+                "invalid dispatch output must not parse: {invalid}"
+            );
+        }
+
+        let team = steve_store::bot_dispatch::Team {
+            id: "team_1".into(),
+            name: "Core".into(),
+            members: vec![
+                steve_store::bot_dispatch::Member {
+                    bot: "dev".into(),
+                    nodes: Some(vec!["local".into(), "node_b".into()]),
+                },
+                steve_store::bot_dispatch::Member {
+                    bot: "blocked".into(),
+                    nodes: Some(vec![]),
+                },
+                steve_store::bot_dispatch::Member {
+                    bot: "review".into(),
+                    nodes: None,
+                },
+            ],
+        };
+        let prompt = dispatch_prompt(&DispatchPromptInput {
+            title: "Add index".into(),
+            goal: "Add sqlite index".into(),
+            tags: &[],
+            project_id: None,
+            project_name: None,
+            team: Some(&team),
+            required_node: None,
+            node_tag: None,
+            required_specialties: &[],
+        });
+        assert!(prompt.contains("dev (nodes: local, node_b)"), "{prompt}");
+        assert!(prompt.contains("blocked (nodes: none)"), "{prompt}");
+        assert!(prompt.contains("review"), "{prompt}");
     }
 }

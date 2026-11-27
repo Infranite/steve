@@ -86,6 +86,16 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
         } else {
             Value::Null
         };
+        entry["properties"]["mcp_http"] = json!(id == "antigravity");
+        entry["properties"]["steve_mcp_allow"] = if id == "claude-code" {
+            json!({
+                "wrapper": ["claudeCode", "options", "settings", "permissions", "allow"],
+                "prefix": "mcp__steve__",
+                "suffix": "",
+            })
+        } else {
+            Value::Null
+        };
         entry["properties"]["brand_mark"] = json!(match id.as_str() {
             "claude-code" => "anthropic",
             "codex" => "openai",
@@ -483,5 +493,66 @@ fn antigravity_declares_nested_sandbox_native_auto_full_access_and_state_setting
     assert_eq!(
         spec("own", declared.get("own")).properties.state_settings,
         StateSettings::AntigravitySettings
+    );
+    assert!(agy.properties.mcp_http);
+}
+
+#[test]
+fn steve_mcp_allow_spec_renders_declarative_rules_for_claude_code_and_custom_manifests() {
+    let claude = builtin("claude-code").unwrap();
+    let spec_allow = claude
+        .properties
+        .steve_mcp_allow
+        .as_ref()
+        .expect("claude-code declares steve_mcp_allow");
+    assert_eq!(
+        spec_allow.render_rules(&["steve_bots_list", "steve_nodes_list", "steve_bots_list", ""]),
+        vec![
+            "mcp__steve__steve_bots_list".to_string(),
+            "mcp__steve__steve_nodes_list".to_string(),
+        ]
+    );
+    assert_eq!(
+        spec_allow.session_meta(&["steve_bots_list", "steve_nodes_list"]),
+        Some(json!({
+            "claudeCode": {
+                "options": {
+                    "settings": {
+                        "permissions": {
+                            "allow": [
+                                "mcp__steve__steve_bots_list",
+                                "mcp__steve__steve_nodes_list"
+                            ]
+                        }
+                    }
+                }
+            }
+        }))
+    );
+    assert_eq!(spec_allow.session_meta(&[]), None);
+
+    // Custom manifest override can declare mcp_http and steve_mcp_allow with custom wrapper/affixes.
+    let override_entry: AdapterEntry = serde_json::from_value(json!({
+        "command": "/fixture/adapter",
+        "properties": {
+            "mcp_http": true,
+            "steve_mcp_allow": {
+                "wrapper": ["custom", "allow"],
+                "prefix": "mcp(steve/",
+                "suffix": ")"
+            }
+        }
+    }))
+    .unwrap();
+    let (_, declared) = split_entries([("own".into(), override_entry)]);
+    let own = spec("own", declared.get("own"));
+    assert!(own.properties.mcp_http);
+    assert_eq!(
+        own.properties
+            .steve_mcp_allow
+            .as_ref()
+            .unwrap()
+            .session_meta(&["steve_items_search"]),
+        Some(json!({"custom": {"allow": ["mcp(steve/steve_items_search)"]}}))
     );
 }

@@ -110,6 +110,7 @@ fn source_label(key: &str) -> Option<String> {
         "route" => steve_i18n::t!("stats.label.route"),
         "chat" => steve_i18n::t!("stats.label.chat"),
         "research" => steve_i18n::t!("stats.label.research"),
+        "dispatch" => steve_i18n::t!("stats.label.dispatch"),
         "title" => steve_i18n::t!("stats.label.title"),
         "draft" => steve_i18n::t!("stats.label.draft"),
         "extract" => steve_i18n::t!("stats.label.extract"),

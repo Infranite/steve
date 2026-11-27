@@ -453,6 +453,9 @@ pub(super) fn authorize_cached(
             let (run, scope) = research_scope(store, run)?;
             (run.workspace_id, scope)
         }
+        super::node_tools::Caller::Dispatch { .. } => {
+            return Err("Diagnostic receipt is not available to dispatch jobs.".into());
+        }
     };
     if !scope.sees(item)
         || (value["access"] != "summary" && !matches!(scope, ItemScope::All))

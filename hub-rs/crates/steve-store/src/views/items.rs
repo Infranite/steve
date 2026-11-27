@@ -40,6 +40,7 @@ fn select() -> SelectStatement {
         .column(Alias::new("acceptance"))
         .expr(Expr::cust("EXISTS (SELECT 1 FROM item_dependency_waits w WHERE w.item_id=items.id AND w.cycle=items.cycle AND w.state='waiting') OR EXISTS (SELECT 1 FROM item_deps d LEFT JOIN items p ON p.id=d.dep_id WHERE d.item_id=items.id AND (p.phase IS NOT 'closed' OR p.outcome IS NOT 'completed'))"))
         .expr(Expr::cust("(SELECT json_object('wait_owner',w.wait_owner,'wait_started_at',w.wait_started_at,'wait_deadline',w.wait_deadline,'wait_on_timeout',w.wait_on_timeout) FROM item_dependency_waits w WHERE w.item_id=items.id AND w.cycle=items.cycle AND w.state='waiting' LIMIT 1)"))
+        .expr(Expr::cust("EXISTS (SELECT 1 FROM item_dispatch_jobs d WHERE d.item_id=items.id)"))
         .and_where(Expr::col(Alias::new("kind")).eq("task"));
     q
 }
@@ -178,11 +179,16 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         ItemPhase::Ready => ItemState::Ready,
         ItemPhase::Active => ItemState::Active,
     };
-    let waits = if !matches!(state, ItemState::Closed { .. }) && r.get::<bool>(34)? {
-        vec![ItemWait::Prerequisite]
-    } else {
-        Vec::new()
-    };
+    let bot_id: Option<steve_types::BotId> = r.get::<Option<String>>(9)?.map(Into::into);
+    let mut waits = Vec::new();
+    if !matches!(state, ItemState::Closed { .. }) {
+        if r.get::<bool>(34)? {
+            waits.push(ItemWait::Prerequisite);
+        }
+        if bot_id.is_none() && r.get::<bool>(36)? {
+            waits.push(ItemWait::Dispatching);
+        }
+    }
     let prerequisite_wait = if !matches!(state, ItemState::Closed { .. }) {
         r.get::<Option<Json<StoredWait>>>(35)
             .ok()
@@ -204,7 +210,7 @@ fn row(r: &Row<'_>) -> Result<ItemView> {
         revision,
         delivery_revision,
         delivery,
-        bot_id: r.get::<Option<String>>(9)?.map(Into::into),
+        bot_id,
         project_id: r.get::<Option<String>>(10)?.map(Into::into),
         parent,
         priority: r.get(12)?,

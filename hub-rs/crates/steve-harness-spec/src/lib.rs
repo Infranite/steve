@@ -373,6 +373,62 @@ pub struct ProtectedDenySpec {
     pub dir_suffix: String,
 }
 
+/// Harness-native allow rules for Steve's own read-only MCP tools injected via `session/new|load`
+/// `_meta` (for example Claude Code's `claudeCode.options.settings.permissions.allow`).
+/// Allowing only the exact read-only Steve MCP tools granted to a one-shot call lets them run
+/// without tripping interactive prompts or native safety classifiers, while all other permission
+/// requests remain refused.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SteveMcpAllowSpec {
+    /// JSON object key path wrapping the allow array (e.g.
+    /// `["claudeCode", "options", "settings", "permissions", "allow"]`).
+    pub wrapper: Vec<String>,
+    /// Prefix prepended before each allowed Steve MCP tool name (e.g. `"mcp__steve__"`).
+    #[serde(default)]
+    pub prefix: String,
+    /// Optional suffix appended after each allowed Steve MCP tool name.
+    #[serde(default)]
+    pub suffix: String,
+}
+
+impl SteveMcpAllowSpec {
+    /// Renders harness-native allow rules (`<prefix><tool><suffix>`) for `tools`, skipping empty
+    /// or duplicate entries while preserving order.
+    pub fn render_rules(&self, tools: &[&str]) -> Vec<String> {
+        let mut out = Vec::with_capacity(tools.len());
+        for tool in tools {
+            let name = tool.trim();
+            if name.is_empty() {
+                continue;
+            }
+            let rule = format!("{}{}{}", self.prefix, name, self.suffix);
+            if !out.contains(&rule) {
+                out.push(rule);
+            }
+        }
+        out
+    }
+
+    /// Builds a `session/new|load` `_meta` object placing [`Self::render_rules`] at [`Self::wrapper`].
+    /// Returns `None` when `wrapper` is empty or `tools` yields no rules.
+    pub fn session_meta(&self, tools: &[&str]) -> Option<Value> {
+        if self.wrapper.is_empty() {
+            return None;
+        }
+        let rules = self.render_rules(tools);
+        if rules.is_empty() {
+            return None;
+        }
+        let mut val = Value::Array(rules.into_iter().map(Value::String).collect());
+        for key in self.wrapper.iter().rev() {
+            let mut obj = serde_json::Map::new();
+            obj.insert(key.clone(), val);
+            val = Value::Object(obj);
+        }
+        Some(val)
+    }
+}
+
 /// Visual brand mark identifier rendered by the Web UI for a harness or model maker.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -619,6 +675,10 @@ adapter_properties! {
     permission_policy: PermissionPolicy = PermissionPolicy::Acp => Option<PermissionPolicy>, "Option::is_none", copied;
 
     require_mcp_http: bool = false => Option<bool>, "Option::is_none", copied;
+    /// Adapter supports HTTP MCP servers (`type: "http"`) on `session/new|load` even when its
+    /// `initialize` response omits `agentCapabilities.mcpCapabilities.http` (ignored if
+    /// `initialize` explicitly reports `mcpCapabilities.http: false`).
+    mcp_http: bool = false => Option<bool>, "Option::is_none", copied;
     /// Per-Steve-mode (`plan`, `ask`, `accept_edits`, `auto`, `full_access`) `_meta` sent on
     /// `session/new|load` (for adapters whose higher autonomy modes are session `_meta` flags).
     mode_meta: BTreeMap<String, Value> = BTreeMap::new() => BTreeMap<String, Value>, "BTreeMap::is_empty", mode_meta;
@@ -631,6 +691,9 @@ adapter_properties! {
     /// Harness-native file-tool deny rules injected into `session/new|load` `_meta` for Steve's
     /// protected paths (`steve_confine::PROTECTED`).
     protected_deny: Option<ProtectedDenySpec> = None => Option<ProtectedDenySpec>, "Option::is_none", state;
+    /// Harness-native allow rules for Steve's own read-only MCP tools injected into
+    /// `session/new|load` `_meta` (e.g. Claude Code `settings.permissions.allow`).
+    steve_mcp_allow: Option<SteveMcpAllowSpec> = None => Option<SteveMcpAllowSpec>, "Option::is_none", state;
     /// Visual brand mark identifier rendered by the Web UI.
     brand_mark: BrandMark = BrandMark::Other => Option<BrandMark>, "Option::is_none", copied;
     /// Model-id prefixes stripped when rendering compact model labels for this harness.

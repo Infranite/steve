@@ -43,10 +43,8 @@ export default {
     },
     selection: {
       explicit: "Chosen by you",
-      specialty: "Matched Bot specialties",
-      description: "Matched the Bot description",
-      project_preference: "Matched the project preference",
-      stable_order: "Selected by generalist fit, Team order, and execution Node priority",
+      steve_selected: "Selected by Steve",
+      only_eligible: "Only eligible Bot",
       coordinator_deferred: "Handled by Steve",
       existing_assignment: "Used the Bot assigned to this item",
       handoff_quota_exhausted: "Handed off after quota exhaustion",
@@ -63,6 +61,7 @@ export default {
       rejected: "Why candidate Bots were rejected",
       assignLabel: "Assign a Bot and start",
       assignAction: "Assign & start",
+      retryDispatch: "Retry Steve dispatch",
       later: "Later (let Steve handle it)",
       laterHint: "Runs these items on Steve and switches “When no Bot can take work” to “Steve handles it” so future unassigned items run on Steve without asking. You can switch back anytime in Settings.",
       proposalAction: "Confirm & start",
@@ -72,6 +71,8 @@ export default {
     "reason": {
       no_candidates: "No enabled Bot can take this request in the selected scope.",
       specialty: "The Bot does not have the required specialties.",
+      dispatch_failed: "Steve could not complete Bot dispatch (model or local Node unavailable).",
+      invalid_choice: "The Bot Steve selected did not pass hard eligibility validation.",
 
       "preferred": "Selected the first eligible Node in the allowed list.",
       "fallback": "Used a fallback within the allowed list.",
@@ -92,6 +93,26 @@ export default {
       "bot": "The Bot is disabled or no longer in the workspace.",
       "local": "The Hub’s local Node cannot run this session (its directory, permission mode or item state).",
       "bind_failed": "Could not bind a Node in the allowed list. Check the Bot and Device settings, then retry."
+    },
+    timeline: {
+      queued: "Steve is selecting an executor Bot",
+      selected: "Steve selected {{bot}}",
+      selectedWhy: "Steve selected {{bot}}: {{why}}",
+      noCandidates: "Steve found no eligible executor Bot; waiting for your choice",
+      noCandidatesWhy: "Steve found no eligible executor Bot: {{why}}",
+      coordinatorDeferred: "No eligible executor Bot; {{bot}} is taking over",
+      invalidChoice: "Steve selected {{bot}}, which failed validation ({{reason}}); waiting for your choice",
+      failed: "Steve could not choose an executor Bot: {{error}}",
+      failedDetail: "Steve could not choose an executor Bot ({{error}}): {{detail}}",
+      retryAssigned: "Retried dispatch and assigned to {{bot}}",
+      retryQueued: "Queued for Steve to choose an executor Bot again",
+    },
+    errors: {
+      invalid_response: "invalid response format",
+      model_call_failed: "model call failed",
+      prepare_failed: "failed to prepare dispatch context",
+      settle_failed: "failed to persist dispatch result",
+      internal_panic: "dispatch task aborted unexpectedly",
     }
   },
   bot: {

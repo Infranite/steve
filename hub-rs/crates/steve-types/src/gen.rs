@@ -78,6 +78,8 @@ fn bindings_match() {
         PlacementBlocker,
         PlacementBlocked,
         PlacementExplanation,
+        DispatchErrorCode,
+        DispatchEvent,
         BotProposal,
         ProposalTeam,
         Param,

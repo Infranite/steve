@@ -42,6 +42,8 @@ placement_reasons! {
     Pending => "pending",
     Local => "local",
     BindFailed => "bind_failed",
+    DispatchFailed => "dispatch_failed",
+    InvalidChoice => "invalid_choice",
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -49,10 +51,8 @@ placement_reasons! {
 #[cfg_attr(test, derive(ts_rs::TS))]
 pub enum PlacementReason {
     Explicit,
-    Specialty,
-    Description,
-    ProjectPreference,
-    StableOrder,
+    SteveSelected,
+    OnlyEligible,
     CoordinatorDeferred,
     ExistingAssignment,
     HandoffQuotaExhausted,
@@ -64,10 +64,8 @@ impl PlacementReason {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Explicit => "explicit",
-            Self::Specialty => "specialty",
-            Self::Description => "description",
-            Self::ProjectPreference => "project_preference",
-            Self::StableOrder => "stable_order",
+            Self::SteveSelected => "steve_selected",
+            Self::OnlyEligible => "only_eligible",
             Self::CoordinatorDeferred => "coordinator_deferred",
             Self::ExistingAssignment => "existing_assignment",
             Self::HandoffQuotaExhausted => "handoff_quota_exhausted",
@@ -152,12 +150,63 @@ impl std::fmt::Display for PlacementBlocked {
 pub struct PlacementExplanation {
     pub bot: BotId,
     pub reason: PlacementReason,
-    pub matched: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub why: Option<String>,
     pub rejected: Vec<PlacementBlocker>,
     pub fallback: Option<PlacementRejection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub deferred_by: Option<CoordinatorDeferSource>,
+}
+
+/// Typed failure codes recorded in a dispatch timeline entry.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum DispatchErrorCode {
+    InvalidResponse,
+    ModelCallFailed,
+    PrepareFailed,
+    SettleFailed,
+    InternalPanic,
+}
+
+/// Structured event persisted in `timeline.text` when `timeline.kind == "dispatch"`.
+/// Rendered into localized user copy strictly in the UI layer.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "code", rename_all = "snake_case")]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub enum DispatchEvent {
+    Queued,
+    Selected {
+        bot: BotId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        why: Option<String>,
+    },
+    NoCandidates {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        why: Option<String>,
+    },
+    CoordinatorDeferred {
+        bot: BotId,
+    },
+    InvalidChoice {
+        bot: BotId,
+        reason: PlacementRejection,
+    },
+    Failed {
+        error: DispatchErrorCode,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        #[cfg_attr(test, ts(optional))]
+        detail: Option<String>,
+    },
+    RetryAssigned {
+        bot: BotId,
+    },
+    RetryQueued,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

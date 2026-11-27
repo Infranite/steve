@@ -1,5 +1,6 @@
 {
   "core.thread.choose_execution_bot": "当前没有合格的执行 Bot，Steve 已在待处理中发卡询问如何处理。",
+  "core.thread.dispatching_execution_bot": "已做成事项 %{id}，Steve 正在为你选择合适的执行 Bot。",
   "core.bot.invalid_selection": "Bot 配置值无效：%{field}",
   "core.bot.unsupported_selection": "%{harness} 未提供 %{field} `%{value}`；请选择实报值或重置为默认（null）。",
   "core.item.closed": "这个事项已经结束了，需要时先新建周期",
@@ -61,6 +62,8 @@
   "core.purpose.chat.desc": "在对话里直接回答你",
   "core.purpose.research.label": "就地研究",
   "core.purpose.research.desc": "在对话里翻项目和资料后回答；你自己的对话里还能直接在本机动手，前一个模型失败才换下一个",
+  "core.purpose.dispatch.label": "派发选人",
+  "core.purpose.dispatch.desc": "新建事项存在多个候选 Bot 时，查看 Bot 与 Node 状态并选择执行者；未单独覆盖时沿用对话回答设置",
   "core.purpose.title.label": "起标题",
   "core.purpose.title.desc": "给新项目起名字、写一句说明",
   "core.purpose.extract.label": "记忆提取",

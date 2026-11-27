@@ -849,6 +849,7 @@ async fn all_hub_jobs_are_named_owned_and_stopped_together() {
         "core.housekeeping",
         "core.workspaces",
         "core.stalls",
+        "core.dispatch",
     ]);
     expected.sort_unstable();
     let mut running = st.jobs.names();

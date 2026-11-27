@@ -1011,8 +1011,11 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
         "clientInfo": { "name": "steve", "version": cfg.version },
     });
     let r = conn.request("initialize", init, Some(timeout)).await;
-    let mut p = match r {
-        Ok(r) => Probe::from_initialize(&r),
+    let (mut p, explicit_mcp_http_false) = match r {
+        Ok(r) => (
+            Probe::from_initialize(&r),
+            r.pointer("/agentCapabilities/mcpCapabilities/http") == Some(&Value::Bool(false)),
+        ),
         Err(e) => {
             conn.kill();
             let auth = e.auth_required();
@@ -1028,7 +1031,11 @@ pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Durati
             return p;
         }
     };
-    if cfg.adapter_properties(id).require_mcp_http && !p.mcp_http {
+    let probe_props = cfg.adapter_properties(id);
+    if !p.mcp_http && !explicit_mcp_http_false && probe_props.mcp_http {
+        p.mcp_http = true;
+    }
+    if probe_props.require_mcp_http && !p.mcp_http {
         conn.kill();
         return Probe::failed(
             ProbeStatus::InitializeFailed,
@@ -1226,6 +1233,28 @@ impl crate::AcpConfig {
                 PermissionMode::FullAccess => "full_access",
             };
             add(props.mode_meta.get(key).cloned());
+        }
+        out
+    }
+
+    /// [`Self::session_meta_with_mode`], also merging harness-declared `steve_mcp_allow` rules
+    /// for the exact read-only Steve MCP tools granted to this one-shot request.
+    pub fn session_meta_for_request(
+        &self,
+        id: &str,
+        tools_off: bool,
+        mode: Option<PermissionMode>,
+        allow_steve_mcp_tools: &[&str],
+    ) -> Option<Value> {
+        let mut out = self.session_meta_with_mode(id, tools_off, mode);
+        if !allow_steve_mcp_tools.is_empty()
+            && let Some(spec) = self.adapter_properties(id).steve_mcp_allow
+            && let Some(allow_meta) = spec.session_meta(allow_steve_mcp_tools)
+        {
+            match &mut out {
+                Some(b) => merge(b, allow_meta),
+                None => out = Some(allow_meta),
+            }
         }
         out
     }
@@ -1985,7 +2014,7 @@ rl.on("line", (line) => {{
         assert_eq!(p.status, ProbeStatus::Ready, "{p:?}");
         assert_eq!(p.title.as_deref(), Some("Antigravity ACP Server"));
         assert_eq!(p.version.as_deref(), Some("1.5.16"));
-        assert!(p.image && p.embedded_context && p.load_session && p.list_sessions);
+        assert!(p.image && p.embedded_context && p.load_session && p.list_sessions && p.mcp_http);
         assert_eq!(p.auth.len(), 2);
         let offer = p.session.expect("session offer");
         assert_eq!(
@@ -2163,8 +2192,93 @@ rl.on("line", (line) => {{
         let p = probe(&cfg, "antigravity", dir.path(), Duration::from_secs(30)).await;
         assert_eq!(p.status, ProbeStatus::Ready, "{p:?}");
         assert_eq!(p.title.as_deref(), Some("Antigravity ACP Server"));
-        assert!(p.load_session && p.list_sessions && p.image);
+        assert!(p.load_session && p.list_sessions && p.image && p.mcp_http);
         assert!(!p.auth.is_empty());
+    }
+
+    #[tokio::test]
+    async fn probe_declared_mcp_http_fills_omitted_capability_but_respects_explicit_false() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cfg(dir.path());
+        c.declared.insert(
+            "custom-http".into(),
+            serde_json::from_value(json!({"properties": {"mcp_http": true}})).unwrap(),
+        );
+        let script = dir.path().join("fake-probe");
+        c.adapters.insert("custom-http".into(), script.clone());
+        use std::os::unix::fs::PermissionsExt;
+
+        for (init_caps, want_mcp_http) in [
+            (json!({"loadSession": true}), true),
+            (json!({"mcpCapabilities": {"http": false}}), false),
+            (json!({"mcpCapabilities": {"http": true}}), true),
+        ] {
+            let init = json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"protocolVersion": 1, "agentCapabilities": init_caps}
+            });
+            let sess = json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {"sessionId": "s1"}
+            });
+            std::fs::write(
+                &script,
+                format!(
+                    "#!/bin/sh\nIFS= read -r l1 && printf '%s\\n' '{init}'\nIFS= read -r l2 && printf '%s\\n' '{sess}'\n"
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let p = probe(&c, "custom-http", dir.path(), Duration::from_secs(3)).await;
+            assert_eq!(p.status, ProbeStatus::Ready, "{p:?}");
+            assert_eq!(p.mcp_http, want_mcp_http, "caps={init_caps}");
+        }
+    }
+
+    #[test]
+    fn session_meta_for_request_merges_declarative_steve_mcp_allow_without_dropping_deny_or_tools_off()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let c = cfg(dir.path());
+        // Empty allowlist produces the exact same meta as session_meta_with_mode (no allow key).
+        assert_eq!(
+            c.session_meta_for_request("claude-code", true, Some(PermissionMode::Plan), &[]),
+            c.session_meta_with_mode("claude-code", true, Some(PermissionMode::Plan))
+        );
+        let meta = c
+            .session_meta_for_request(
+                "claude-code",
+                true,
+                Some(PermissionMode::Plan),
+                &["steve_bots_list", "steve_nodes_list"],
+            )
+            .expect("claude-code session meta");
+        assert_eq!(meta.pointer("/claudeCode/options/tools"), Some(&json!([])));
+        assert!(
+            meta.pointer("/claudeCode/options/settings/permissions/deny")
+                .and_then(Value::as_array)
+                .is_some_and(|a| !a.is_empty()),
+            "protected_deny must stay intact: {meta}"
+        );
+        assert_eq!(
+            meta.pointer("/claudeCode/options/settings/permissions/allow"),
+            Some(&json!([
+                "mcp__steve__steve_bots_list",
+                "mcp__steve__steve_nodes_list"
+            ]))
+        );
+        // Harnesses without steve_mcp_allow do not invent Claude Code meta.
+        assert_eq!(
+            c.session_meta_for_request(
+                "antigravity",
+                false,
+                Some(PermissionMode::Plan),
+                &["steve_bots_list"],
+            ),
+            None
+        );
     }
 
     #[test]

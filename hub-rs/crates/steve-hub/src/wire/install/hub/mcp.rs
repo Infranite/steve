@@ -1,7 +1,8 @@
 use super::*;
 
-install! { install(reg, cx) [built, core, db, fleet, mut jobs, node_host, nodes, workspaces] => [built, core, db, jobs, local_runtime, mcp, nodes, tool_service, workspaces] {
+install! { install(reg, cx) [built, core, db, fleet, harnesses, mut jobs, node_host, nodes, workspaces] => [built, core, db, harnesses, jobs, local_runtime, mcp, nodes, tool_service, workspaces] {
     let HubEnv { cfg, vars, .. } = *cx;
+    let local_node = node_host.as_ref().map(|h| h.node.node());
     let extra = mcp_extra::Extra {
         cfg: cfg.clone(),
         caps: built.caps.clone(),
@@ -11,6 +12,13 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, node_host, nodes,
         kb: built.kb.clone(),
         tools: built.tools.clone(),
         library: built.library.clone(),
+        dispatch_facts: Some(research_mcp::DispatchFacts {
+            harnesses: harnesses.clone(),
+            nodes: nodes.clone(),
+            local_node: local_node
+                .clone()
+                .map(|n| n as Arc<dyn steve_node_api::Discovery>),
+        }),
     };
     // Periodic cleanup is an every callback, so each pass has its own run/duration metrics.
     {
@@ -46,7 +54,6 @@ install! { install(reg, cx) [built, core, db, fleet, mut jobs, node_host, nodes,
             crate::nodes::handover::task(svc, core, mins)
         }));
     }
-    let local_node = node_host.as_ref().map(|h| h.node.node());
     // how each machine is doing, for the devices page (B3)
     {
         let db = db.clone();

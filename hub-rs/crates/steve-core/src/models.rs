@@ -33,69 +33,28 @@ use crate::gateway::Tier;
 pub struct Purpose {
     /// The stats purpose (`usage_records.purpose`) and the setting's key suffix.
     pub key: &'static str,
-    pub label: &'static str,
-    pub desc: &'static str,
     /// The tier its calls used before Steve became a bot; fast purposes get a recommended override.
     pub tier: Tier,
 }
 
-const fn p(key: &'static str, label: &'static str, desc: &'static str, tier: Tier) -> Purpose {
-    Purpose {
-        key,
-        label,
-        desc,
-        tier,
-    }
+const fn p(key: &'static str, tier: Tier) -> Purpose {
+    Purpose { key, tier }
 }
 
 /// Every purpose, in the order the settings list them.
-pub const PURPOSES: [Purpose; 11] = [
-    p(
-        "route",
-        "分流",
-        "判断一条消息该聊天、研究还是建事项，也判断渠道规则的意图",
-        Tier::Fast,
-    ),
-    p("chat", "对话回答", "在对话里直接回答你", Tier::Smart),
-    p(
-        "research",
-        "就地研究",
-        "在对话里翻项目和资料后回答；你自己的对话里还能直接在本机动手，前一个模型失败才换下一个",
-        Tier::Smart,
-    ),
-    p("title", "起标题", "给新项目起名字、写一句说明", Tier::Fast),
-    p(
-        "extract",
-        "记忆提取",
-        "从对话和资料里提取值得记住的知识",
-        Tier::Smart,
-    ),
-    p(
-        "disclosure",
-        "披露检查",
-        "对外回复前检查有没有说出不该说的",
-        Tier::Fast,
-    ),
-    p(
-        "draft",
-        "草稿/配置",
-        "按你的一句话起草 Bot、流程和设置的改动",
-        Tier::Smart,
-    ),
-    p(
-        "flow",
-        "流程 Bot 节点",
-        "流程里 Bot 节点的判断和汇报",
-        Tier::Fast,
-    ),
-    p("mail", "邮件起草", "起草邮件回复", Tier::Smart),
-    p("compose", "渠道回复", "在渠道里替你写回复", Tier::Smart),
-    p(
-        "judge",
-        "完成判定",
-        "事项一轮结束后判断做没做完；默认避开干活 Bot 的模型（目前只记录，不改变事项）",
-        Tier::Smart,
-    ),
+pub const PURPOSES: [Purpose; 12] = [
+    p("route", Tier::Fast),
+    p("chat", Tier::Smart),
+    p("research", Tier::Smart),
+    p("dispatch", Tier::Smart),
+    p("title", Tier::Fast),
+    p("extract", Tier::Smart),
+    p("disclosure", Tier::Fast),
+    p("draft", Tier::Smart),
+    p("flow", Tier::Fast),
+    p("mail", Tier::Smart),
+    p("compose", Tier::Smart),
+    p("judge", Tier::Smart),
 ];
 
 pub use crate::harnesses::{Harness, HarnessModel, HarnessSource};
@@ -136,12 +95,13 @@ pub fn canonical_efforts_shown() -> Vec<Value> {
         .collect()
 }
 
-/// A purpose's label as the UI shows it, in the request's language ([`Purpose::label`] is what models read).
+/// A purpose's label as the UI shows it, in the request's language.
 pub fn purpose_label(key: &str) -> String {
     match key {
         "route" => steve_i18n::t!("core.purpose.route.label"),
         "chat" => steve_i18n::t!("core.purpose.chat.label"),
         "research" => steve_i18n::t!("core.purpose.research.label"),
+        "dispatch" => steve_i18n::t!("core.purpose.dispatch.label"),
         "title" => steve_i18n::t!("core.purpose.title.label"),
         "extract" => steve_i18n::t!("core.purpose.extract.label"),
         "disclosure" => steve_i18n::t!("core.purpose.disclosure.label"),
@@ -160,6 +120,7 @@ pub fn purpose_desc(key: &str) -> String {
         "route" => steve_i18n::t!("core.purpose.route.desc"),
         "chat" => steve_i18n::t!("core.purpose.chat.desc"),
         "research" => steve_i18n::t!("core.purpose.research.desc"),
+        "dispatch" => steve_i18n::t!("core.purpose.dispatch.desc"),
         "title" => steve_i18n::t!("core.purpose.title.desc"),
         "extract" => steve_i18n::t!("core.purpose.extract.desc"),
         "disclosure" => steve_i18n::t!("core.purpose.disclosure.desc"),
@@ -855,6 +816,11 @@ impl Models {
             if let Some(c) = self.custom(ws, p.key) {
                 return self.resolve_choice(Some(c), st);
             }
+            if p.key == "dispatch"
+                && let Some(c) = self.custom(ws, "chat")
+            {
+                return self.resolve_choice(Some(c), st);
+            }
             if p.tier == Tier::Fast
                 && let Some(c) = self.lightweight_effective(ws)
             {
@@ -1041,7 +1007,15 @@ impl Models {
                     "value": custom,
                     "follows": custom.is_none(),
                     "role": if p.tier == Tier::Fast { "lightweight" } else { "primary" },
-                    "source": if custom.is_some() { "override" } else if p.tier == Tier::Fast && self.lightweight(ws).is_some() { "lightweight" } else { "primary" },
+                    "source": if custom.is_some() {
+                        "override"
+                    } else if p.key == "dispatch" && self.custom(ws, "chat").is_some() {
+                        "chat"
+                    } else if p.tier == Tier::Fast && self.lightweight(ws).is_some() {
+                        "lightweight"
+                    } else {
+                        "primary"
+                    },
                     "effective": effective,
                     "recommended": self.recommended(p),
                     "recent": recent.get(p.key),

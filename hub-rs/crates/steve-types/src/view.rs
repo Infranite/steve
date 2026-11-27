@@ -232,6 +232,7 @@ pub enum ItemWait {
     Prerequisite,
     Delivery,
     Operation,
+    Dispatching,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

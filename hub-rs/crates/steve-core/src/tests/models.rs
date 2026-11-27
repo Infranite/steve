@@ -585,3 +585,40 @@ async fn lightweight_adapter_default_does_not_inherit_the_primary_model_or_effor
     models.select_steve(WS, &choice, "me").unwrap();
     assert_eq!(models.for_purpose(WS, "route").models[0], "primary-model");
 }
+
+#[tokio::test]
+async fn dispatch_purpose_follows_chat_override_unless_independently_overridden() {
+    let k = Kit::new();
+    let models = k.core.models();
+    // Configure Steve's main conversation (`chat`) override -> `dispatch` inherits `chat`.
+    models
+        .apply(
+            WS,
+            &json!({"purposes": {"chat": {"harness": "codex", "models": ["chat-model"]}}}),
+            "me",
+        )
+        .unwrap();
+    let via_chat = models.for_purpose(WS, "dispatch");
+    assert_eq!(via_chat.harness, "codex");
+    assert_eq!(via_chat.models, ["chat-model"]);
+
+    // Independent `dispatch` override takes precedence over `chat`.
+    models
+        .apply(
+            WS,
+            &json!({"purposes": {"dispatch": {"harness": "claude-code", "models": ["dispatch-model"]}}}),
+            "me",
+        )
+        .unwrap();
+    let explicit = models.for_purpose(WS, "dispatch");
+    assert_eq!(explicit.harness, "claude-code");
+    assert_eq!(explicit.models, ["dispatch-model"]);
+
+    // Clearing `dispatch` override falls back to `chat` again.
+    models
+        .apply(WS, &json!({"purposes": {"dispatch": null}}), "me")
+        .unwrap();
+    let back_to_chat = models.for_purpose(WS, "dispatch");
+    assert_eq!(back_to_chat.harness, "codex");
+    assert_eq!(back_to_chat.models, ["chat-model"]);
+}
