@@ -59,7 +59,7 @@ pub struct Harness {
 impl Harness {
     /// The entry for adapter `id` as declared, before any probe.
     pub fn declared(id: &str, declared: Option<&steve_harness_spec::Declaration>) -> Harness {
-        let spec = steve_acp::adapters::spec(id, declared);
+        let spec = steve_harness_spec::spec(id, declared);
         let p = &spec.properties;
         let ids: Vec<String> = [
             p.modes.plan.as_str(),
@@ -302,7 +302,7 @@ pub fn builtin_source() -> HarnessSource {
 /// The display name of adapter `id` (its declared or built-in name; an unknown id as it is).
 pub fn name_of(list: &[Harness], id: &str) -> String {
     list.iter().find(|h| h.id == id).map_or_else(
-        || steve_acp::adapters::spec(id, None).name,
+        || steve_harness_spec::spec(id, None).name,
         |h| h.name.clone(),
     )
 }

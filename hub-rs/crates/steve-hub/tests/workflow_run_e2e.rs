@@ -107,6 +107,63 @@ impl TestRuntime {
 }
 
 impl AgentRuntime for TestRuntime {
+    fn makes_worktrees(&self) -> bool {
+        true
+    }
+
+    fn created(&self, session_id: &str, _after: Option<&str>) {
+        let Ok(Some(sess)) = self.store.sessions().get(session_id) else {
+            return;
+        };
+        let Some(item_id) = sess.item_id.as_deref() else {
+            return;
+        };
+        let Ok(Some(item)) = self.store.items().get(item_id) else {
+            return;
+        };
+        let Some(project_id) = item.project_id.as_deref() else {
+            return;
+        };
+        let Ok(Some(proj)) = self.store.projects().get(project_id) else {
+            return;
+        };
+        if proj.kind != "git" || !proj.worktree {
+            return;
+        }
+        let Some(cwd) = item.cwd.as_deref().filter(|c| !c.is_empty()) else {
+            return;
+        };
+        let cwd_path = Path::new(cwd);
+        if cwd_path == Path::new(&proj.path) || cwd_path.exists() {
+            return;
+        }
+        if let Some(parent) = cwd_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let branch = item
+            .branch
+            .clone()
+            .unwrap_or_else(|| format!("steve/{}", item.id.to_lowercase()));
+        let add = Command::new("git")
+            .args([
+                "-C", &proj.path, "worktree", "add", "-b", &branch, cwd, "HEAD",
+            ])
+            .output()
+            .expect("git worktree add");
+        if !add.status.success() {
+            let fallback = Command::new("git")
+                .args(["-C", &proj.path, "worktree", "add", cwd, &branch])
+                .output()
+                .expect("git worktree add existing branch");
+            assert!(
+                fallback.status.success(),
+                "git worktree add failed: {} / {}",
+                String::from_utf8_lossy(&add.stderr),
+                String::from_utf8_lossy(&fallback.stderr)
+            );
+        }
+    }
+
     fn assess_placement_node(
         &self,
         _: &str,
@@ -198,6 +255,219 @@ impl AgentRuntime for TestRuntime {
     }
 }
 
+struct LocalNodeGit {
+    handle: tokio::runtime::Handle,
+    node: steve_node::LocalNode,
+    _home: tempfile::TempDir,
+    root: PathBuf,
+    store: Store,
+    workspaces: Mutex<HashMap<(String, String), steve_node_api::WorkspaceRef>>,
+}
+
+impl LocalNodeGit {
+    fn new(root: &Path, store: Store) -> Arc<Self> {
+        use steve_node_api::*;
+        let handle = tokio::runtime::Handle::current();
+        let home = tempfile::tempdir().unwrap();
+        let cfg = steve_node::NodeConfig {
+            ceiling: steve_node::PolicyCeiling::unlimited(),
+            node: NodeId::new("local").unwrap(),
+            home: home.path().join("node"),
+            acp: steve_acp::AcpConfig {
+                declared: Default::default(),
+                adapters: HashMap::new(),
+                node: "node".into(),
+                claude_executable: "/usr/bin/false".into(),
+                claude_config_dir: None,
+                steve_home: home.path().join("steve"),
+                codex_home: home.path().join("codex"),
+                user_home: home.path().into(),
+                version: "test".into(),
+            },
+            roots: vec![steve_node::Root {
+                id: RootId::new("home").unwrap(),
+                path: root.to_path_buf(),
+                display: "~".into(),
+                access: RootAccess::ReadWrite,
+            }],
+            capacity: Capacity {
+                sessions: 0,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: steve_node::Storage::default(),
+        };
+        let node = steve_node::LocalNode::open(cfg).unwrap();
+        Arc::new(Self {
+            handle,
+            node,
+            _home: home,
+            root: root.to_path_buf(),
+            store,
+            workspaces: Default::default(),
+        })
+    }
+
+    async fn workspace_for_dir(
+        &self,
+        scope: &str,
+        dir: &str,
+    ) -> steve_node_api::ApiResult<steve_node_api::WorkspaceRef> {
+        use steve_node_api::*;
+        if !Path::new(dir).exists() {
+            return Err(Error::new(Code::NotFound, "workspace directory absent"));
+        }
+        let key = (scope.to_string(), dir.to_string());
+        if let Some(w) = self.workspaces.lock().unwrap().get(&key) {
+            return Ok(w.clone());
+        }
+        let rel = Path::new(dir)
+            .strip_prefix(&self.root)
+            .map_err(|_| Error::new(Code::Forbidden, "outside root"))?
+            .to_string_lossy()
+            .to_string();
+        let now = steve_store::now();
+        let uid = uuid::Uuid::new_v4().simple().to_string();
+        let cmd = Command {
+            id: OperationId::new(format!("prep_{uid}")).unwrap(),
+            issued_at: Timestamp(now),
+            accept_before: Timestamp(now + 60_000),
+            grant: GrantId::new("grant").unwrap(),
+            body: Prepare {
+                resource: format!("{scope}:{uid}"),
+                kind: PrepareKind::Existing {
+                    dir: RootPath {
+                        root: RootId::new("home").unwrap(),
+                        rel: RelPath::new(rel).unwrap(),
+                    },
+                },
+            },
+        };
+        let node = self.node.clone();
+        let ws = self
+            .handle
+            .spawn(async move {
+                let r = node.prepare_workspace(cmd).await?;
+                let op = r.operation;
+                loop {
+                    let rec = node.operation(op.clone()).await?;
+                    match rec.state {
+                        Observed::Finished {
+                            result: Some(OperationResult::Workspace(v)),
+                            ..
+                        } => return Ok(v.workspace),
+                        Observed::Finished { error: Some(e), .. } => return Err(e),
+                        Observed::Finished { .. } | Observed::Unknown { .. } => {
+                            return Err(Error::new(Code::Internal, "prepare workspace ended"));
+                        }
+                        _ => tokio::time::sleep(Duration::from_millis(10)).await,
+                    }
+                }
+            })
+            .await
+            .map_err(|e| Error::new(Code::Internal, e.to_string()))??;
+        self.workspaces.lock().unwrap().insert(key, ws.clone());
+        Ok(ws)
+    }
+
+    async fn query(
+        &self,
+        workspace: steve_node_api::WorkspaceRef,
+        q: steve_core::node_git::Ask,
+    ) -> steve_node_api::ApiResult<steve_node_api::GitFacts> {
+        use steve_node_api::*;
+        let node = self.node.clone();
+        self.handle
+            .spawn(async move {
+                node.git_facts(GitQuery {
+                    workspace,
+                    refs: q.refs,
+                    ranges: q.ranges,
+                    fetch: q.fetch,
+                    reads: q.reads,
+                    heads_only: q.heads_only,
+                })
+                .await
+            })
+            .await
+            .map_err(|e| Error::new(Code::Internal, e.to_string()))?
+    }
+}
+
+#[async_trait::async_trait]
+impl steve_core::node_git::NodeGit for LocalNodeGit {
+    fn on_node(&self, item: &str) -> bool {
+        let Ok(Some(item)) = self.store.items().get(item) else {
+            return false;
+        };
+        let Some(project_id) = item.project_id.as_deref() else {
+            return false;
+        };
+        let Ok(Some(project)) = self.store.projects().get(project_id) else {
+            return false;
+        };
+        project.kind == "git"
+            && item
+                .cwd
+                .as_deref()
+                .is_some_and(|cwd| Path::new(cwd).starts_with(&self.root))
+    }
+
+    async fn facts(
+        &self,
+        item: &str,
+        q: steve_core::node_git::Ask,
+    ) -> steve_node_api::ApiResult<steve_node_api::GitFacts> {
+        use steve_node_api::*;
+        let cwd = self
+            .store
+            .items()
+            .get(item)
+            .ok()
+            .flatten()
+            .and_then(|i| i.cwd)
+            .ok_or_else(|| Error::new(Code::Invalid, "no cwd"))?;
+        let w = self
+            .workspace_for_dir(&format!("item:{item}"), &cwd)
+            .await?;
+        self.query(w, q).await
+    }
+
+    async fn project_facts(
+        &self,
+        project_id: &str,
+        q: steve_core::node_git::Ask,
+    ) -> steve_node_api::ApiResult<steve_node_api::GitFacts> {
+        use steve_node_api::*;
+        let path = self
+            .store
+            .projects()
+            .get(project_id)
+            .ok()
+            .flatten()
+            .map(|p| p.path)
+            .ok_or_else(|| Error::new(Code::NotFound, "no project"))?;
+        let w = self
+            .workspace_for_dir(&format!("project:{project_id}"), &path)
+            .await?;
+        self.query(w, q).await
+    }
+
+    async fn apply(
+        &self,
+        _: &str,
+        _: &str,
+        _: &str,
+        _: &steve_node_api::GitFacts,
+        _: steve_node_api::GitAction,
+    ) -> steve_core::node_git::Applied {
+        steve_core::node_git::Applied::Failed(steve_node_api::Error::new(
+            steve_node_api::Code::Unsupported,
+            "git apply unused in workflow_run_e2e",
+        ))
+    }
+}
+
 struct Env {
     dir: tempfile::TempDir,
     store: Store,
@@ -208,6 +478,14 @@ struct Env {
 
 impl Env {
     fn new(use_subprocess: bool) -> Self {
+        Self::new_inner(use_subprocess, true)
+    }
+
+    fn new_without_node_git() -> Self {
+        Self::new_inner(false, false)
+    }
+
+    fn new_inner(use_subprocess: bool, wire_local_git: bool) -> Self {
         let dir = tempfile::tempdir().unwrap();
         let home = dir.path().join("steve");
         std::fs::create_dir_all(&home).unwrap();
@@ -265,6 +543,7 @@ impl Env {
             } else {
                 Arc::new(InProcessJsExecutor)
             },
+            wire_local_git,
         )
     }
 
@@ -277,6 +556,7 @@ impl Env {
             Arc::new(NoModels),
             cfg,
         );
+        core.set_node_git(LocalNodeGit::new(env.dir.path(), env.store.clone()));
         core.set_workflow_executor(executor);
         let workspaces = Workspaces::new(env.store.clone(), None, None, vec![]);
         let mcp = CoreMcp {
@@ -305,6 +585,7 @@ impl Env {
             } else {
                 Arc::new(InProcessJsExecutor)
             },
+            true,
         )
     }
 
@@ -313,6 +594,7 @@ impl Env {
         home: PathBuf,
         store: Store,
         executor: Arc<dyn WorkflowStepExecutor>,
+        wire_local_git: bool,
     ) -> Self {
         let rt = Arc::new(TestRuntime::new(store.clone()));
         let cfg = CoreConfig::for_home(&home);
@@ -324,6 +606,9 @@ impl Env {
             Arc::new(NoModels),
             cfg,
         );
+        if wire_local_git {
+            core.set_node_git(LocalNodeGit::new(dir.path(), store.clone()));
+        }
         core.set_workflow_executor(executor);
         let workspaces = Workspaces::new(store.clone(), None, None, vec![]);
         let mcp = CoreMcp {
@@ -463,7 +748,7 @@ impl Env {
     }
 
     async fn wait_for_dispatched_count(&self, run_id: &str, expected_total_attempts: usize) {
-        for _ in 0..100 {
+        for _ in 0..200 {
             let attempts = self
                 .store
                 .read(|r| WorkflowRuns(r).list_attempts_for_run(run_id))
@@ -478,15 +763,66 @@ impl Env {
             if ready {
                 return;
             }
-            tokio::time::sleep(Duration::from_millis(15)).await;
+            tokio::time::sleep(Duration::from_millis(25)).await;
         }
-        let n = self
+        let attempts = self
             .store
             .read(|r| WorkflowRuns(r).list_attempts_for_run(run_id))
-            .unwrap()
-            .len();
+            .unwrap();
+        let detail: Vec<String> = attempts
+            .iter()
+            .map(|a| {
+                let item = a
+                    .child_item_id
+                    .as_deref()
+                    .and_then(|cid| self.store.items().get(cid).ok().flatten());
+                let sess = a
+                    .child_item_id
+                    .as_deref()
+                    .map(|cid| {
+                        self.store
+                            .sessions()
+                            .of_item(cid)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|s| (s.id, s.status))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let ops = a
+                    .child_item_id
+                    .as_deref()
+                    .and_then(|cid| item.as_ref().map(|i| (cid, i.cycle)))
+                    .map(|(cid, cyc)| {
+                        self.store
+                            .items()
+                            .operations(cid, cyc)
+                            .unwrap_or_default()
+                            .into_iter()
+                            .map(|o| (o.kind, o.status, o.required))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default();
+                let call = self
+                    .store
+                    .read(|r| WorkflowRuns(r).get_call(&a.call_id))
+                    .ok()
+                    .flatten();
+                format!(
+                    "att={} status={:?} child={:?} phase={:?} sess={sess:?} ops={ops:?} closing={:?} git={:?}:{:?}",
+                    a.id,
+                    a.status,
+                    a.child_item_id,
+                    item.as_ref().map(|i| i.phase),
+                    item.as_ref().and_then(|i| i.closing.as_ref()).map(|c| (&c.kind, c.accepted, c.print_pending, c.fingerprint.as_deref())),
+                    call.as_ref().and_then(|c| c.git_head.as_deref()),
+                    call.as_ref().and_then(|c| c.git_tree.as_deref()),
+                )
+            })
+            .collect();
         panic!(
-            "timed out waiting for {expected_total_attempts} dispatched sessions on {run_id}, got {n}"
+            "timed out waiting for {expected_total_attempts} dispatched sessions on {run_id}, got {}: {detail:?}",
+            attempts.len()
         );
     }
 
@@ -557,6 +893,7 @@ fn init_git_project_with_worktree(env: &Env, name: &str, worktree: bool) -> (Str
             WS,
             &NewProject {
                 name: name.into(),
+                device_id: "hub".into(),
                 path: repo.to_string_lossy().into(),
                 kind: "git".into(),
                 worktree,
@@ -2763,7 +3100,7 @@ async fn review_03_shared_repo_and_remote_node_git_hydration_preserve_valid_comm
             }
         }
 
-        let env = Env::new(false);
+        let env = Env::new_without_node_git();
         let facts_calls = Arc::new(AtomicUsize::new(0));
         let remote_head = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string();
         let remote_tree = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string();

@@ -1,5 +1,5 @@
 //! `cmd` flow steps on the Node that holds the project (N0e-E6), for a Hub whose local Node is on
-//! (`STEVE_NODE_MODE=local`): the project is found through [`Workspaces`], its directory prepared
+//! (colocated `steve-node`): the project is found through [`Workspaces`], its directory prepared
 //! as a workspace of the project and that directory (`project:<id>:<dir>`, so a project moved to
 //! another path is a new one), and the command written to the Node's ledger for the run
 //! (`flow_run:<run>`) before it is sent, so it runs at most once. A retry you ask for after a
@@ -128,6 +128,10 @@ impl FlowCmd {
     }
 }
 
+const PREPARE_BUSY_RETRY: Duration = Duration::from_millis(100);
+const PREPARE_INSPECT_BASE: Duration = Duration::from_millis(50);
+const PREPARE_INSPECT_MAX: Duration = Duration::from_millis(500);
+
 /// `dir` as the workspace `resource` on `node` (an existing directory, worked in as it is).
 pub(super) async fn prepare_dir(
     node: &Arc<dyn Node>,
@@ -146,20 +150,33 @@ pub(super) async fn prepare_dir(
             PREPARE_WAIT,
         )?;
         let until = Instant::now() + PREPARE_WAIT;
+        let backoff = steve_runtime::policy::Backoff {
+            base: PREPARE_INSPECT_BASE,
+            max: PREPARE_INSPECT_MAX,
+            factor: 2,
+            jitter: steve_runtime::policy::Jitter::Equal,
+            attempts: None,
+            reset_after: None,
+        };
         let mut r = loop {
             match node.prepare_workspace(c.clone()).await {
                 // another run's step is making it right now
                 Err(e) if e.code == Code::Busy && Instant::now() < until => {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    tokio::time::sleep(PREPARE_BUSY_RETRY).await;
                 }
                 other => break other.map_err(|e| e.to_string())?,
             }
         };
+        let mut attempt = 0u32;
         while !r.state.is_finished() {
             if Instant::now() >= until {
                 return Err("the workspace was not ready in time".into());
             }
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            let wait = backoff
+                .sample_delay(attempt)
+                .min(until.saturating_duration_since(Instant::now()));
+            attempt = attempt.saturating_add(1);
+            tokio::time::sleep(wait).await;
             r = node
                 .operation(c.id.clone())
                 .await

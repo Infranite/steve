@@ -467,9 +467,7 @@ pub async fn resume(
                 .ok()
                 .flatten();
             Ok(match row {
-                Some(ref row) if row.node != "local" && row.node != "local-jobs" => {
-                    crate::resume::SessionState::RemoteNode
-                }
+                Some(ref row) if row.node != "local" => crate::resume::SessionState::RemoteNode,
                 Some(steve_store::node_sessions::PrincipalState {
                     state_dir: Some(dir),
                     ..
@@ -488,12 +486,10 @@ pub async fn resume(
     } else {
         crate::resume::SessionState::AmbientLocal
     };
-    // the local Node on: it finds ambient transcripts, the Hub reads no ambient harness files
-    if let Some(node) = st.node.as_ref().map(|n| n.node()) {
-        return ok(crate::resume::info_on_state(&homes, &s, node.as_ref(), &session_state).await);
-    }
-    let v = blocking(move || Ok(crate::resume::info_for_state(&homes, &s, &session_state))).await?;
-    ok(v)
+    let node = st.node.as_ref().map(|n| n.node());
+    let discovery: Option<&dyn steve_node_api::Discovery> =
+        node.as_deref().map(|n| n as &dyn steve_node_api::Discovery);
+    ok(crate::resume::info_on_state(&homes, &s, discovery, &session_state).await)
 }
 
 /// `GET /api/sessions/:id/principal-state`: the recorded Node binding and independent harness

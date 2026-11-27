@@ -1,0 +1,5 @@
+{
+  "command": "claude",
+  "service_path": "/usr/bin:/bin",
+  "refresh_command": "steve node refresh-env"
+}

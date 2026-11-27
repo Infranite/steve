@@ -16,6 +16,7 @@ pub mod antigravity;
 pub mod claude_code;
 pub mod codex;
 pub mod generic;
+pub mod history;
 pub mod kimi;
 pub mod pi;
 

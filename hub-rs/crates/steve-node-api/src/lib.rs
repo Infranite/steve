@@ -19,6 +19,7 @@ pub mod glob;
 pub mod harness_updates;
 pub mod ids;
 pub mod intent;
+pub mod oneshot;
 pub mod ports;
 pub mod run;
 pub mod stop;
@@ -37,12 +38,15 @@ pub use events::*;
 pub use harness_updates::*;
 pub use ids::*;
 pub use intent::{Intent, IntentKey};
+pub use oneshot::*;
 pub use ports::*;
 pub use run::*;
 pub use steve_types::devices::{
-    FileAccessReport, FileAccessStatus, LOGIN_SHELL_PROBE_TIMEOUT_SECS, MissingCommandDiagnostic,
-    NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET, ProtectedAccess, ProtectedLocation,
-    extract_login_shell_path, login_shell_path_script, shell_supports_interactive_login,
+    DEFAULT_DISK_FLOOR_BYTES, FileAccessReport, FileAccessStatus, LOCAL_SERVICE_LINK_FILE,
+    LOCAL_SERVICE_PID_FILE, LOGIN_SHELL_PROBE_TIMEOUT_SECS, LocalServiceLink, LocalServicePid,
+    MissingCommandDiagnostic, NODE_BOOT_SERVICE_ENV, NODE_FILE_ACCESS_SOCKET, ProtectedAccess,
+    ProtectedLocation, extract_login_shell_path, login_shell_path_script,
+    shell_supports_interactive_login,
 };
 pub use steve_types::gateway::{GatewayFailure, TimeoutPhase};
 pub use steve_types::{
@@ -53,8 +57,49 @@ pub use stop::*;
 pub use tools::*;
 pub use workspace::*;
 
-/// Exact ordinary wire contract. Every wire-format change increments this in the same commit.
-/// A different value permits only the independent, permanent upgrade protocol.
+/// Additive RPCs that the Hub calls only when the Node advertises them through
+/// [`Capabilities::features`] (or [`Capacity`]) are capability-negotiated and keep `PROTOCOL`
+/// unchanged, so running Nodes stay connected across upgrades.
+///
+/// Exact ordinary wire contract between the Hub and a Node.
+///
+/// Peers compare `PROTOCOL` for exact equality in [`upgrade_v1::Mode::between`]: any mismatch
+/// drops the link into `Mode::Upgrade`, refusing all ordinary RPCs until the Hub and Nodes are
+/// upgraded together. Because bumping `PROTOCOL` interrupts remote Nodes, increment it (by `+1`
+/// only) **strictly for breaking wire-format or semantic changes**:
+///
+/// - `remove-or-rename`: removing or renaming an RPC method, request/response field, or JSON tag.
+/// - `type-narrowing`: changing an existing field's type or wire encoding, removing or narrowing
+///   variants of a closed enum, or adding a closed-enum variant sent to an older peer without
+///   `#[serde(other)]`.
+/// - `required-field`: adding a required field without `#[serde(default)]`, or changing any
+///   `#[serde(deny_unknown_fields)]` struct (`InstallHarness`, `UpgradeHarness`, `Envelope`,
+///   `OrdinaryIntro`).
+/// - `semantic-break`: changing security, permission, sandbox, idempotency (`Command::digest`),
+///   or data-integrity semantics where an older peer ignoring unknown fields or using defaults
+///   would silently drop data, widen permissions, or cause wrong side effects (and capability
+///   negotiation cannot safely fall back).
+/// - `transport-frame`: changing transport framing (`Envelope`), post-handshake `OrdinaryIntro`,
+///   chunking, or flow-control rules.
+///
+/// **Do not increment `PROTOCOL`** for backwards-compatible additive changes on non-strict
+/// structs (those without `#[serde(deny_unknown_fields)]`):
+///
+/// - Appending fields with `#[serde(default)]` (and `skip_serializing_if` where appropriate) on
+///   read-only observation, diagnostic, or display payloads (`NodeVitals`, `AdapterInfo`,
+///   `HarnessSetup`, `MissingCommandDiagnostic`, `HarnessUpdateReport`, `SessionView`, etc.) when
+///   the default value has clear, safe semantics.
+/// - Appending optional request fields (`OpenSession`, `RunSpec`, etc.) with `#[serde(default)]`
+///   and `skip_serializing_if` when the Hub only populates them after the Node advertises support
+///   in `Capabilities.features` or `AdapterInfo`, keeping older Nodes' `Command::digest` intact.
+/// - Adding a new RPC method called only when advertised, or enabling an RPC method the peer
+///   already implements.
+///
+/// `upgrade_v1::UPGRADE_PROTOCOL` is permanently frozen and must never be changed.
+///
+/// Any PR that increments `PROTOCOL` must include both `Protocol-Bump: <category> — <reason>`
+/// and `Upgrade:` trailers in its PR description (enforced by `ops/cut-release.py lint`), and
+/// update the baseline fixtures under `tests/fixtures/ordinary_compat/`.
 pub const PROTOCOL: u32 = 17;
 
 /// Why an execution a Node held is `unknown` after the Node restarted (its process, the harness

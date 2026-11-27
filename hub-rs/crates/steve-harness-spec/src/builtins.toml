@@ -15,6 +15,7 @@ command = {"kind" = "claude"}
 local_transcript = true
 primary = true
 managed_by_default = true
+brand_substrings = ["claude"]
 [adapters.properties]
 read_attached = true
 self_read_only = false
@@ -28,7 +29,10 @@ permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
 executable_env = "CLAUDE_CODE_EXECUTABLE"
-session_meta = "claude_settings"
+protected_deny = {"wrapper" = ["claudeCode", "options", "settings", "permissions", "deny"], "tools" = ["Read", "Edit"], "abs_prefix" = "/", "dir_suffix" = "/**"}
+brand_mark = "anthropic"
+model_strip_prefixes = ["claude-"]
+history_prefix = "cc"
 launch_extra = "none"
 probe_initialize = true
 tools_off_meta = {"claudeCode" = {"options" = {"tools" = []}}}
@@ -67,6 +71,7 @@ command = {"kind" = "codex"}
 local_transcript = true
 primary = false
 managed_by_default = true
+brand_substrings = ["codex", "openai"]
 [adapters.properties]
 read_attached = true
 self_read_only = true
@@ -79,7 +84,8 @@ native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
+brand_mark = "openai"
+history_prefix = "cx"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -127,7 +133,6 @@ native_execution = true
 permission_policy = "full_access_only"
 require_mcp_http = true
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -160,6 +165,7 @@ required = []
 [[adapters]]
 id = "gemini"
 name = "Gemini CLI"
+brand_substrings = ["gemini"]
 install_hint = "@google/gemini-cli"
 npm_package = "@google/gemini-cli"
 cli_bin = "gemini"
@@ -175,13 +181,13 @@ managed_by_default = false
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "GEMINI_CLI_HOME", "default" = ".gemini", "import" = ["settings.json"], "context" = ["GEMINI.md", "commands"], "home_override" = true}
+brand_mark = "google"
 modes = {"plan" = "plan", "ask" = "default", "accept_edits" = "autoEdit", "auto" = "", "full_access" = "yolo"}
 blind_set_mode = false
 native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = true
@@ -204,6 +210,7 @@ required = []
 [[adapters]]
 id = "github-copilot-cli"
 name = "GitHub Copilot CLI"
+brand_substrings = ["copilot"]
 install_hint = "@github/copilot"
 npm_package = "@github/copilot"
 cli_bin = "copilot"
@@ -219,13 +226,13 @@ managed_by_default = false
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "COPILOT_HOME", "default" = ".copilot", "import" = ["settings.json"], "extra_dirs" = [".config/github-copilot", "Library/Application Support/github-copilot"]}
+brand_mark = "github"
 modes = {"plan" = "https://agentclientprotocol.com/protocol/session-modes#plan", "ask" = "https://agentclientprotocol.com/protocol/session-modes#agent", "accept_edits" = "", "auto" = "", "full_access" = "https://agentclientprotocol.com/protocol/session-modes#autopilot"}
 blind_set_mode = false
 native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -248,6 +255,7 @@ required = []
 [[adapters]]
 id = "opencode"
 name = "OpenCode"
+brand_substrings = ["opencode"]
 install_hint = "@opencode/cli"
 npm_package = "@opencode/cli"
 cli_bin = "opencode"
@@ -263,13 +271,13 @@ managed_by_default = false
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "", "default" = ".local/share/opencode", "import" = [], "xdg" = true, "extra_dirs" = [".config/opencode", ".local/state/opencode", ".cache/opencode", ".opencode"]}
+brand_mark = "sst"
 modes = {"plan" = "plan", "ask" = "build", "accept_edits" = "build", "auto" = "build", "full_access" = "build"}
 blind_set_mode = false
 native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -293,6 +301,7 @@ required = []
 [[adapters]]
 id = "qwen-code"
 name = "Qwen Code"
+brand_substrings = ["qwen"]
 install_hint = "@qwen-code/qwen-code"
 npm_package = "@qwen-code/qwen-code"
 cli_bin = "qwen"
@@ -308,13 +317,13 @@ managed_by_default = false
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "QWEN_HOME", "default" = ".qwen", "import" = ["settings.json"], "context" = ["QWEN.md", "commands"]}
+brand_mark = "alibaba"
 modes = {"plan" = "plan", "ask" = "default", "accept_edits" = "auto-edit", "auto" = "auto", "full_access" = "yolo"}
 blind_set_mode = false
 native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = true
@@ -359,7 +368,6 @@ native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = true
@@ -382,6 +390,7 @@ required = []
 [[adapters]]
 id = "kimi-code"
 name = "Kimi Code"
+brand_substrings = ["kimi", "moonshot"]
 install_hint = "@moonshot-ai/kimi-code"
 npm_package = "@moonshot-ai/kimi-code"
 cli_bin = "kimi"
@@ -397,13 +406,13 @@ managed_by_default = false
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "KIMI_CODE_HOME", "default" = ".kimi-code", "import" = ["config.toml", "tui.toml"], "extra_dirs" = [".kimi"]}
+brand_mark = "moonshot"
 modes = {"plan" = "plan", "ask" = "default", "accept_edits" = "", "auto" = "yolo", "full_access" = "auto"}
 blind_set_mode = false
 native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -447,7 +456,6 @@ native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {"auto" = {"autoMode" = true}, "full_access" = {"yoloMode" = true}}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = true
@@ -491,7 +499,6 @@ native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -535,7 +542,6 @@ native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -558,6 +564,7 @@ required = []
 [[adapters]]
 id = "codebuddy-code"
 name = "CodeBuddy Code"
+brand_substrings = ["codebuddy"]
 install_hint = "@tencent-ai/codebuddy-code"
 npm_package = "@tencent-ai/codebuddy-code"
 cli_bin = "codebuddy"
@@ -573,13 +580,13 @@ managed_by_default = false
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "CODEBUDDY_CONFIG_DIR", "default" = ".codebuddy", "import" = ["settings.json"], "extra_dirs" = ["Library/Application Support/CodeBuddyExtension", ".local/share/CodeBuddyExtension"]}
+brand_mark = "tencent"
 modes = {"plan" = "plan", "ask" = "default", "accept_edits" = "acceptEdits", "auto" = "auto", "full_access" = "fullAccess"}
 blind_set_mode = false
 native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -602,6 +609,7 @@ required = []
 [[adapters]]
 id = "cursor"
 name = "Cursor"
+brand_substrings = ["cursor"]
 install_hint = "curl https://cursor.com/install -fsS | bash"
 cli_bin = "cursor-agent"
 detect_bins = ["cursor"]
@@ -616,13 +624,13 @@ managed_by_default = false
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "CURSOR_CONFIG_DIR", "default" = ".cursor", "import" = ["cli-config.json"], "extra_dirs" = ["Library/Application Support/Cursor", ".config/Cursor"]}
+brand_mark = "anysphere"
 modes = {"plan" = "plan", "ask" = "ask", "accept_edits" = "agent", "auto" = "", "full_access" = ""}
 blind_set_mode = false
 native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -658,7 +666,6 @@ native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -674,6 +681,8 @@ outer_sandbox_args = []
 [[adapters]]
 id = "mistral-vibe"
 name = "Mistral Vibe"
+brand_substrings = ["mistral"]
+brand_words = ["vibe"]
 install_hint = "uv tool install mistral-vibe"
 cli_bin = "vibe-acp"
 detect_bins = ["vibe"]
@@ -688,6 +697,7 @@ managed_by_default = false
 self_read_only = false
 nested_sandbox = true
 state = {"env" = "VIBE_HOME", "default" = ".vibe", "import" = ["config.toml"], "extra_dirs" = [".config/vibe"]}
+brand_mark = "mistral"
 native_approval = "ask_owner"
 modes = {"plan" = "", "ask" = "ask", "accept_edits" = "accept-edits", "auto" = "smart-approve", "full_access" = "auto-approve"}
 blind_set_mode = false
@@ -695,7 +705,6 @@ native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = true
@@ -731,7 +740,6 @@ native_execution = false
 permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
-session_meta = "none"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -747,6 +755,7 @@ outer_sandbox_args = []
 [[adapters]]
 id = "antigravity"
 name = "Antigravity CLI"
+brand_substrings = ["antigravity"]
 install_hint = "curl -fsSL https://antigravity.google/cli/install.sh | bash"
 cli_bin = "agy"
 detect_bins = []
@@ -769,7 +778,7 @@ permission_policy = "acp"
 require_mcp_http = false
 mode_meta = {}
 mode_args = {"full_access" = ["--dangerously-skip-permissions"]}
-session_meta = "none"
+brand_mark = "google"
 launch_extra = "none"
 probe_initialize = true
 usage_input_includes_cache = false
@@ -783,3 +792,67 @@ fast_models = ["flash-lite", "flash"]
 resume_cli = "agy --resume {id}"
 outer_sandbox_args = []
 append_system_context = {"kind" = "meta_append", "namespace" = "antigravity"}
+
+[ui]
+
+[[ui.model_brands]]
+mark = "anthropic"
+substrings = ["claude", "anthropic", "opus", "sonnet", "haiku", "fable"]
+
+[[ui.model_brands]]
+mark = "openai"
+substrings = ["openai", "codex"]
+words = ["gpt", "o1", "o2", "o3", "o4", "o5", "o6", "o7", "o8", "o9"]
+
+[[ui.model_brands]]
+mark = "google"
+substrings = ["gemini", "google"]
+
+[[ui.model_brands]]
+mark = "moonshot"
+substrings = ["kimi", "moonshot"]
+
+[[ui.model_brands]]
+mark = "mistral"
+substrings = ["mistral", "devstral", "codestral", "ministral", "magistral"]
+
+[[ui.model_brands]]
+mark = "alibaba"
+substrings = ["qwen"]
+
+[[ui.mcp_clients]]
+id = "generic"
+language = "json"
+wrap = false
+[ui.mcp_clients.template.mcpServers."{{name}}"]
+type = "http"
+url = "{{url}}"
+[ui.mcp_clients.template.mcpServers."{{name}}".headers]
+Authorization = "{{bearer}}"
+
+[[ui.mcp_clients]]
+id = "claudeDesktop"
+language = "json"
+file = "claude_desktop_config.json"
+wrap = false
+[ui.mcp_clients.template.mcpServers."{{name}}"]
+command = "npx"
+args = ["-y", "mcp-remote", "{{url}}", "--header", "Authorization:${STEVE_AUTH}"]
+[ui.mcp_clients.template.mcpServers."{{name}}".env]
+STEVE_AUTH = "{{bearer}}"
+
+[[ui.mcp_clients]]
+id = "cursor"
+language = "json"
+file = "mcp.json"
+wrap = false
+[ui.mcp_clients.template.mcpServers."{{name}}"]
+url = "{{url}}"
+[ui.mcp_clients.template.mcpServers."{{name}}".headers]
+Authorization = "{{bearer}}"
+
+[[ui.mcp_clients]]
+id = "claudeCode"
+language = "bash"
+wrap = true
+command_template = "claude mcp add --transport http {{name}} {{url}} --header {{auth_header}}"

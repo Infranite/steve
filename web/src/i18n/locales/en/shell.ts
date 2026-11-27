@@ -252,6 +252,8 @@ export default {
     waitTurns_other: "waiting for {{count}} turns to end",
     restartNow: "restarting now",
     hold: "Releasing <link>{{item}}</link>, {{wait}}; new messages send after the release",
+    localNodeUpdating: "The local Node is updating, {{wait}}; conversation replies resume once the switch finishes",
+    localNodeSwitchNow: "switching now",
   },
   resume: {
     copied: "Copied {{what}}",

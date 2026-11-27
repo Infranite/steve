@@ -179,7 +179,7 @@ fn structured_mcp_invocations_keep_identity_and_arguments_across_updates() {
     );
     let f = n.fact("mcp").unwrap();
     assert_eq!(f.origin, ToolOrigin::Steve);
-    assert_eq!(f.name, "mcp__steve__steve_item_read");
+    assert_eq!(f.name, "steve_item_read");
     assert!(
         matches!(&view(&fs).action, Some(Action::Tool { name, args: actual })
         if name == "steve_item_read" && actual == &args)
@@ -188,7 +188,7 @@ fn structured_mcp_invocations_keep_identity_and_arguments_across_updates() {
         &mut n,
         json!({"toolCallId":"mcp", "status":"completed", "rawOutput":{"ok":true}}),
     );
-    assert_eq!(n.fact("mcp").unwrap().name, "mcp__steve__steve_item_read");
+    assert_eq!(n.fact("mcp").unwrap().name, "steve_item_read");
 
     let fs = update(
         &mut n,

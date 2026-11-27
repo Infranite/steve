@@ -70,6 +70,45 @@ fn the_catalog_preserves_the_pre_extraction_registry() {
                 "env.VERTEX_REGION_*"
             ]);
         }
+        // #583 replaces hardcoded SessionMeta enum with declarative protected_deny, brand_mark,
+        // model_strip_prefixes and history_prefix metadata.
+        entry["properties"]
+            .as_object_mut()
+            .unwrap()
+            .remove("session_meta");
+        entry["properties"]["protected_deny"] = if id == "claude-code" {
+            json!({
+                "wrapper": ["claudeCode", "options", "settings", "permissions", "deny"],
+                "tools": ["Read", "Edit"],
+                "abs_prefix": "/",
+                "dir_suffix": "/**",
+            })
+        } else {
+            Value::Null
+        };
+        entry["properties"]["brand_mark"] = json!(match id.as_str() {
+            "claude-code" => "anthropic",
+            "codex" => "openai",
+            "gemini" | "antigravity" => "google",
+            "github-copilot-cli" => "github",
+            "opencode" => "sst",
+            "qwen-code" => "alibaba",
+            "kimi-code" => "moonshot",
+            "codebuddy-code" => "tencent",
+            "cursor" => "anysphere",
+            "mistral-vibe" => "mistral",
+            _ => "other",
+        });
+        entry["properties"]["model_strip_prefixes"] = if id == "claude-code" {
+            json!(["claude-"])
+        } else {
+            json!([])
+        };
+        entry["properties"]["history_prefix"] = match id.as_str() {
+            "claude-code" => json!("cc"),
+            "codex" => json!("cx"),
+            _ => Value::Null,
+        };
         entry["env"]
             .as_array_mut()
             .unwrap()
@@ -121,7 +160,7 @@ fn known_keys(value: &toml::Value, keys: &[&str], location: &str) {
 #[test]
 fn every_builtin_catalog_key_is_known() {
     let catalog: toml::Value = toml::from_str(include_str!("../src/builtins.toml")).unwrap();
-    known_keys(&catalog, &["adapters"], "catalog");
+    known_keys(&catalog, &["adapters", "ui"], "catalog");
     for adapter in catalog["adapters"].as_array().unwrap() {
         let id = adapter["id"].as_str().unwrap();
         known_keys(
@@ -136,6 +175,8 @@ fn every_builtin_catalog_key_is_known() {
                 "local_transcript",
                 "primary",
                 "managed_by_default",
+                "brand_substrings",
+                "brand_words",
                 "components",
                 "name",
                 "args",
@@ -211,6 +252,50 @@ fn every_builtin_catalog_key_is_known() {
         }
         // env and protocol metadata payloads are intentionally open maps, not catalog fields.
     }
+    let ui = &catalog["ui"];
+    known_keys(ui, &["model_brands", "mcp_clients"], "catalog.ui");
+    for rule in ui["model_brands"].as_array().unwrap() {
+        known_keys(
+            rule,
+            &["mark", "substrings", "words"],
+            "catalog.ui.model_brands",
+        );
+    }
+    for client in ui["mcp_clients"].as_array().unwrap() {
+        known_keys(
+            client,
+            &[
+                "id",
+                "language",
+                "file",
+                "wrap",
+                "template",
+                "command_template",
+            ],
+            "catalog.ui.mcp_clients",
+        );
+    }
+}
+
+#[test]
+fn web_harness_meta_json_matches_builtin_catalog() {
+    let generated = ui_metadata_json();
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../web/src/gen/harness-meta.json");
+    if std::env::var_os("STEVE_UPDATE_HARNESS_META").is_some() {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &generated).unwrap();
+    }
+    let actual = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "missing {} ({e}); run STEVE_UPDATE_HARNESS_META=1 cargo test -p steve-harness-spec",
+            path.display()
+        )
+    });
+    assert_eq!(
+        actual, generated,
+        "web/src/gen/harness-meta.json is out of sync with builtins.toml; run STEVE_UPDATE_HARNESS_META=1 cargo test -p steve-harness-spec"
+    );
 }
 
 #[test]

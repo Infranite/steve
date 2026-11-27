@@ -32,6 +32,8 @@ pub enum Class {
     Tool,
     /// Blob and file chunks: 60 s.
     Blob,
+    /// Long colocated host operations (stdio MCP tool calls, worktree disk inspection/reclaim): 180 s.
+    Long,
 }
 
 impl Class {
@@ -41,6 +43,7 @@ impl Class {
             Class::Read | Class::Commit => 30,
             Class::Tool => 30,
             Class::Blob => 60,
+            Class::Long => 180,
         })
     }
 }
@@ -109,6 +112,17 @@ rpc_table! {
     ARTIFACT_READ = "artifact.read": HubToNode Bulk Blob false;
     TREE_SCAN = "tree.scan": HubToNode Control Command true;
     SCAN_PAGE = "scan.page": HubToNode Control Read false;
+    HOST_BROWSE_DIR = "host.browse_dir": HubToNode Control Read false;
+    HOST_DESCRIBE_DIR = "host.describe_dir": HubToNode Control Read false;
+    HOST_PATH_CHECK = "host.path_check": HubToNode Control Read false;
+    HOST_PROJECT_SETUP_PREVIEW = "host.project_setup_preview": HubToNode Control Read false;
+    HOST_PROJECT_SETUP_START = "host.project_setup_start": HubToNode Control Command true;
+    HOST_PROJECT_SETUP_STATUS = "host.project_setup_status": HubToNode Control Read false;
+    WORKSPACE_DISK_INSPECT = "workspace.disk_inspect": HubToNode Control Long false;
+    WORKSPACE_DISK_RECLAIM = "workspace.disk_reclaim": HubToNode Control Long false;
+    MCP_STDIO_LIST = "mcp.stdio_list": HubToNode Control Long false;
+    MCP_STDIO_CALL = "mcp.stdio_call": HubToNode Control Long false;
+    MCP_STDIO_SWEEP = "mcp.stdio_sweep": HubToNode Control Read false;
     // Discovery
     HARNESS_PROBE = "harness.probe": HubToNode Control Read false;
     HARNESS_INSTALL = "harness.install": HubToNode Control Command true;
@@ -118,6 +132,7 @@ rpc_table! {
     HISTORY_IMPORT = "history.import": HubToNode Control Command true;
     IMPORT_PAGE = "import.page": HubToNode Control Read false;
     HISTORY_LOCATE = "history.locate": HubToNode Control Read false;
+    HISTORY_RESUME_PROBE = "history.resume_probe": HubToNode Control Read false;
     NODE_VITALS = "node.vitals": HubToNode Control Read false;
     NODE_HOST = "node.host": HubToNode Control Read false;
     // Idempotent setting, not an execution: resending it cannot duplicate work.
