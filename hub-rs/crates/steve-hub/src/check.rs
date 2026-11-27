@@ -175,6 +175,9 @@ fn check_tailcat(
 
 /// Timeout for invoking the sibling `steve-node harness-probe` binary during offline preflight.
 const HARNESS_PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+/// Per-stream output cap for `steve-node harness-probe` (a compact JSON preflight summary; 1 MiB
+/// bounds unexpected output without truncating valid reports).
+const HARNESS_PROBE_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 fn sibling_steve_node() -> Option<std::path::PathBuf> {
     let exe = std::env::current_exe().ok()?;
@@ -199,12 +202,9 @@ fn probe_harnesses_via_node(
     vars: &crate::wire::Vars,
 ) -> Option<steve_node_api::HarnessPreflight> {
     if let Some(bin) = sibling_steve_node() {
-        let mut cmd = std::process::Command::new(bin);
+        let mut cmd = std::process::Command::new(&bin);
         cmd.arg("harness-probe")
             .env_clear()
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
             .env("STEVE_HOME", &cfg.home)
             .env("STEVE_HARNESS_MANIFEST", &cfg.harness_manifest);
         for key in ["HOME", "PATH", "STEVE_NODE"] {
@@ -217,34 +217,21 @@ fn probe_harnesses_via_node(
                 cmd.env(env_var, v);
             }
         }
-        if let Ok(mut child) = cmd.spawn() {
-            let deadline = std::time::Instant::now() + HARNESS_PROBE_TIMEOUT;
-            loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => {
-                        if status.success()
-                            && let Some(mut stdout) = child.stdout.take()
-                        {
-                            let mut buf = Vec::new();
-                            if std::io::Read::read_to_end(&mut stdout, &mut buf).is_ok()
-                                && let Ok(report) =
-                                    serde_json::from_slice::<steve_node_api::HarnessPreflight>(&buf)
-                            {
-                                return Some(report);
-                            }
-                        }
-                        break;
-                    }
-                    Ok(None) if std::time::Instant::now() < deadline => {
-                        std::thread::sleep(std::time::Duration::from_millis(10));
-                    }
-                    _ => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        break;
-                    }
-                }
-            }
+        if let Ok(out) = steve_runtime::process::run_bounded(
+            &mut cmd,
+            "steve-node harness-probe",
+            steve_runtime::process::BoundedOptions {
+                max_output_bytes: HARNESS_PROBE_MAX_OUTPUT_BYTES,
+                ..steve_runtime::process::BoundedOptions::capture(
+                    "harness_probe",
+                    HARNESS_PROBE_TIMEOUT,
+                )
+            },
+        ) && out.status.success()
+            && let Ok(report) =
+                serde_json::from_slice::<steve_node_api::HarnessPreflight>(&out.stdout)
+        {
+            return Some(report);
         }
     }
     #[cfg(test)]
