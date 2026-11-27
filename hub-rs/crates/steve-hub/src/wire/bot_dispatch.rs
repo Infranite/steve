@@ -38,6 +38,8 @@ pub(crate) fn text(reason: Reason) -> String {
         Reason::Pending => steve_i18n::t!("hub.dispatch.pending"),
         Reason::Local => steve_i18n::t!("hub.dispatch.local"),
         Reason::BindFailed => steve_i18n::t!("hub.dispatch.bind_failed"),
+        Reason::DispatchFailed => steve_i18n::t!("hub.dispatch.dispatch_failed"),
+        Reason::InvalidChoice => steve_i18n::t!("hub.dispatch.invalid_choice"),
     }
 }
 
@@ -581,7 +583,6 @@ impl Routes {
                 bot: self.bot.id.clone().into(),
                 reason: PlacementReason::ExistingAssignment,
                 why: None,
-                matched: vec![],
                 rejected: vec![],
                 fallback: None,
                 deferred_by: None,

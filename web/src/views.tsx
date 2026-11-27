@@ -242,11 +242,11 @@ const STATE_TONE: Record<ItemState["tone"], [string, string]> = {
 }
 const STATE_ICON: Record<ItemState["kind"], typeof CheckIcon> = {
   done: CheckIcon, dropped: BanIcon, failed: CircleAlertIcon, proposed: CircleHelpIcon, asking: CircleHelpIcon,
-  paused: PauseIcon, blocked: HourglassIcon, working: LoaderCircleIcon, queued: HourglassIcon, closing: HourglassIcon, idle: CircleDashedIcon,
+  paused: PauseIcon, blocked: HourglassIcon, dispatching: LoaderCircleIcon, working: LoaderCircleIcon, queued: HourglassIcon, closing: HourglassIcon, idle: CircleDashedIcon,
 }
 function StateMark({ state, centered }: { state: ItemState; centered?: boolean }) {
   const I = STATE_ICON[state.kind]
-  return <span className={cn(!centered && "mt-0.5", "flex size-7 shrink-0 items-center justify-center rounded-full", STATE_TONE[state.tone][1])} aria-hidden><I className={cn("size-4", state.kind === "working" && "motion-safe:animate-spin")} strokeWidth={2.25} /></span>
+  return <span className={cn(!centered && "mt-0.5", "flex size-7 shrink-0 items-center justify-center rounded-full", STATE_TONE[state.tone][1])} aria-hidden><I className={cn("size-4", (state.kind === "working" || state.kind === "dispatching") && "motion-safe:animate-spin")} strokeWidth={2.25} /></span>
 }
 export function StatePill({ state }: { state: ItemState }) {
   const t = useT()
@@ -598,7 +598,7 @@ export function ItemView({ id }: { id: string }) {
               <div className="min-w-[min(100%,14rem)] flex-1 basis-0">
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                   <h2 className={cn("type-headline", state.kind === "working" && "shimmer shimmer-once")} data-state-title>{t(`views:itemState.${state.kind}`)}</h2>
-                  {state.move !== "none" && state.kind !== "closing" && <span className="type-footnote text-muted-foreground">{t(`views:itemState.${state.move}`)}</span>}
+                  {state.move !== "none" && state.kind !== "closing" && state.kind !== "dispatching" && <span className="type-footnote text-muted-foreground">{t(`views:itemState.${state.move}`)}</span>}
                 </div>
                 {state.detail && !(i.waits.length > 0 && state.detail === i.waits[0].q) && <p className="mt-1 line-clamp-3 break-words type-callout text-muted-foreground">{clip(state.detail, 360)}</p>}
                 {state.kind === "idle" && <p className="mt-1 type-callout text-muted-foreground">{t("views:itemState.idleHint")}</p>}

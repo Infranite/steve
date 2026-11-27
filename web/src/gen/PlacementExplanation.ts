@@ -6,4 +6,4 @@ import type { PlacementBlocker } from "./PlacementBlocker";
 import type { PlacementReason } from "./PlacementReason";
 import type { PlacementRejection } from "./PlacementRejection";
 
-export type PlacementExplanation = { bot: BotId, reason: PlacementReason, why?: string, matched: Array<string>, rejected: Array<PlacementBlocker>, fallback: PlacementRejection | null, deferred_by?: CoordinatorDeferSource, };
+export type PlacementExplanation = { bot: BotId, reason: PlacementReason, why?: string, rejected: Array<PlacementBlocker>, fallback: PlacementRejection | null, deferred_by?: CoordinatorDeferSource, };

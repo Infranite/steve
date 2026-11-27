@@ -2660,6 +2660,7 @@ pub mod build {
             work: JobWork::Think(ThinkJob {
                 instructions: None,
                 tools: ThinkToolMode::None,
+                steve_tools: false,
             }),
         }
     }

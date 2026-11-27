@@ -75,7 +75,7 @@ pub use ledger::LedgerEntry;
 pub use lifecycle::{Release, bound, bound_strict, decision_session, health, waiting_card};
 pub(crate) use node_jobs::normalized_usage;
 pub use node_jobs::{
-    News, NodePrint, RESEARCH_GRANT, ResearchAttempt, ResearchFile, ResearchJobRun,
+    DISPATCH_GRANT, News, NodePrint, RESEARCH_GRANT, ResearchAttempt, ResearchFile, ResearchJobRun,
 };
 pub use plan::{Planned, park};
 pub(crate) use plan::{deliver_mid_turn, mid_turn_note, queue_in};

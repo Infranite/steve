@@ -73,17 +73,27 @@ pub(super) fn describe() {
     describe_histogram!(
         "steve_bot_selection_seconds",
         Seconds,
-        "Time to assess and rank one Bot dispatch request."
+        "Time to validate one Bot placement request."
     );
     describe_counter!(
         "steve_bot_selection_total",
         Count,
-        "Completed Bot placement selections by winning reason. Label: reason."
+        "Completed Bot placement validations by reason. Label: reason."
     );
     describe_counter!(
         "steve_bot_selection_blocked_total",
         Count,
         "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
+    );
+    describe_histogram!(
+        "steve_dispatch_job_duration_seconds",
+        Seconds,
+        "Duration of one async Steve Bot-selection Think job. Label: outcome (selected, invalid_choice, failed)."
+    );
+    describe_counter!(
+        "steve_dispatch_job_total",
+        Count,
+        "Completed async Steve Bot-selection Think jobs. Label: outcome (selected, invalid_choice, failed)."
     );
     describe_counter!(
         "steve_dispatch_invalid_choice_total",
@@ -113,7 +123,7 @@ pub(super) fn describe() {
     describe_counter!(
         "steve_no_executor_decisions_settled_total",
         Count,
-        "Workspace-scoped no-executor decision cards settled. Label: choice (assign_bot, confirm_proposal, later, dismiss, supersede)."
+        "Workspace-scoped no-executor decision cards settled. Label: choice (assign_bot, confirm_proposal, retry_dispatch, later, dismiss, supersede)."
     );
     describe_counter!(
         "steve_coordinator_self_executions_total",

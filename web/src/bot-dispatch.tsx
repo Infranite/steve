@@ -215,7 +215,7 @@ export function PlacementWhy({ value, detail = false }: { value: PlacementExplan
     </div>
   }
   return <div className="min-w-0 break-words type-footnote text-muted-foreground" data-dispatch-reason={value.reason}>
-    <p>{t(`manage:dispatch.selection.${value.reason}`)}{value.why && <> · {value.why}</>}{value.matched.length > 0 && <> · {value.matched.join(" · ")}</>}
+    <p>{t(`manage:dispatch.selection.${value.reason}`)}{value.why && <> · {value.why}</>}
       {value.fallback && <> · {reasonLabel(t, value.fallback)}</>}</p>
     {detail && skipped.length > 0 && <p>{t("manage:dispatch.skipped", { reasons: skipped.map(r => reasonLabel(t, r)).join(" · ") })}</p>}
   </div>
@@ -289,7 +289,10 @@ export function NoExecutorDecisionBody({ w, act, busy, head, foot }: {
       </div>}
       <p className="type-footnote text-muted-foreground">{t("manage:dispatch.noExecutorCard.laterHint")}</p>
     </div>
-    {foot(<Button size="sm" variant="outline" disabled={busy} data-no-executor-later onClick={() => void act("later")}>{t("manage:dispatch.noExecutorCard.later")}</Button>)}
+    {foot(<div className="flex flex-wrap gap-2">
+      {w.options.includes("retry_dispatch") && <Button size="sm" variant="secondary" disabled={busy} data-no-executor-retry onClick={() => void act("retry_dispatch")}>{t("manage:dispatch.noExecutorCard.retryDispatch")}</Button>}
+      <Button size="sm" variant="outline" disabled={busy} data-no-executor-later onClick={() => void act("later")}>{t("manage:dispatch.noExecutorCard.later")}</Button>
+    </div>)}
   </>
 }
 

@@ -433,6 +433,7 @@ export function cardLook(i: Item, c?: ItemCardState): Look {
   if (s.kind === "idle" && !i.rel) return { label: tr("views:itemState.idle"), dot: "pause", tone: "quiet" }
   if (i.rel?.tone === "run") return { label: tr("thread:card.status.releasing"), dot: "run", tone: "run" }
   if (s.kind === "closing") return { label: tr("views:itemState.closing"), dot: s.tone === "wait" ? "wait" : "run", tone: s.tone === "wait" ? "wait" : "run" }
+  if (s.kind === "dispatching") return { label: tr("views:itemState.dispatching"), dot: "run", tone: "run" }
   if (s.kind === "queued") return { label: tr("thread:card.status.queued"), dot: "run", tone: "run" }
   return { label: tr("thread:card.status.running"), dot: "run", tone: "run" }
 }

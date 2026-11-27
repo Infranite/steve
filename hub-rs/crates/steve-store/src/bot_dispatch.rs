@@ -286,20 +286,197 @@ pub fn scope_for(r: &mut impl Read, ws: &str, team: Option<&Team>, bot: &str) ->
     scope_for_on(r.connection(), ws, team, bot)
 }
 
-/// Workspace membership timestamps from `bot_workspaces` so tie-breaking favors earlier members
-/// over random Bot UID lexicographic order.
-pub fn workspace_join_order(
-    r: &mut impl Read,
+/// Durable async bot-dispatch job for an unassigned item waiting on Steve to choose an executor.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchJob {
+    pub item_id: String,
+    pub workspace_id: String,
+    pub state: String,
+    pub attempt_id: Option<String>,
+    pub required_node: Option<String>,
+    pub required_specialties: Vec<String>,
+    pub created: i64,
+    pub updated: i64,
+}
+
+pub fn enqueue_dispatch(
+    w: &mut W<'_>,
     ws: &str,
-) -> Result<std::collections::HashMap<String, i64>> {
-    let rows = r.all(
-        Query::select()
-            .columns(["bot_id", "created"])
-            .from("bot_workspaces")
-            .and_where(Expr::col("workspace_id").eq(ws)),
-        |row| Ok((row.get::<String>(0)?, row.get::<i64>(1)?)),
+    item_id: &str,
+    required_node: Option<&str>,
+    required_specialties: &[String],
+) -> Result<()> {
+    let ts = crate::now();
+    let spec_json = serde_json::to_string(required_specialties)?;
+    w.exec(
+        Query::insert()
+            .into_table("item_dispatch_jobs")
+            .columns([
+                "item_id",
+                "workspace_id",
+                "state",
+                "attempt_id",
+                "required_node",
+                "required_specialties",
+                "created",
+                "updated",
+            ])
+            .values_panic([
+                item_id.into(),
+                ws.into(),
+                "pending".into(),
+                Option::<String>::None.into(),
+                required_node.map(str::to_owned).into(),
+                spec_json.into(),
+                ts.into(),
+                ts.into(),
+            ])
+            .on_conflict(
+                OnConflict::column("item_id")
+                    .update_columns([
+                        "workspace_id",
+                        "state",
+                        "attempt_id",
+                        "required_node",
+                        "required_specialties",
+                        "updated",
+                    ])
+                    .to_owned(),
+            ),
     )?;
-    Ok(rows.into_iter().collect())
+    w.emit(WorkEvent::Item {
+        ws: ws.into(),
+        id: item_id.into(),
+    });
+    Ok(())
+}
+
+fn next_pending_dispatch(
+    r: &mut impl Read,
+) -> Result<Option<(String, String, Option<String>, String, i64)>> {
+    r.one(
+        Query::select()
+            .columns([
+                "item_id",
+                "workspace_id",
+                "required_node",
+                "required_specialties",
+                "created",
+            ])
+            .from("item_dispatch_jobs")
+            .and_where(Expr::col("state").eq("pending"))
+            .order_by("created", Order::Asc)
+            .order_by("item_id", Order::Asc)
+            .limit(1),
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+            ))
+        },
+    )
+}
+
+pub fn claim_next_dispatch(w: &mut W<'_>, attempt_id: &str) -> Result<Option<DispatchJob>> {
+    let Some((item_id, workspace_id, required_node, spec_json, created)) =
+        next_pending_dispatch(w)?
+    else {
+        return Ok(None);
+    };
+    let ts = crate::now();
+    let updated = w.exec(
+        Query::update()
+            .table("item_dispatch_jobs")
+            .values([
+                ("state", "running".into()),
+                ("attempt_id", Some(attempt_id.to_owned()).into()),
+                ("updated", ts.into()),
+            ])
+            .and_where(Expr::col("item_id").eq(&item_id))
+            .and_where(Expr::col("state").eq("pending")),
+    )?;
+    if updated != 1 {
+        return Ok(None);
+    }
+    let required_specialties: Vec<String> = serde_json::from_str(&spec_json).unwrap_or_default();
+    Ok(Some(DispatchJob {
+        item_id,
+        workspace_id,
+        state: "running".into(),
+        attempt_id: Some(attempt_id.to_owned()),
+        required_node,
+        required_specialties,
+        created,
+        updated: ts,
+    }))
+}
+
+/// Reset any `running` dispatch rows left over from a prior Hub process back to `pending`.
+pub fn reset_running_dispatches(w: &mut W<'_>) -> Result<u64> {
+    let ts = crate::now();
+    w.exec(
+        Query::update()
+            .table("item_dispatch_jobs")
+            .values([
+                ("state", "pending".into()),
+                ("attempt_id", Option::<String>::None.into()),
+                ("updated", ts.into()),
+            ])
+            .and_where(Expr::col("state").eq("running")),
+    )
+}
+
+/// Complete (delete) a running dispatch job only if `attempt_id` still matches the active claim.
+pub fn finish_dispatch_if_matching(
+    w: &mut W<'_>,
+    ws: &str,
+    item_id: &str,
+    attempt_id: &str,
+) -> Result<bool> {
+    let deleted = w.exec(
+        Query::delete()
+            .from_table("item_dispatch_jobs")
+            .and_where(Expr::col("item_id").eq(item_id))
+            .and_where(Expr::col("attempt_id").eq(attempt_id)),
+    )?;
+    if deleted > 0 {
+        w.emit(WorkEvent::Item {
+            ws: ws.into(),
+            id: item_id.into(),
+        });
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+/// Cancel any pending or running dispatch job for `item_id` (e.g. owner reassigned, archived, or closed).
+pub fn cancel_dispatch(w: &mut W<'_>, ws: &str, item_id: &str) -> Result<bool> {
+    let deleted = w.exec(
+        Query::delete()
+            .from_table("item_dispatch_jobs")
+            .and_where(Expr::col("item_id").eq(item_id)),
+    )?;
+    if deleted > 0 {
+        w.emit(WorkEvent::Item {
+            ws: ws.into(),
+            id: item_id.into(),
+        });
+        Ok(true)
+    } else {
+        Ok(false)
+    }
+}
+
+pub fn is_dispatching(r: &mut impl Read, item_id: &str) -> Result<bool> {
+    Ok(r.connection().query_row(
+        "SELECT EXISTS(SELECT 1 FROM item_dispatch_jobs WHERE item_id = ?1)",
+        [item_id],
+        |row| row.get::<_, bool>(0),
+    )?)
 }
 
 pub fn record(

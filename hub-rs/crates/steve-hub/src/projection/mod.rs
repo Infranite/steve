@@ -629,7 +629,6 @@ mod tests {
                 bot: bot.id.as_str().into(),
                 reason: PlacementReason::SteveSelected,
                 why: Some("Matches code review tasks".into()),
-                matched: vec![],
                 rejected: vec![],
                 fallback: None,
                 deferred_by: None,

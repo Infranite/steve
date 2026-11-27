@@ -168,10 +168,7 @@ impl Core {
         &self,
         ws: &str,
         bot_id: &str,
-        title: &str,
-        goal: &str,
         project: Option<&str>,
-        tag_names: &[String],
         reason: PlacementReason,
         why: Option<String>,
     ) -> Result<steve_types::BotPlacement> {
@@ -192,9 +189,6 @@ impl Core {
                 effort: None,
                 team: team.as_ref(),
                 project: &project_opt,
-                title,
-                goal,
-                tags: tag_names,
                 required_specialties: &[],
                 node: None,
                 required_nodes: None,
@@ -215,15 +209,12 @@ impl Core {
         project: Option<&str>,
         tag_ids: &[String],
     ) -> Result<Value> {
-        let (tags, tag_names) = self.resolve_offer_tags(ws, tag_ids)?;
+        let (tags, _tag_names) = self.resolve_offer_tags(ws, tag_ids)?;
         let (bot, why, reason, rejected) = if let Some(chosen) = o.bot.as_deref() {
             match self.validate_offer_bot(
                 ws,
                 chosen,
-                &o.title,
-                &o.goal,
                 project,
-                &tag_names,
                 PlacementReason::SteveSelected,
                 o.why.clone(),
             ) {
@@ -262,9 +253,6 @@ impl Core {
                     effort: None,
                     team: team.as_ref(),
                     project: &project_opt,
-                    title: &o.title,
-                    goal: &o.goal,
-                    tags: &tag_names,
                     required_specialties: &[],
                     node: None,
                     required_nodes: None,
@@ -686,7 +674,7 @@ impl Core {
                 dispatch_ref_id: None,
             });
         }
-        let (tags, tag_names) = self.resolve_offer_tags(ws, &offer.tags)?;
+        let (tags, _tag_names) = self.resolve_offer_tags(ws, &offer.tags)?;
         let override_from = bot_override.map(|_| {
             if offer.rejected.is_some() {
                 "invalid"
@@ -700,10 +688,7 @@ impl Core {
             self.validate_offer_bot(
                 ws,
                 explicit_bot,
-                &offer.title,
-                &offer.goal,
                 offer.project.as_deref(),
-                &tag_names,
                 PlacementReason::Explicit,
                 None,
             )?;
@@ -734,10 +719,7 @@ impl Core {
             self.validate_offer_bot(
                 ws,
                 selected_bot,
-                &offer.title,
-                &offer.goal,
                 offer.project.as_deref(),
-                &tag_names,
                 reason,
                 offer.why.clone(),
             )?;

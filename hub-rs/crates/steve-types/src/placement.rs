@@ -42,6 +42,8 @@ placement_reasons! {
     Pending => "pending",
     Local => "local",
     BindFailed => "bind_failed",
+    DispatchFailed => "dispatch_failed",
+    InvalidChoice => "invalid_choice",
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,10 +53,6 @@ pub enum PlacementReason {
     Explicit,
     SteveSelected,
     OnlyEligible,
-    Specialty,
-    Description,
-    ProjectPreference,
-    StableOrder,
     CoordinatorDeferred,
     ExistingAssignment,
     HandoffQuotaExhausted,
@@ -68,10 +66,6 @@ impl PlacementReason {
             Self::Explicit => "explicit",
             Self::SteveSelected => "steve_selected",
             Self::OnlyEligible => "only_eligible",
-            Self::Specialty => "specialty",
-            Self::Description => "description",
-            Self::ProjectPreference => "project_preference",
-            Self::StableOrder => "stable_order",
             Self::CoordinatorDeferred => "coordinator_deferred",
             Self::ExistingAssignment => "existing_assignment",
             Self::HandoffQuotaExhausted => "handoff_quota_exhausted",
@@ -159,8 +153,6 @@ pub struct PlacementExplanation {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[cfg_attr(test, ts(optional))]
     pub why: Option<String>,
-    #[serde(default)]
-    pub matched: Vec<String>,
     pub rejected: Vec<PlacementBlocker>,
     pub fallback: Option<PlacementRejection>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

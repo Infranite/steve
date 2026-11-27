@@ -470,6 +470,10 @@ pub struct ThinkJob {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
     pub tools: ThinkToolMode,
+    /// When true, the Node mounts Steve's loopback HTTP MCP server for this job's grant
+    /// (`run.policy.tools`, e.g. `dispatch`), while `tools` still governs the harness's built-ins.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub steve_tools: bool,
 }
 
 /// The harness's own tools in a think job.

@@ -1009,24 +1009,6 @@ impl Tx<'_> {
                 ))
             })?;
         let node_constraint = required_node.or(bound_node);
-        let tags_for_selection: Vec<String> = self
-            .db()
-            .tags_of_item(&item.id)?
-            .iter()
-            .map(|id| self.db().tag(id))
-            .collect::<Result<Vec<_>>>()?
-            .into_iter()
-            .flatten()
-            .filter(|tag| tag.workspace_id == ws)
-            .map(|tag| tag.name)
-            .collect();
-        let goal_text = self
-            .db()
-            .goals(&item.id)?
-            .into_iter()
-            .last()
-            .map(|g| g.text)
-            .unwrap_or_else(|| item.title.clone());
         let project_req = Some(item.project_id.clone());
 
         let cur_bot_id = prev
@@ -1071,10 +1053,10 @@ impl Tx<'_> {
             },
         };
 
-        let (mut placement, _) = crate::placement::select(
+        let (placement, _) = crate::placement::validate(
             self.db(),
             self.rt(),
-            crate::placement::DispatchRequest {
+            &crate::placement::DispatchRequest {
                 workspace: ws,
                 bot: Some(bot_filter),
                 harness: rt_filter,
@@ -1082,18 +1064,14 @@ impl Tx<'_> {
                 effort: effort_filter,
                 team: team.as_ref(),
                 project: &project_req,
-                title: &item.title,
-                goal: &goal_text,
-                tags: &tags_for_selection,
                 required_specialties: &[],
                 node: node_constraint.as_deref(),
                 required_nodes: required_nodes.as_deref(),
             },
             |rt_id| self.c.models().agent_model(ws, rt_id),
+            reason.placement_reason(),
+            None,
         )?;
-
-        // Record the handoff cause directly in the W3.1 placement explanation.
-        placement.explanation.reason = reason.placement_reason();
 
         let bot = self
             .db()

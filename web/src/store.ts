@@ -65,6 +65,7 @@ export type Item = {
   rel?: Rel
   dependencyWait?: RItemDetail["dependency_wait"]
   dispatch?: RItemDetail["dispatch"]
+  dispatching?: boolean
   placement?: PlacementExplanation
 }
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
@@ -587,6 +588,7 @@ function mapItem(i: ItemView, det?: RItemDetail): Item {
     rounds: (det?.planRounds ?? []).map((r) => ({ n: r.round, steps: steps(r.steps), end: r.end, at: tm(r.created) })),
     dependencyWait: det?.dependency_wait,
     dispatch: det?.dispatch,
+    dispatching: !!i.waits?.includes("dispatching"),
     placement: i.placement,
     get wait() { const d = decisionsForItem(i.id)[0]; return d ? waitOf(d) : undefined },
     get waits() { return itemWork(i.id).decisions.map(waitOf) }, get ss() { return ss().map((s) => s.id) }, tl, outs: det ? det.artifacts.map((a): Out => [a.kind, a.title, a.location, a.id, a.created, det.artifactRoles?.[a.id] as Out[5], a.delivery_id]) : [], anns: det?.annotations ?? [],

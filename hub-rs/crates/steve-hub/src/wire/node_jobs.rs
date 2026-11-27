@@ -154,6 +154,7 @@ impl NodeRuntime {
         let job = uid("job");
         let attempt = t.attempt.clone();
         let op = format!("op_{attempt}");
+        let dispatch_tools = matches!(t.tools, ThinkTools::Dispatch);
         let spec = JobSpec {
             job: idv(job.clone())?,
             run: RunSpec {
@@ -174,7 +175,11 @@ impl NodeRuntime {
                     },
                     readable: vec![],
                     network: NetworkScope::Unrestricted,
-                    tools: idv("hub")?,
+                    tools: idv(if dispatch_tools {
+                        DISPATCH_GRANT
+                    } else {
+                        "hub"
+                    })?,
                 },
                 limits: Limits {
                     deadline: t.wire_deadline,
@@ -187,11 +192,12 @@ impl NodeRuntime {
             },
             work: JobWork::Think(ThinkJob {
                 instructions: t.head.clone(),
-                tools: if t.tools.any() {
+                tools: if matches!(t.tools, ThinkTools::Read(_)) {
                     ThinkToolMode::ReadAttached
                 } else {
                     ThinkToolMode::None
                 },
+                steve_tools: dispatch_tools,
             }),
         };
         let exec = ExecutionRef::Job {
@@ -847,7 +853,9 @@ impl OneModel for NodePrint {
         if self.runtime.node.is_upgrade_only() {
             return Err(GatewayError::LocalNodeUpdating.into());
         }
-        let needs_tools = matches!(call.spec.required_tools, ThinkTools::Read(_));
+        let needs_read = matches!(call.spec.required_tools, ThinkTools::Read(_));
+        let needs_dispatch = matches!(call.spec.required_tools, ThinkTools::Dispatch);
+        let needs_tools = needs_read || needs_dispatch;
         let needs_images = !call.images.is_empty();
         if let ThinkTools::Read(required) = call.spec.required_tools {
             let workspace = think_workspace();
@@ -898,7 +906,10 @@ impl OneModel for NodePrint {
                     .as_ref()
                     .is_none_or(|a| a.status == AdapterStatus::Ready)
         });
-        if needs_tools && !harness.is_some_and(|h| h.read_attached) {
+        if needs_read && !harness.is_some_and(|h| h.read_attached) {
+            return Err(GatewayError::MissingCapability.into());
+        }
+        if needs_dispatch && harness.is_none() {
             return Err(GatewayError::MissingCapability.into());
         }
         if needs_images && !harness.is_some_and(|h| h.images) {
@@ -1212,6 +1223,9 @@ pub struct ResearchAttempt {
 
 /// The tool grant of a research job: the read-only research tools of its thread run.
 pub const RESEARCH_GRANT: &str = "research";
+
+/// The tool grant of an async Steve Bot-dispatch think job: only `steve_bots_list` and `steve_nodes_list`.
+pub const DISPATCH_GRANT: &str = "dispatch";
 
 impl NodeRuntime {
     /// Commits a research job (one attempt, `a.model` only) with its `start_job`. As with a think

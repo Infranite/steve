@@ -110,7 +110,7 @@ export default {
     done: "Done", dropped: "Dropped", failed: "Closed as failed", proposed: "Waiting for your go-ahead", asking: "Waiting for you",
     paused: "Paused",
     blocked: "Waiting for prerequisites", working: "Working", queued: "Your message is queued", idle: "Nothing running",
-    closing: "Closing out", steve: "With Steve",
+    closing: "Closing out", dispatching: "Steve is choosing an executor", steve: "With Steve",
     you: "Your move", agents: "With the agents",
     idleHint: "It stopped: nothing is running and it hasn't asked you anything. Say so below if it should go on.",
     progress: "Progress", details: "Details", moreProps: "More details",

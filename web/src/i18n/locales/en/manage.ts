@@ -45,10 +45,6 @@ export default {
       explicit: "Chosen by you",
       steve_selected: "Selected by Steve",
       only_eligible: "Only eligible Bot",
-      specialty: "Matched Bot specialties",
-      description: "Matched the Bot description",
-      project_preference: "Matched the project preference",
-      stable_order: "Selected by generalist fit, Team order, and execution Node priority",
       coordinator_deferred: "Handled by Steve",
       existing_assignment: "Used the Bot assigned to this item",
       handoff_quota_exhausted: "Handed off after quota exhaustion",
@@ -65,6 +61,7 @@ export default {
       rejected: "Why candidate Bots were rejected",
       assignLabel: "Assign a Bot and start",
       assignAction: "Assign & start",
+      retryDispatch: "Retry Steve dispatch",
       later: "Later (let Steve handle it)",
       laterHint: "Runs these items on Steve and switches “When no Bot can take work” to “Steve handles it” so future unassigned items run on Steve without asking. You can switch back anytime in Settings.",
       proposalAction: "Confirm & start",
@@ -74,6 +71,8 @@ export default {
     "reason": {
       no_candidates: "No enabled Bot can take this request in the selected scope.",
       specialty: "The Bot does not have the required specialties.",
+      dispatch_failed: "Steve could not complete Bot dispatch (model or local Node unavailable).",
+      invalid_choice: "The Bot Steve selected did not pass hard eligibility validation.",
 
       "preferred": "Selected the first eligible Node in the allowed list.",
       "fallback": "Used a fallback within the allowed list.",

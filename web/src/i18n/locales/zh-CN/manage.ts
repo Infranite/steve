@@ -45,10 +45,6 @@ export default {
       explicit: "你指定了这个 Bot",
       steve_selected: "Steve 选择了这个 Bot",
       only_eligible: "当前唯一合格的 Bot",
-      specialty: "匹配 Bot 专长",
-      description: "匹配 Bot 职责说明",
-      project_preference: "符合项目执行偏好",
-      stable_order: "按通用度、Team 顺序与执行节点优先级选定",
       coordinator_deferred: "Steve 自己做",
       existing_assignment: "使用事项已指派的 Bot",
       handoff_quota_exhausted: "额度不足自动交接",
@@ -65,6 +61,7 @@ export default {
       rejected: "候选 Bot 未入选原因",
       assignLabel: "指定一个 Bot 立即开工",
       assignAction: "指定并开工",
+      retryDispatch: "让 Steve 重新派发",
       later: "晚点再说（由 Steve 自己做）",
       laterHint: "选择后，这些事项由 Steve 自己执行，并将工作空间设置「无人可接时」改为「Steve 自己做」，之后无人可接的事项不再发卡询问；随时可在设置改回。",
       proposalAction: "确认新建并开工",
@@ -74,6 +71,8 @@ export default {
     "reason": {
       no_candidates: "所选范围内没有可承接此请求的已启用 Bot。",
       specialty: "这个 Bot 缺少必需的专长。",
+      dispatch_failed: "Steve 未能完成执行 Bot 选择（模型或本机 Node 不可用）。",
+      invalid_choice: "Steve 选择的 Bot 未通过硬校验。",
 
       "preferred": "选择允许范围内首个合格节点。",
       "fallback": "回退到允许范围内的备选节点。",

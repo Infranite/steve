@@ -5,6 +5,7 @@ import type { ItemView } from "./gen/ItemView.ts"
 export type StateKind =
   | "done" | "dropped" | "failed" | "proposed"
   | "asking"        // a card waits for you
+  | "dispatching"   // Steve is choosing an executor Bot asynchronously
   | "paused"        // the item is paused
   | "blocked"       // waiting for its prerequisites
   | "working"       // a session is running
@@ -16,10 +17,10 @@ export type DisplayStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" 
 export type ItemState = { kind: StateKind; tone: Tone; /** whose move: you, Steve, the agents, or nobody (closed) */ move: "you" | "steve" | "agents" | "none"; detail?: string }
 
 /** the fields of a store `Item` this reads */
-export type StateItem = { st: string; phase?: ItemView["state"]["kind"]; progress?: string; waits?: { q: string }[]; queued?: number; q?: unknown[] | null }
+export type StateItem = { st: string; phase?: ItemView["state"]["kind"]; dispatching?: boolean; progress?: string; waits?: { q: string }[]; queued?: number; q?: unknown[] | null }
 
 const TONE: Record<StateKind, Tone> = {
-  done: "done", dropped: "neutral", failed: "fail", proposed: "wait", asking: "wait",
+  done: "done", dropped: "neutral", failed: "fail", proposed: "wait", asking: "wait", dispatching: "run",
   paused: "pause", blocked: "pause", working: "run", queued: "run", closing: "run", idle: "neutral",
 }
 const YOURS: StateKind[] = ["proposed", "asking", "paused"]
@@ -27,7 +28,7 @@ const CLOSED: StateKind[] = ["done", "dropped", "failed"]
 
 /* the list's status of an item is its one state in lifecycle terms, so a row, its group and the item page agree */
 const AS_ST: Record<StateKind, DisplayStatus> = {
-  done: "done", dropped: "drop", failed: "fail", proposed: "prop", asking: "wait",
+  done: "done", dropped: "drop", failed: "fail", proposed: "prop", asking: "wait", dispatching: "run",
   paused: "pause", blocked: "block", working: "run", queued: "run", closing: "run", idle: "run",
 }
 
@@ -42,6 +43,7 @@ export function itemState(i: StateItem, running: boolean): ItemState {
   if (i.st === "prop") return make("proposed")
   if (i.waits?.length) return make("asking", i.waits[0].q)
   if (i.phase === "closing") return { ...make("closing"), move: "steve" }
+  if (i.dispatching) return { ...make("dispatching"), move: "steve" }
   if (running) return make("working", i.progress)
   if (i.st === "pause") return make("paused")
   if (i.st === "block") return make("blocked", i.progress)

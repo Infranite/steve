@@ -9,7 +9,7 @@ use rusqlite::Connection;
 use steve_store::{NoPublisher, Store, db};
 
 /// One table of each module migration, in migration order.
-const NEW_TABLES: [(&str, i64); 36] = [
+const NEW_TABLES: [(&str, i64); 37] = [
     ("connections", 5),
     ("ext_events", 6),
     ("spaces", 7),
@@ -46,6 +46,7 @@ const NEW_TABLES: [(&str, i64); 36] = [
     ("thread_notices", 130),
     ("chan_message_reactions", 146),
     ("chan_reply_sources", 146),
+    ("item_dispatch_jobs", 148),
 ];
 
 fn has_table(c: &Connection, name: &str) -> bool {
@@ -1790,7 +1791,7 @@ fn migration_128_strips_main_bot_from_teams_and_rewrites_steve_fallback() {
         .unwrap();
     assert_eq!(
         untouched.explanation.reason,
-        steve_types::PlacementReason::Specialty
+        steve_types::PlacementReason::ExistingAssignment
     );
     assert_eq!(untouched.explanation.deferred_by, None);
 
@@ -2005,4 +2006,82 @@ fn migration_141_rebinds_work_tidy_to_item_lifecycle_preserving_cursor() {
         ),
         1
     );
+}
+
+#[test]
+fn migration_148_creates_dispatch_jobs_and_cleans_legacy_scoring_reasons() {
+    let (_dir, path) = at_version(147);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO bots(id,workspace_id,name,main,harness,updated)
+             VALUES ('dev','default','Dev',0,'claude-code',1);
+           INSERT INTO items(id,workspace_id,no,title,bot_id,phase,created,updated)
+             VALUES ('ST-1','default',1,'A','dev','active',1,1),
+                    ('ST-2','default',2,'B','dev','active',1,1),
+                    ('ST-3','default',3,'C','dev','active',1,1),
+                    ('ST-4','default',4,'D','dev','active',1,1),
+                    ('ST-5','default',5,'E','dev','active',1,1);
+           INSERT INTO bot_placements(item_id,session_id,fact,blocked)
+             VALUES
+               ('ST-1',NULL,'{"rule_version":2,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":"default","explanation":{"bot":"dev","reason":"specialty","matched":["rust"],"rejected":[],"fallback":null}}',NULL),
+               ('ST-2',NULL,'{"rule_version":2,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":"default","explanation":{"bot":"dev","reason":"description","matched":["docs"],"rejected":[],"fallback":null}}',NULL),
+               ('ST-3',NULL,'{"rule_version":2,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":"default","explanation":{"bot":"dev","reason":"project_preference","matched":[],"rejected":[],"fallback":null}}',NULL),
+               ('ST-4',NULL,'{"rule_version":2,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":"default","explanation":{"bot":"dev","reason":"stable_order","matched":[],"rejected":[],"fallback":null}}',NULL),
+               ('ST-5',NULL,'{"rule_version":2,"bot_revision":1,"at":1,"node":"local","required_node":null,"node_priority":0,"harness":"claude-code","model":null,"reasoning_effort":"default","explanation":{"bot":"dev","reason":"explicit","matched":[],"rejected":[],"fallback":null}}',NULL);"#,
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    db::migrate_file(&path).unwrap();
+
+    for id in ["ST-1", "ST-2", "ST-3", "ST-4"] {
+        let fact = store
+            .read(|r| steve_store::bot_dispatch::initial(r, id))
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            fact.explanation.reason,
+            steve_types::PlacementReason::ExistingAssignment,
+            "{id}"
+        );
+    }
+    let explicit = store
+        .read(|r| steve_store::bot_dispatch::initial(r, "ST-5"))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        explicit.explanation.reason,
+        steve_types::PlacementReason::Explicit
+    );
+
+    store
+        .write(|w| {
+            steve_store::bot_dispatch::enqueue_dispatch(
+                w,
+                "default",
+                "ST-5",
+                Some("local"),
+                &["rust".into()],
+            )?;
+            assert!(steve_store::bot_dispatch::is_dispatching(w, "ST-5")?);
+            let job = steve_store::bot_dispatch::claim_next_dispatch(w, "att_1")?
+                .expect("claimed pending dispatch");
+            assert_eq!(job.item_id, "ST-5");
+            assert_eq!(job.required_node.as_deref(), Some("local"));
+            assert_eq!(job.required_specialties, vec!["rust"]);
+            assert_eq!(steve_store::bot_dispatch::reset_running_dispatches(w)?, 1);
+            let job2 = steve_store::bot_dispatch::claim_next_dispatch(w, "att_2")?
+                .expect("re-claimed after reset");
+            assert_eq!(job2.attempt_id.as_deref(), Some("att_2"));
+            assert!(!steve_store::bot_dispatch::finish_dispatch_if_matching(
+                w, "default", "ST-5", "att_1"
+            )?);
+            assert!(steve_store::bot_dispatch::finish_dispatch_if_matching(
+                w, "default", "ST-5", "att_2"
+            )?);
+            assert!(!steve_store::bot_dispatch::is_dispatching(w, "ST-5")?);
+            Ok::<_, steve_store::StoreError>(())
+        })
+        .unwrap();
 }

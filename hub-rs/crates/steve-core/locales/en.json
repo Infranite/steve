@@ -61,6 +61,8 @@
   "core.purpose.chat.desc": "Answers you directly in the conversation",
   "core.purpose.research.label": "In-place research",
   "core.purpose.research.desc": "Reads through projects and sources in the conversation, then answers; in your own conversation it can also act on this machine directly; moves to the next model only when one fails",
+  "core.purpose.dispatch.label": "Bot dispatch",
+  "core.purpose.dispatch.desc": "Inspects Bots and Nodes to choose an executor when multiple Bots are eligible for a new item; follows Steve's chat setting unless overridden",
   "core.purpose.title.label": "Titles",
   "core.purpose.title.desc": "Names new projects and writes a one-line description",
   "core.purpose.extract.label": "Memory extraction",

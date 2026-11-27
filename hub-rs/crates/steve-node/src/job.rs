@@ -370,6 +370,26 @@ async fn acp_think(
         &inner.cfg.acp.user_home,
         &properties.outer_sandbox_args,
     );
+    let exec = ExecutionRef::Job {
+        job: spec.job.clone(),
+        attempt: spec.run.attempt.clone(),
+    };
+    let mcp_servers = if think.steve_tools {
+        let Some(url) = inner.tools_url.lock().unwrap().clone() else {
+            return failed(OneShotError::Failed(
+                "Node tools server unavailable for think job".into(),
+            ));
+        };
+        let token = inner.tools.job_token(&exec);
+        json!([{
+            "type": "http",
+            "name": "steve",
+            "url": url,
+            "headers": [{ "name": "Authorization", "value": format!("Bearer {token}") }]
+        }])
+    } else {
+        json!([])
+    };
     let req = crate::acp_job::Request {
         cfg: &inner.cfg.acp,
         harness: &spec.run.choice.harness,
@@ -381,7 +401,7 @@ async fn acp_think(
         tools_off: think.tools == ThinkToolMode::None,
         mode: PermissionMode::Plan,
         prompt,
-        mcp_servers: json!([]),
+        mcp_servers,
         wrap: Some(&wrap),
         timeout: Duration::from_millis((spec.run.limits.deadline.0 - now()).max(0) as u64),
         prefix: spec.run.attempt.as_str(),
@@ -390,7 +410,12 @@ async fn acp_think(
         on_activity: None,
         emit_thoughts: false,
     };
-    match crate::acp_job::run_cancellable(req, spawned, &event, stop_execution.notified()).await {
+    let ran =
+        crate::acp_job::run_cancellable(req, spawned, &event, stop_execution.notified()).await;
+    if think.steve_tools {
+        inner.tools.revoke_job(&exec);
+    }
+    match ran {
         Ok(out) => Ran {
             reply: Ok(out.text),
             stop_reason: out.stop_reason,

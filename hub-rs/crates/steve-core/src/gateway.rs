@@ -281,6 +281,7 @@ impl CallSpec<'_> {
     pub fn authorize(&self) -> Result<()> {
         match (self.required_tools, self.auth_scope) {
             (ThinkTools::None, _) => Ok(()),
+            (ThinkTools::Dispatch, ThinkTools::Dispatch) => Ok(()),
             (ThinkTools::Read(required), ThinkTools::Read(granted))
                 if !required.is_empty() && required.iter().all(|file| granted.contains(file)) =>
             {
@@ -436,13 +437,120 @@ pub enum ThinkTools {
     None,
     /// The Read tool only, for these files (copied into the job directory).
     Read(Vec<Readable>),
+    /// Read-only Steve Bot/Node inspection tools (`steve_bots_list`, `steve_nodes_list`) via MCP.
+    Dispatch,
 }
 
 impl ThinkTools {
     /// Whether the call has any tool.
     pub fn any(&self) -> bool {
-        matches!(self, ThinkTools::Read(_))
+        matches!(self, ThinkTools::Read(_) | ThinkTools::Dispatch)
     }
+}
+
+/// Time limit for Steve's async Bot-selection Think job.
+pub const DISPATCH_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Parsed result of Steve's async Bot-selection Think job.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DispatchChoice {
+    pub bot: Option<String>,
+    pub why: Option<String>,
+}
+
+/// Prompt input describing an unassigned item and its hard dispatch constraints for Steve.
+pub struct DispatchPromptInput<'a> {
+    pub title: &'a str,
+    pub goal: &'a str,
+    pub tags: &'a [String],
+    pub project_id: Option<&'a str>,
+    pub project_name: Option<&'a str>,
+    pub team: Option<&'a steve_store::bot_dispatch::Team>,
+    pub required_node: Option<&'a str>,
+    pub node_tag: Option<&'a str>,
+    pub required_specialties: &'a [String],
+}
+
+/// Build the cached-head prompt for Steve's async Bot-selection Think job.
+pub fn dispatch_prompt(input: &DispatchPromptInput<'_>) -> String {
+    let head = concat!(
+        "你是 Steve，这个工作空间的协调者。现在有一个新建事项需要你思考并选出最合适的执行 Bot。\n",
+        "1. 先调用只读工具 steve_bots_list 和 steve_nodes_list，查看各 Bot 的角色描述、专长、默认项目、所属 Team、绑定 Node、当前负载与最近成果，以及各 Node 的在线状态、已就绪 harness、权限档位和负载容量。\n",
+        "2. 严格遵守下面给出的所有硬性约束（所属 Team、指定 Node、Node 标签、必需专长、项目、权限档位），不得选择主协调者 Bot（main=true）、已停用 Bot、不在 Team 里的 Bot，或所绑定 Node 离线 / harness 不可用的 Bot。\n",
+        "3. 结合任务目标、Bot 定位与当前负载做出真实判断，只输出一行 JSON，不要输出其他解释或 Markdown：\n",
+        "   {\"bot\":\"<bot_id>\",\"why\":\"<一句话说明为什么选这个 Bot>\"}\n",
+        "   如果核实后确实没有任何 Bot 满足条件，输出：{\"bot\":null,\"why\":\"<一句话原因>\"}"
+    );
+    let mut lines = vec![
+        format!("事项标题：{}", input.title.trim()),
+        format!("事项目标：{}", js_head(input.goal.trim(), 2000)),
+    ];
+    if !input.tags.is_empty() {
+        lines.push(format!("标签：{}", input.tags.join("、")));
+    }
+    if let Some(pid) = input.project_id {
+        let pname = input.project_name.unwrap_or(pid);
+        lines.push(format!("项目：{pname} ({pid})"));
+    }
+    if let Some(team) = input.team {
+        let members: Vec<&str> = team.members.iter().map(|m| m.bot.as_str()).collect();
+        lines.push(format!(
+            "限定 Team：{} ({})，成员 Bot ID：[{}]",
+            team.name,
+            team.id,
+            members.join(", ")
+        ));
+    }
+    if let Some(node) = input.required_node {
+        lines.push(format!("指定 Node：{node}"));
+    }
+    if let Some(tag) = input.node_tag {
+        lines.push(format!("要求 Node 标签：{tag}"));
+    }
+    if !input.required_specialties.is_empty() {
+        lines.push(format!(
+            "必需专长：{}",
+            input.required_specialties.join("、")
+        ));
+    }
+    with_static(head, &lines.join("\n"))
+}
+
+/// Strictly parse Steve's JSON choice `{"bot": "<id>" | null, "why": "..."}` from Think output.
+pub fn parse_dispatch_choice(text: &str) -> Option<DispatchChoice> {
+    #[derive(serde::Deserialize)]
+    struct RawChoice {
+        bot: Option<String>,
+        #[serde(default)]
+        why: Option<String>,
+    }
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let stripped = trimmed
+        .strip_prefix("```json")
+        .or_else(|| trimmed.strip_prefix("```"))
+        .map(str::trim)
+        .and_then(|s| s.strip_suffix("```"))
+        .map(str::trim)
+        .unwrap_or(trimmed);
+    let parsed: RawChoice = serde_json::from_str(stripped).ok().or_else(|| {
+        let start = stripped.rfind('{')?;
+        let end = stripped.rfind('}')?;
+        (start < end)
+            .then(|| serde_json::from_str(&stripped[start..=end]).ok())
+            .flatten()
+    })?;
+    let bot = parsed
+        .bot
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    let why = parsed
+        .why
+        .map(|s| js_head(s.trim(), MAX_OFFER_WHY_CHARS).to_owned())
+        .filter(|s| !s.is_empty());
+    Some(DispatchChoice { bot, why })
 }
 
 /// The tools of a chat answer: none without readable attachments, else Read for those files.

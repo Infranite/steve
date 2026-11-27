@@ -21,6 +21,7 @@ mod context_handoff;
 pub mod cycle;
 mod dependencies;
 mod diagnostics;
+pub mod dispatch;
 pub mod error;
 pub mod gateway;
 pub mod git;
@@ -121,6 +122,10 @@ pub(crate) struct Inner {
     /// Per-run cache of `(script_version, call_id)` pairs already verified for cross-version
     /// hydration so unused completed calls are not re-verified on every step; cleared on terminal.
     workflow_hydration_verified: Mutex<HashMap<String, std::collections::HashSet<(i64, String)>>>,
+    /// Wakes the background Steve bot-dispatch worker when a new job is enqueued.
+    dispatch_wake: Arc<tokio::sync::Notify>,
+    /// Concurrency cap across simultaneous Steve bot-dispatch Think jobs.
+    dispatch_permits: Arc<tokio::sync::Semaphore>,
 }
 
 /// What a session's last Steve tool call left behind, consumed at its turn end.
@@ -223,6 +228,10 @@ impl Core {
                 workflow_run::MAX_CONCURRENT_WORKFLOW_STEPS,
             )),
             workflow_hydration_verified: Default::default(),
+            dispatch_wake: Arc::new(tokio::sync::Notify::new()),
+            dispatch_permits: Arc::new(tokio::sync::Semaphore::new(
+                dispatch::MAX_CONCURRENT_DISPATCHES,
+            )),
         }))
     }
 

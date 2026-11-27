@@ -106,7 +106,7 @@ export default {
     done: "已完成", dropped: "已放弃", failed: "失败结束", proposed: "等你决定要不要做", asking: "等你决定",
     paused: "已暂停",
     blocked: "等前置事项完成", working: "正在做", queued: "你的消息在排队", idle: "没有在运行",
-    closing: "收尾中", steve: "Steve 正在处理",
+    closing: "收尾中", dispatching: "Steve 正在安排执行者", steve: "Steve 正在处理",
     you: "该你了", agents: "等 agent 处理",
     idleHint: "它停下了，没有在运行，也没有问你。需要继续就在下面说一声。",
     progress: "进度", details: "详情", moreProps: "更多属性",

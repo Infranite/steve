@@ -2186,6 +2186,9 @@ mod tests {
             catalog::describe();
             metrics::counter!("steve_bot_selection_total", "reason" => "steve_selected")
                 .increment(1);
+            metrics::histogram!("steve_dispatch_job_duration_seconds", "outcome" => "selected")
+                .record(0.25);
+            metrics::counter!("steve_dispatch_job_total", "outcome" => "selected").increment(1);
             metrics::counter!(
                 "steve_dispatch_invalid_choice_total",
                 "source" => "offer",
@@ -2203,10 +2206,13 @@ mod tests {
         let text = handle.render();
         for line in [
             "# HELP steve_bot_selection_total ",
+            "# HELP steve_dispatch_job_duration_seconds ",
+            "# HELP steve_dispatch_job_total ",
             "# HELP steve_dispatch_invalid_choice_total ",
             "# HELP steve_offer_bot_override_total ",
             "# HELP steve_offer_action_total ",
             "steve_bot_selection_total{reason=\"steve_selected\"} 1",
+            "steve_dispatch_job_total{outcome=\"selected\"} 1",
             "steve_dispatch_invalid_choice_total{source=\"offer\",reason=\"offline\"} 1",
             "steve_offer_bot_override_total{from=\"valid\"} 1",
             "steve_offer_action_total{action=\"take\",bot_override=\"explicit\"} 1",
