@@ -1,5 +1,6 @@
-import { researchEvent } from "@/thread/chat-progress"
+import { isResearchSnapshot, liveRunFromSnapshot, researchEvent, researchProgressEvent } from "@/thread/chat-progress"
 export type { LiveRun } from "@/thread/chat-progress"
+import type { ThreadLiveThought, ThreadPlanEntry, ThreadSubtask } from "@/gen"
 import { debounceMax } from "./live-utils"
 import { appendTranscript, getTranscript, recoverTranscripts, resetTranscripts, useTranscripts } from "./data/transcript"
 export { briefHead } from "./data/transcript-model"
@@ -101,7 +102,10 @@ export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fa
 /** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
 export type Steps = { route?: { kind: string; modelKind?: string; guard?: string | null; confidence?: number; title: string; bot: string; project: string | null; tags: string[]; newTags: string[]; why: string; model: string | null; fallback: boolean; ms: number; picked?: string }; answer?: { thought: string; model: string | null; ms: number; failed: boolean }
   research?: { run: string; model: string | null; ms: number; turns: number; tools: number; stopped?: "user" | "budget" | "violation" | "restart" | "failed" }
-  tools: { name: string; call?: number; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps */ kind?: string; args: Record<string, any>; result?: Record<string, any>; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
+  plan?: ThreadPlanEntry[]
+  thoughts?: ThreadLiveThought[]
+  subtasks?: ThreadSubtask[]
+  tools: { name: string; call?: number; /** the category the adapter gave the call (`read`, `exec`, …); absent on Steve's own steps */ kind?: string; description?: string; args: Record<string, any>; result?: Record<string, any>; excerpt?: string; status: "ok" | "failed"; error?: string; ms: number }[]; ms?: number }
 /** an open decision with no item (a forked or imported session, or its item was deleted): shown with the same card */
 export type Orphan = { i: Item; w: Wait }
 export type Project = RProject
@@ -727,8 +731,35 @@ async function loadSummary() {
     if (st.hold === hold) { st.hold = summary.hold; changed = true }
     if (st.localNodeUpdating === updating) { st.localNodeUpdating = summary.local_node_updating ?? null; changed = true }
     if (changed) emit()
-    if (chatLive() === live && live.thinking !== summary.thinking) {
-      updateChat(summary.thinking ? { thinking: true } : { thinking: false, draft: null, live: null, phase: "" })
+    if (chatLive() === live) {
+      if (summary.live) {
+        const snap = summary.live
+        const restoredLive = isResearchSnapshot(snap) ? liveRunFromSnapshot(snap) : null
+        const restoredDraft = (snap.draft_text || snap.draft_thought)
+          ? {
+              mid: snap.mid ?? snap.run,
+              thought: snap.draft_thought ?? "",
+              text: snap.draft_text ?? "",
+              t0: snap.started_at,
+              t1: snap.draft_text ? snap.last_activity_at : undefined,
+            }
+          : null
+        updateChat({
+          thinking: true,
+          phase: snap.phase ?? "",
+          thinkingStartedAt: snap.started_at,
+          thinkingAt: snap.last_activity_at,
+          thinkingStage: snap.stage,
+          live: restoredLive,
+          draft: restoredDraft,
+        })
+      } else if (live.thinking !== summary.thinking) {
+        updateChat(
+          summary.thinking
+            ? { thinking: true, thinkingStartedAt: live.thinkingStartedAt ?? Date.now() }
+            : { thinking: false, thinkingStartedAt: undefined, thinkingAt: undefined, thinkingStage: undefined, draft: null, live: null, phase: "" },
+        )
+      }
     }
   } catch (e) { if (scope === scopeKey()) fetchFailed(e) }
 }
@@ -831,7 +862,12 @@ function onHub(e: HubEvent) {
         updateChat({ drafted: op.id, draftedStart: draft.t0, draft: null })
       }
       if (live && m.origin === live.mid && m.steps?.research?.run === live.run) {
-        updateChat({ live: null, ...(phase === "research" || phase === "answer" ? { thinking: false, phase: "" } : {}) })
+        updateChat({
+          live: null,
+          ...(phase === "research" || phase === "answer"
+            ? { thinking: false, phase: "", thinkingStartedAt: undefined, thinkingAt: undefined, thinkingStage: undefined }
+            : {}),
+        })
       }
     }
     if (e.ops.some((op) => op.type === "item")) void qc.invalidateQueries({ queryKey: tagUsesKey() })
@@ -866,21 +902,56 @@ function onHub(e: HubEvent) {
   if (e.type === "release.hold") { st.hold = e.hold as RHold | null; emit(); return }
   if (e.type === "local_node.updating") { st.localNodeUpdating = e.updating as RLocalNodeUpdating | null; emit(); return }
   if (e.type === "steve.draft") {
-    const { draft } = chatLive()
+    const cur = chatLive(), { draft } = cur
     if (nextDraft || draft?.mid !== e.mid) priorDraftReplies = new Set(messageViews().map(msgOfView).filter((m) => m.k === "steve" && m.origin === e.mid).map((m) => m.id!))
     nextDraft = false
     const was = draft?.mid === e.mid ? draft : undefined, now = Date.now()
-    updateChat({ draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) } }, was && !!was.text === !!e.text ? "reply" : "frame")
+    updateChat({
+      draft: { mid: e.mid, thought: e.thought, text: e.text, t0: was?.t0 ?? now, t1: was?.t1 ?? (e.text ? now : undefined) },
+      thinkingAt: now,
+      thinkingStage: e.text ? "writing" : e.thought ? "thinking" : cur.thinkingStage,
+    }, was && !!was.text === !!e.text ? "reply" : "frame")
     return
   }
   if (e.type === "steve.tool") {
-    if (!hasCompletedResearchRun(e.run))
-      updateChat({ live: researchEvent(chatLive().live, e) }, "frame")
+    if (!hasCompletedResearchRun(e.run)) {
+      const cur = chatLive()
+      const nextLive = researchEvent(cur.live, e)
+      updateChat({
+        live: nextLive,
+        thinkingStartedAt: nextLive.startedAt ?? cur.thinkingStartedAt,
+        thinkingAt: e.at ?? nextLive.at ?? cur.thinkingAt,
+      }, "frame")
+    }
+    return
+  }
+  if (e.type === "steve.progress") {
+    if (!hasCompletedResearchRun(e.run)) {
+      const cur = chatLive()
+      const nextLive = researchProgressEvent(cur.live, e)
+      updateChat({
+        live: nextLive,
+        thinkingStartedAt: nextLive.startedAt ?? cur.thinkingStartedAt,
+        thinkingAt: e.at ?? nextLive.at ?? cur.thinkingAt,
+      }, "frame")
+    }
     return
   }
   if (e.type === "steve.thinking") {
-    if (e.on && !chatLive().thinking) nextDraft = true
-    updateChat({ thinking: e.on, phase: e.on ? e.phase ?? "" : "" })
+    const cur = chatLive(), now = Date.now()
+    if (e.on && !cur.thinking) nextDraft = true
+    const staleLive = e.on && !cur.thinking && cur.live != null && (
+      hasCompletedResearchRun(cur.live.run)
+      || (e.started_at != null && cur.live.startedAt != null && e.started_at > cur.live.startedAt)
+    )
+    updateChat({
+      thinking: e.on,
+      phase: e.on ? e.phase ?? "" : "",
+      thinkingStartedAt: e.on ? (e.started_at ?? cur.thinkingStartedAt ?? now) : undefined,
+      thinkingAt: e.on ? (e.at ?? now) : undefined,
+      thinkingStage: undefined,
+      ...(staleLive ? { live: null } : {}),
+    })
     cue(e.on ? "think" : "reply")
     if (!e.on) {
       const { draft, live } = chatLive(), scope = scopeKey()

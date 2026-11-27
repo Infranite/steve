@@ -38,6 +38,8 @@ pub fn typed(ty: &str, ws: &str) -> BusEvent {
             on: true,
             ws: ws.into(),
             phase: None,
+            started_at: None,
+            at: None,
         })
         .into(),
         "steve.draft" => LiveEvent::from(WorkLiveEvent::SteveDraft {
@@ -59,6 +61,22 @@ pub fn typed(ty: &str, ws: &str) -> BusEvent {
             call: None,
             started_at: None,
             at: None,
+            description: String::new(),
+            step_started_at: None,
+            ms: None,
+            excerpt: None,
+            error: None,
+        })
+        .into(),
+        "steve.progress" => LiveEvent::from(WorkLiveEvent::SteveProgress {
+            ws: ws.into(),
+            mid: "entity".into(),
+            run: "entity".into(),
+            started_at: None,
+            at: None,
+            body: steve_types::ThreadProgressKind::Stage {
+                stage: steve_types::ThreadResearchStage::Thinking,
+            },
         })
         .into(),
         "workflow.run" => DomainEvent::from(WorkEvent::WorkflowRun {

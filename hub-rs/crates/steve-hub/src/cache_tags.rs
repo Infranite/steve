@@ -72,6 +72,7 @@ pub fn tags(event: &BusEvent) -> Tags {
             WorkLiveEvent::Event { .. }
             | WorkLiveEvent::SteveDraft { .. }
             | WorkLiveEvent::SteveTool { .. }
+            | WorkLiveEvent::SteveProgress { .. }
             | WorkLiveEvent::SteveThinking { .. } => {}
         },
         BusEvent::Patch(_) => {}

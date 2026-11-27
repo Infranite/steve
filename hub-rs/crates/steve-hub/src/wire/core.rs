@@ -1773,6 +1773,9 @@ impl CoreDomain {
     pub fn thread_active(&self, ws: &str) -> bool {
         self.core.thread_active(ws)
     }
+    pub fn thread_live(&self, ws: &str) -> Option<steve_types::ThreadLiveSnapshot> {
+        self.core.thread_live(ws)
+    }
     pub async fn thread_queued_edit(&self, ws: &str, message: &str, text: &str) -> BResult<bool> {
         let (c, ws, m, t) = (
             self.core.clone(),

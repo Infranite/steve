@@ -781,3 +781,105 @@ test("shell subscribers ignore view patches and chatQueue caches across non-mess
   assert.equal(s.chatQueue(), queueBefore, "chatQueue keeps cached identity across unrelated item patches")
   off()
 })
+
+test("steve.thinking started_at persists across steve.progress/steve.tool and /api/summary hydrates reload snapshot", async () => {
+  const h = harness(), s = h.store
+  h.api.summary = async () => ({
+    ws: "ws",
+    workspace_name: "Default",
+    thinking: true,
+    hold: null,
+    live: {
+      run: "run-hyd",
+      mid: "m-hyd",
+      started_at: 10_000,
+      last_activity_at: 18_000,
+      stage: "thinking",
+      phase: "research",
+      plan: [{ content: "Read files", status: "completed" }, { content: "Summarize", status: "in_progress" }],
+      thoughts: [{ id: "th-1", text: "Comparing paths", started_at: 11_000, at: 14_000, done: true }],
+      tools: [{ call: 1, name: "Read", kind: "read", brief: "a.ts", description: "Read entrypoint", running: false, ok: true, started_at: 12_000, at: 13_000, ms: 1000, excerpt: "fn main()" }],
+      subtasks: [{ id: "sub-1", origin: "subagent", status: "running", title: "Scan UI", started_at: 15_000 }],
+      draft_text: "Partial answer",
+      draft_thought: "",
+    },
+  })
+  s.start(); await flush()
+  const restored = h.chat.chatLive()
+  assert.equal(restored.thinking, true)
+  assert.equal(restored.thinkingStartedAt, 10_000)
+  assert.equal(restored.thinkingAt, 18_000)
+  assert.equal(restored.live.run, "run-hyd")
+  assert.equal(restored.live.plan.length, 2)
+  assert.equal(restored.live.tools[0].excerpt, "fn main()")
+  assert.equal(restored.draft.text, "Partial answer")
+
+  h.event({ type: "steve.thinking", on: false, ws: "ws", at: 20_000 }); await h.tick(1500)
+  assert.equal(h.chat.chatLive().thinking, false)
+  assert.equal(h.chat.chatLive().thinkingStartedAt, undefined)
+
+  h.event({ type: "steve.thinking", on: true, ws: "ws", started_at: 30_000, at: 30_000 })
+  assert.equal(h.chat.chatLive().thinkingStartedAt, 30_000)
+  h.event({ type: "steve.progress", ws: "ws", mid: "m-2", run: "run-2", started_at: 30_000, at: 32_000, body: { kind: "stage", stage: "submitted" } })
+  await h.tick(0)
+  assert.equal(h.chat.chatLive().thinkingStartedAt, 30_000)
+  assert.equal(h.chat.chatLive().thinkingAt, 32_000)
+  assert.equal(h.chat.chatLive().live.stage, "submitted")
+})
+
+test("direct answer reload keeps live null while restoring draft thought, and draft/patch maintain activity timers", async () => {
+  const h = harness(), s = h.store
+  h.api.summary = async () => ({
+    ws: "ws",
+    workspace_name: "Default",
+    thinking: true,
+    hold: null,
+    live: {
+      run: "run-ans",
+      mid: "m-ans",
+      started_at: 50_000,
+      last_activity_at: 54_000,
+      stage: "thinking",
+      phase: "answer",
+      plan: [],
+      thoughts: [],
+      tools: [],
+      subtasks: [],
+      draft_text: "",
+      draft_thought: "Direct answer reasoning",
+    },
+  })
+  s.start(); await flush()
+  const hydrated = h.chat.chatLive()
+  assert.equal(hydrated.thinking, true)
+  assert.equal(hydrated.live, null, "non-research snapshot must not fabricate an empty research live run")
+  assert.equal(hydrated.thinkingStage, "thinking")
+  assert.equal(hydrated.thinkingStartedAt, 50_000)
+  assert.equal(hydrated.thinkingAt, 54_000)
+  assert.equal(hydrated.draft.thought, "Direct answer reasoning")
+
+  h.event({ type: "steve.draft", ws: "ws", mid: "m-ans", thought: "Direct answer reasoning", text: "Streaming reply" })
+  await h.tick(0)
+  assert.equal(h.chat.chatLive().thinkingStage, "writing")
+  assert.ok((h.chat.chatLive().thinkingAt ?? 0) >= 54_000, "draft chunks advance last activity time")
+
+  deliverMessage(h, chatMessage("reply-ans", "steve", "m-ans"))
+  assert.equal(h.chat.chatLive().draft, null)
+  h.event({ type: "steve.thinking", on: false, ws: "ws", at: 55_000 })
+  assert.equal(h.chat.chatLive().thinking, false)
+  assert.equal(h.chat.chatLive().thinkingStartedAt, undefined)
+  assert.equal(h.chat.chatLive().thinkingAt, undefined)
+  assert.equal(h.chat.chatLive().thinkingStage, undefined)
+
+  // Research completion patch clears live and timing fields immediately before steve.thinking(false).
+  h.event({ type: "steve.thinking", on: true, ws: "ws", phase: "research", started_at: 60_000, at: 60_000 })
+  h.event({ type: "steve.tool", ws: "ws", mid: "m-res", run: "run-res", name: "Read", kind: "read", brief: "a.ts", running: true, ok: true, started_at: 60_000, at: 61_000 })
+  await h.tick(0)
+  assert.equal(h.chat.chatLive().live?.run, "run-res")
+  deliverMessage(h, { id: "reply-res", author: "steve", text: "done", created: 62_000, item_id: null, meta: { origin: "m-res", steps: { research: { run: "run-res", ms: 2000 } } } })
+  assert.equal(h.chat.chatLive().live, null)
+  assert.equal(h.chat.chatLive().thinking, false)
+  assert.equal(h.chat.chatLive().thinkingStartedAt, undefined)
+  assert.equal(h.chat.chatLive().thinkingAt, undefined)
+  assert.equal(h.chat.chatLive().thinkingStage, undefined)
+})

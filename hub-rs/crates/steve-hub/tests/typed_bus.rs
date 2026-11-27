@@ -38,6 +38,8 @@ fn thinking() -> LiveEvent {
         on: true,
         ws: "a".into(),
         phase: None,
+        started_at: None,
+        at: None,
     }
     .into()
 }

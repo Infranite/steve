@@ -314,6 +314,8 @@ struct Summary {
     #[serde(skip_serializing_if = "Option::is_none")]
     update: Option<UpdateNotice>,
     thinking: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    live: Option<steve_types::ThreadLiveSnapshot>,
     hold: Value,
     local_node_updating: Option<steve_types::devices::LocalNodeUpdating>,
     sessions_running: usize,
@@ -341,7 +343,11 @@ pub async fn summary(
     let facts = st.read(move |r| Ok(r.summary_facts(&ws_for_read)?));
     let (snap, hold, facts) = tokio::join!(snap, st.domain.hold_status(), facts);
     let facts = facts?;
-    let thinking = facts.pending || st.domain.thread_active(&ws);
+    let live = st.domain.thread_live(&ws);
+    if live.is_some() {
+        metrics::counter!("steve_thread_live_hydrations_total").increment(1);
+    }
+    let thinking = facts.pending || live.is_some() || st.domain.thread_active(&ws);
     let workspace_name = steve_store::seeded::shown(
         &facts.workspace_name,
         &[steve_store::seeded::WORKSPACE_NAME],
@@ -369,6 +375,7 @@ pub async fn summary(
             web_version: crate::web::web_version(&st.cfg),
             update: update(&st, owner),
             thinking,
+            live,
             hold: hold?,
             local_node_updating: st.nodes.as_ref().and_then(|s| s.local_status.get()),
             sessions_running,

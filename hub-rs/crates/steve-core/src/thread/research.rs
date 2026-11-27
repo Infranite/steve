@@ -11,6 +11,7 @@ use crate::repo::{Bot, FileRef, Project};
 use crate::util::{js_head, now};
 use async_trait::async_trait;
 use serde_json::{Value, json};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, Mutex};
 use steve_store::{CommitOutcome, CommitReplyInput, ThreadTask, thread};
@@ -30,6 +31,20 @@ pub struct ToolSeen {
     pub ok: bool,
     pub error: Option<String>,
     pub ms: i64,
+    pub description: String,
+    pub step_started_at: Option<i64>,
+    pub excerpt: Option<String>,
+}
+
+/// Running view of an in-flight tool call emitted by a research executor.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ToolRunningSeen<'a> {
+    pub call: Option<u32>,
+    pub name: &'a str,
+    pub kind: &'a str,
+    pub brief: &'a str,
+    pub description: &'a str,
+    pub step_started_at: i64,
 }
 
 /// How a research run ended.
@@ -100,7 +115,11 @@ pub const RESUME_WINDOW: i64 = 30 * 60 * 1000;
 pub trait ResearchSink: Send + Sync {
     fn text(&self, text: &str);
     fn tool(&self, t: &ToolSeen);
-    fn tool_running(&self, _call: Option<u32>, _name: &str, _kind: &str, _brief: &str) {}
+    fn tool_running(&self, _t: &ToolRunningSeen<'_>) {}
+    fn stage(&self, _stage: steve_types::ThreadResearchStage) {}
+    fn thought(&self, _id: &str, _text: &str, _done: bool) {}
+    fn plan(&self, _entries: &[steve_types::ThreadPlanEntry]) {}
+    fn subtask(&self, _subtask: &steve_types::ThreadSubtask) {}
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -140,6 +159,7 @@ struct Drafts<'a> {
     stop: &'a Stop,
     state: Arc<Mutex<DraftState>>,
     quiet: bool,
+    task_id: Option<&'a str>,
 }
 
 #[derive(Default)]
@@ -152,13 +172,21 @@ struct DraftState {
 }
 
 impl<'a> Drafts<'a> {
-    fn new(core: &'a Core, ws: &'a str, mid: &'a str, stop: &'a Stop, quiet: bool) -> Self {
+    fn new(
+        core: &'a Core,
+        ws: &'a str,
+        mid: &'a str,
+        stop: &'a Stop,
+        quiet: bool,
+        task_id: Option<&'a str>,
+    ) -> Self {
         Self {
             core,
             ws,
             mid,
             stop,
             quiet,
+            task_id,
             state: Default::default(),
         }
     }
@@ -174,6 +202,20 @@ impl<'a> Drafts<'a> {
         }
         l.thought = thought.into();
         l.text = text.into();
+        if let Some(tid) = self.task_id {
+            let at = now();
+            self.core.update_live_main(self.ws, tid, |s| {
+                s.mid = Some(self.mid.to_owned().into());
+                s.draft_thought = l.thought.clone();
+                s.draft_text = l.text.clone();
+                s.last_activity_at = steve_types::Millis(at);
+                if !l.text.is_empty() {
+                    s.stage = Some(steve_types::ThreadResearchStage::Writing);
+                } else if !l.thought.is_empty() {
+                    s.stage = Some(steve_types::ThreadResearchStage::Thinking);
+                }
+            });
+        }
         let wait = DRAFT_EVERY - (now() - l.sent);
         if l.pending {
             return;
@@ -227,12 +269,32 @@ impl Drop for Drafts<'_> {
     }
 }
 
+#[derive(Default)]
+struct ThoughtTracker {
+    started_at: HashMap<String, i64>,
+    last_sent: HashMap<String, i64>,
+}
+
+fn stage_for_tool_kind(kind: &str) -> steve_types::ThreadResearchStage {
+    match kind {
+        "read" => steve_types::ThreadResearchStage::Reading,
+        "search" => steve_types::ThreadResearchStage::Searching,
+        "exec" => steve_types::ThreadResearchStage::Executing,
+        "edit" | "delete" | "move" => steve_types::ThreadResearchStage::Editing,
+        "fetch" => steve_types::ThreadResearchStage::Fetching,
+        "think" => steve_types::ThreadResearchStage::Thinking,
+        _ => steve_types::ThreadResearchStage::CallingTool,
+    }
+}
+
 struct Sink<'a> {
     drafts: Drafts<'a>,
     run: &'a str,
     steps: &'a Mutex<Steps>,
+    turn_t0: i64,
     t0: i64,
     first_text: Mutex<Option<i64>>,
+    thoughts: Mutex<ThoughtTracker>,
 }
 
 impl ResearchSink for Sink<'_> {
@@ -242,9 +304,29 @@ impl ResearchSink for Sink<'_> {
     }
 
     fn tool(&self, t: &ToolSeen) {
+        let at = now();
+        let description = super::progress::redact_and_bound(
+            &t.description,
+            super::progress::MAX_TOOL_DESCRIPTION_CHARS,
+        );
+        let excerpt = t
+            .excerpt
+            .as_deref()
+            .map(|s| super::progress::redact_and_bound(s, super::progress::MAX_TOOL_EXCERPT_CHARS))
+            .filter(|s| !s.is_empty());
+        let error = t
+            .error
+            .as_deref()
+            .map(|s| super::progress::redact_and_bound(s, super::progress::MAX_TOOL_ERROR_CHARS))
+            .filter(|s| !s.is_empty());
+        let brief = super::progress::redact_and_bound(
+            &t.brief,
+            super::progress::MAX_TOOL_DESCRIPTION_CHARS,
+        );
+
         let mut step = json!({
             "name": t.name,
-            "args": {"brief": t.brief},
+            "args": {"brief": brief},
             "status": if t.ok { "ok" } else { "failed" },
             "ms": t.ms,
         });
@@ -254,13 +336,61 @@ impl ResearchSink for Sink<'_> {
         if !t.kind.is_empty() {
             step["kind"] = json!(t.kind);
         }
-        if let Some(error) = &t.error {
-            step["error"] = json!(error);
+        if !description.is_empty() {
+            step["description"] = json!(description);
+        }
+        if let Some(ref ex) = excerpt {
+            step["excerpt"] = json!(ex);
+        }
+        if let Some(ref err) = error {
+            step["error"] = json!(err);
         }
         lock(self.steps).tools.push(step);
         let d = &self.drafts;
         if d.quiet {
             return;
+        }
+        metrics::counter!("steve_thread_progress_events_total", "kind" => "tool_done").increment(1);
+        if let Some(tid) = d.task_id {
+            d.core.update_live_main(d.ws, tid, |s| {
+                s.last_activity_at = steve_types::Millis(at);
+                let live_tool = steve_types::ThreadLiveTool {
+                    call: t.call,
+                    name: t.name.clone(),
+                    kind: t.kind.clone(),
+                    brief: brief.clone(),
+                    description: description.clone(),
+                    running: false,
+                    ok: t.ok,
+                    started_at: t.step_started_at.map(steve_types::Millis),
+                    at: Some(steve_types::Millis(at)),
+                    ms: Some(t.ms.max(0) as u64),
+                    excerpt: excerpt.clone(),
+                    error: error.clone(),
+                };
+                if let Some(call) = t.call
+                    && let Some(slot) = s
+                        .tools
+                        .iter_mut()
+                        .rev()
+                        .find(|item| item.call == Some(call) && item.running)
+                {
+                    *slot = live_tool;
+                } else {
+                    s.tools.push(live_tool);
+                    if s.tools.len() > super::progress::MAX_TOOLS_IN_SNAPSHOT {
+                        let excess = s.tools.len() - super::progress::MAX_TOOLS_IN_SNAPSHOT;
+                        s.tools.drain(..excess);
+                    }
+                }
+                if let Some(active_tool) = s.tools.iter().rev().find(|item| item.running) {
+                    s.stage = Some(stage_for_tool_kind(&active_tool.kind));
+                } else if s.thoughts.iter().any(|th| !th.done) {
+                    s.stage = Some(steve_types::ThreadResearchStage::Thinking);
+                } else if s.draft_text.is_empty() {
+                    s.stage = Some(steve_types::ThreadResearchStage::Responding);
+                }
+            });
         }
         d.core.store().store().publish(steve_types::LiveEvent::from(
             steve_types::WorkLiveEvent::SteveTool {
@@ -268,35 +398,312 @@ impl ResearchSink for Sink<'_> {
                 mid: d.mid.to_owned().into(),
                 run: self.run.to_owned(),
                 name: t.name.clone(),
-                brief: t.brief.clone(),
+                brief,
                 ok: t.ok,
                 kind: t.kind.clone(),
                 running: false,
                 call: t.call,
-                started_at: Some(steve_types::Millis(self.t0)),
-                at: Some(steve_types::Millis(now())),
+                started_at: Some(steve_types::Millis(self.turn_t0)),
+                at: Some(steve_types::Millis(at)),
+                description,
+                step_started_at: t.step_started_at.map(steve_types::Millis),
+                ms: Some(t.ms.max(0) as u64),
+                excerpt,
+                error,
             },
         ));
     }
 
-    fn tool_running(&self, call: Option<u32>, name: &str, kind: &str, brief: &str) {
+    fn tool_running(&self, t: &ToolRunningSeen<'_>) {
         let d = &self.drafts;
         if d.quiet {
             return;
+        }
+        let at = now();
+        let brief =
+            super::progress::redact_and_bound(t.brief, super::progress::MAX_TOOL_DESCRIPTION_CHARS);
+        let description = super::progress::redact_and_bound(
+            t.description,
+            super::progress::MAX_TOOL_DESCRIPTION_CHARS,
+        );
+        metrics::counter!("steve_thread_progress_events_total", "kind" => "tool_running")
+            .increment(1);
+        if let Some(tid) = d.task_id {
+            let stage = stage_for_tool_kind(t.kind);
+            d.core.update_live_main(d.ws, tid, |s| {
+                s.last_activity_at = steve_types::Millis(at);
+                s.stage = Some(stage);
+                let live_tool = steve_types::ThreadLiveTool {
+                    call: t.call,
+                    name: t.name.into(),
+                    kind: t.kind.into(),
+                    brief: brief.clone(),
+                    description: description.clone(),
+                    running: true,
+                    ok: true,
+                    started_at: Some(steve_types::Millis(t.step_started_at)),
+                    at: Some(steve_types::Millis(at)),
+                    ms: None,
+                    excerpt: None,
+                    error: None,
+                };
+                if let Some(call) = t.call
+                    && let Some(slot) = s
+                        .tools
+                        .iter_mut()
+                        .rev()
+                        .find(|item| item.call == Some(call))
+                {
+                    *slot = live_tool;
+                } else {
+                    s.tools.push(live_tool);
+                    if s.tools.len() > super::progress::MAX_TOOLS_IN_SNAPSHOT {
+                        let excess = s.tools.len() - super::progress::MAX_TOOLS_IN_SNAPSHOT;
+                        s.tools.drain(..excess);
+                    }
+                }
+            });
         }
         d.core.store().store().publish(steve_types::LiveEvent::from(
             steve_types::WorkLiveEvent::SteveTool {
                 ws: d.ws.to_owned().into(),
                 mid: d.mid.to_owned().into(),
                 run: self.run.to_owned(),
-                name: name.into(),
-                brief: brief.into(),
+                name: t.name.into(),
+                brief,
                 ok: true,
-                kind: kind.into(),
+                kind: t.kind.into(),
                 running: true,
-                call,
-                started_at: Some(steve_types::Millis(self.t0)),
-                at: Some(steve_types::Millis(now())),
+                call: t.call,
+                started_at: Some(steve_types::Millis(self.turn_t0)),
+                at: Some(steve_types::Millis(at)),
+                description,
+                step_started_at: Some(steve_types::Millis(t.step_started_at)),
+                ms: None,
+                excerpt: None,
+                error: None,
+            },
+        ));
+    }
+
+    fn stage(&self, stage: steve_types::ThreadResearchStage) {
+        let d = &self.drafts;
+        if d.quiet {
+            return;
+        }
+        let at = now();
+        metrics::counter!("steve_thread_progress_events_total", "kind" => "stage").increment(1);
+        if let Some(tid) = d.task_id {
+            d.core.update_live_main(d.ws, tid, |s| {
+                s.stage = Some(stage);
+                s.last_activity_at = steve_types::Millis(at);
+            });
+        }
+        d.core.store().store().publish(steve_types::LiveEvent::from(
+            steve_types::WorkLiveEvent::SteveProgress {
+                ws: d.ws.to_owned().into(),
+                mid: d.mid.to_owned().into(),
+                run: self.run.to_owned(),
+                started_at: Some(steve_types::Millis(self.turn_t0)),
+                at: Some(steve_types::Millis(at)),
+                body: steve_types::ThreadProgressKind::Stage { stage },
+            },
+        ));
+    }
+
+    fn thought(&self, id: &str, text: &str, done: bool) {
+        let d = &self.drafts;
+        if d.quiet {
+            return;
+        }
+        let clean = super::progress::redact_and_bound(text, super::progress::MAX_THOUGHT_CHARS);
+        if clean.is_empty() && !done {
+            return;
+        }
+        let at = now();
+        let (started_at, should_emit) = {
+            let mut tracker = lock(&self.thoughts);
+            let started_at = *tracker.started_at.entry(id.to_string()).or_insert(at);
+            let emit = done
+                || tracker
+                    .last_sent
+                    .get(id)
+                    .is_none_or(|prev| at - *prev >= super::progress::THOUGHT_THROTTLE_MS);
+            if emit {
+                tracker.last_sent.insert(id.to_string(), at);
+            }
+            (started_at, emit)
+        };
+        let entry = steve_types::ThreadLiveThought {
+            id: id.to_string(),
+            text: clean.clone(),
+            started_at: steve_types::Millis(started_at),
+            at: Some(steve_types::Millis(at)),
+            done,
+        };
+        {
+            let mut st = lock(self.steps);
+            if let Some(slot) = st.thoughts.iter_mut().find(|t| t.id == id) {
+                *slot = entry.clone();
+            } else {
+                st.thoughts.push(entry.clone());
+                if st.thoughts.len() > super::progress::MAX_THOUGHTS_IN_SNAPSHOT {
+                    let excess = st.thoughts.len() - super::progress::MAX_THOUGHTS_IN_SNAPSHOT;
+                    st.thoughts.drain(..excess);
+                }
+            }
+        }
+        if let Some(tid) = d.task_id {
+            d.core.update_live_main(d.ws, tid, |s| {
+                s.last_activity_at = steve_types::Millis(at);
+                if let Some(slot) = s.thoughts.iter_mut().find(|t| t.id == id) {
+                    *slot = entry;
+                } else {
+                    s.thoughts.push(entry);
+                    if s.thoughts.len() > super::progress::MAX_THOUGHTS_IN_SNAPSHOT {
+                        let excess = s.thoughts.len() - super::progress::MAX_THOUGHTS_IN_SNAPSHOT;
+                        s.thoughts.drain(..excess);
+                    }
+                }
+                if !done {
+                    s.stage = Some(steve_types::ThreadResearchStage::Thinking);
+                } else if !s.tools.iter().any(|item| item.running)
+                    && !s.thoughts.iter().any(|th| !th.done)
+                    && s.draft_text.is_empty()
+                    && s.stage == Some(steve_types::ThreadResearchStage::Thinking)
+                {
+                    s.stage = Some(steve_types::ThreadResearchStage::Responding);
+                }
+            });
+        }
+        if !should_emit {
+            metrics::counter!("steve_thread_progress_throttled_total", "kind" => "thought")
+                .increment(1);
+            return;
+        }
+        metrics::counter!("steve_thread_progress_events_total", "kind" => "thought").increment(1);
+        d.core.store().store().publish(steve_types::LiveEvent::from(
+            steve_types::WorkLiveEvent::SteveProgress {
+                ws: d.ws.to_owned().into(),
+                mid: d.mid.to_owned().into(),
+                run: self.run.to_owned(),
+                started_at: Some(steve_types::Millis(self.turn_t0)),
+                at: Some(steve_types::Millis(at)),
+                body: steve_types::ThreadProgressKind::Thought {
+                    id: id.to_string(),
+                    text: clean,
+                    done,
+                },
+            },
+        ));
+    }
+
+    fn plan(&self, entries: &[steve_types::ThreadPlanEntry]) {
+        let d = &self.drafts;
+        if d.quiet {
+            return;
+        }
+        let at = now();
+        let bounded: Vec<steve_types::ThreadPlanEntry> = entries
+            .iter()
+            .take(super::progress::MAX_PLAN_ENTRIES)
+            .map(|e| steve_types::ThreadPlanEntry {
+                content: super::progress::redact_and_bound(
+                    &e.content,
+                    super::progress::MAX_PLAN_ENTRY_CHARS,
+                ),
+                status: e.status,
+            })
+            .collect();
+        lock(self.steps).plan = bounded.clone();
+        metrics::counter!("steve_thread_progress_events_total", "kind" => "plan").increment(1);
+        if let Some(tid) = d.task_id {
+            d.core.update_live_main(d.ws, tid, |s| {
+                s.plan = bounded.clone();
+                s.last_activity_at = steve_types::Millis(at);
+            });
+        }
+        d.core.store().store().publish(steve_types::LiveEvent::from(
+            steve_types::WorkLiveEvent::SteveProgress {
+                ws: d.ws.to_owned().into(),
+                mid: d.mid.to_owned().into(),
+                run: self.run.to_owned(),
+                started_at: Some(steve_types::Millis(self.turn_t0)),
+                at: Some(steve_types::Millis(at)),
+                body: steve_types::ThreadProgressKind::Plan { entries: bounded },
+            },
+        ));
+    }
+
+    fn subtask(&self, subtask: &steve_types::ThreadSubtask) {
+        let d = &self.drafts;
+        if d.quiet {
+            return;
+        }
+        let at = now();
+        let bound_opt = |opt: &Option<String>| {
+            opt.as_deref()
+                .map(|s| {
+                    super::progress::redact_and_bound(s, super::progress::MAX_SUBTASK_TEXT_CHARS)
+                })
+                .filter(|s| !s.is_empty())
+        };
+        let mut bounded = steve_types::ThreadSubtask {
+            id: subtask.id.clone(),
+            origin: subtask.origin,
+            status: subtask.status,
+            title: super::progress::redact_and_bound(
+                &subtask.title,
+                super::progress::MAX_SUBTASK_TEXT_CHARS,
+            ),
+            actor: subtask.actor.clone(),
+            progress: bound_opt(&subtask.progress),
+            summary: bound_opt(&subtask.summary),
+            error: bound_opt(&subtask.error),
+            started_at: subtask.started_at,
+            duration_ms: subtask.duration_ms,
+        };
+        metrics::counter!("steve_thread_progress_events_total", "kind" => "subtask").increment(1);
+        if let Some(tid) = d.task_id {
+            d.core.update_live_main(d.ws, tid, |s| {
+                s.last_activity_at = steve_types::Millis(at);
+                if let Some(slot) = s.subtasks.iter_mut().find(|item| item.id == bounded.id) {
+                    if bounded.started_at.is_none() {
+                        bounded.started_at = slot.started_at;
+                    }
+                    *slot = bounded.clone();
+                } else {
+                    s.subtasks.push(bounded.clone());
+                    if s.subtasks.len() > super::progress::MAX_SUBTASKS_IN_SNAPSHOT {
+                        let excess = s.subtasks.len() - super::progress::MAX_SUBTASKS_IN_SNAPSHOT;
+                        s.subtasks.drain(..excess);
+                    }
+                }
+            });
+        }
+        {
+            let mut st = lock(self.steps);
+            if let Some(slot) = st.subtasks.iter_mut().find(|item| item.id == bounded.id) {
+                if bounded.started_at.is_none() {
+                    bounded.started_at = slot.started_at;
+                }
+                *slot = bounded.clone();
+            } else {
+                st.subtasks.push(bounded.clone());
+                if st.subtasks.len() > super::progress::MAX_SUBTASKS_IN_SNAPSHOT {
+                    let excess = st.subtasks.len() - super::progress::MAX_SUBTASKS_IN_SNAPSHOT;
+                    st.subtasks.drain(..excess);
+                }
+            }
+        }
+        d.core.store().store().publish(steve_types::LiveEvent::from(
+            steve_types::WorkLiveEvent::SteveProgress {
+                ws: d.ws.to_owned().into(),
+                mid: d.mid.to_owned().into(),
+                run: self.run.to_owned(),
+                started_at: Some(steve_types::Millis(self.turn_t0)),
+                at: Some(steve_types::Millis(at)),
+                body: steve_types::ThreadProgressKind::Subtask { subtask: bounded },
             },
         ));
     }
@@ -507,7 +914,14 @@ impl Core {
         let a0 = now();
         let cx = self.chat_context(ws, task.user_id.as_deref(), text);
         let extra = cx.as_ref().map(|(_, c)| c.text.as_str()).unwrap_or("");
-        let drafts = Drafts::new(self, ws, mid, stop, false);
+        let drafts = Drafts::new(
+            self,
+            ws,
+            mid,
+            stop,
+            false,
+            (space == super::MAIN).then_some(task.id.as_str()),
+        );
         let on_draft = |thought: &str, t: &str| drafts.send(thought, t);
         let a = tokio::select! {
             a = crate::stats::tagged(
@@ -874,12 +1288,29 @@ impl Core {
             route: info.step_json.clone(),
             ..Default::default()
         });
+        if space == super::MAIN {
+            self.update_live_main(ws, &task.id, |s| {
+                s.run = run.clone();
+                s.mid = Some(mid.clone().into());
+                s.stage = Some(steve_types::ThreadResearchStage::Preparing);
+                s.last_activity_at = steve_types::Millis(started);
+            });
+        }
         let sink = Sink {
-            drafts: Drafts::new(self, ws, mid, stop, space != super::MAIN),
+            drafts: Drafts::new(
+                self,
+                ws,
+                mid,
+                stop,
+                space != super::MAIN,
+                (space == super::MAIN).then_some(task.id.as_str()),
+            ),
             run: &run,
             steps: &steps,
+            turn_t0: t0,
             t0: started,
             first_text: Mutex::new(None),
+            thoughts: Mutex::default(),
         };
         let mut out = r.research(req, &sink).await;
         lock(&sink.drafts.state).closed = true;
@@ -1220,7 +1651,7 @@ mod draft_tests {
     async fn draft_bursts_publish_the_complete_tail_during_a_pause() {
         let k = Kit::new();
         let stop = super::super::Stop::default();
-        let drafts = Drafts::new(&k.core, WS, "question", &stop, false);
+        let drafts = Drafts::new(&k.core, WS, "question", &stop, false, None);
         for (head, tail) in [
             ("再交给", " Steve 开发排查。\n"),
             ("中文", "标点。！"),
@@ -1258,7 +1689,7 @@ mod draft_tests {
         for stopped in [true, false] {
             let k = Kit::new();
             let stop = super::super::Stop::default();
-            let drafts = Drafts::new(&k.core, WS, "question", &stop, false);
+            let drafts = Drafts::new(&k.core, WS, "question", &stop, false, None);
             lock(&drafts.state).sent = now() + 100;
             drafts.send("", "尾字。");
             let state = drafts.state.clone();
@@ -1278,7 +1709,7 @@ mod draft_tests {
         }
         let k = Kit::new();
         let stop = super::super::Stop::default();
-        let drafts = Drafts::new(&k.core, WS, "im", &stop, true);
+        let drafts = Drafts::new(&k.core, WS, "im", &stop, true, None);
         drafts.send("", "private reply");
         assert!(!lock(&drafts.state).pending);
         assert!(!k.events.lock().unwrap().iter().any(|e| matches!(
@@ -1287,5 +1718,185 @@ mod draft_tests {
                 steve_types::WorkLiveEvent::SteveDraft { .. }
             ))
         )));
+    }
+
+    #[test]
+    fn sink_keeps_turn_t0_redacts_updates_snapshot_and_isolates_guest() {
+        use steve_types::{
+            BusEvent, LiveEvent, ThreadPlanEntry, ThreadPlanStatus, ThreadProgressKind,
+            ThreadResearchStage, ThreadSubtask, ThreadSubtaskOrigin, ThreadSubtaskStatus,
+            WorkLiveEvent,
+        };
+
+        let k = Kit::new();
+        let stop = super::super::Stop::default();
+        let steps = Mutex::new(Steps::default());
+        let turn_t0 = 1_000_000i64;
+        k.core.begin_live_main(WS, "run-1", Some("m-1"), turn_t0);
+        let sink = Sink {
+            drafts: Drafts::new(&k.core, WS, "m-1", &stop, false, Some("run-1")),
+            run: "run-1",
+            steps: &steps,
+            turn_t0,
+            t0: turn_t0 + 250,
+            first_text: Mutex::new(None),
+            thoughts: Mutex::default(),
+        };
+
+        sink.stage(ThreadResearchStage::Submitted);
+        sink.thought("th-1", "token=secret_123 分析流程", false);
+        sink.plan(&[ThreadPlanEntry {
+            content: "检查接口 Bearer abc.xyz".into(),
+            status: ThreadPlanStatus::InProgress,
+        }]);
+        sink.tool_running(&ToolRunningSeen {
+            call: Some(1),
+            name: "read_file",
+            kind: "read",
+            brief: "src/main.rs",
+            description: "读取主入口 Authorization: Bearer tok999",
+            step_started_at: turn_t0 + 300,
+        });
+        assert_eq!(
+            k.core.thread_live(WS).and_then(|s| s.stage),
+            Some(ThreadResearchStage::Reading)
+        );
+        sink.tool(&ToolSeen {
+            call: Some(1),
+            name: "read_file".into(),
+            kind: "read".into(),
+            brief: "src/main.rs".into(),
+            ok: true,
+            error: None,
+            ms: 42,
+            description: "读取主入口".into(),
+            step_started_at: Some(turn_t0 + 300),
+            excerpt: Some("api_key=should_hide_this\nfn main() {}".into()),
+        });
+        // Unfinished thought keeps stage on Thinking until the thought completes.
+        assert_eq!(
+            k.core.thread_live(WS).and_then(|s| s.stage),
+            Some(ThreadResearchStage::Thinking)
+        );
+        sink.thought("th-1", "token=secret_123 分析流程完成", true);
+        assert_eq!(
+            k.core.thread_live(WS).and_then(|s| s.stage),
+            Some(ThreadResearchStage::Responding)
+        );
+        sink.subtask(&ThreadSubtask {
+            id: "sub-1".into(),
+            origin: ThreadSubtaskOrigin::Subagent,
+            status: ThreadSubtaskStatus::Running,
+            title: "扫描 ghp_0123456789abcdef".into(),
+            actor: Some("Explore".into()),
+            progress: Some("阅读代码".into()),
+            summary: None,
+            error: None,
+            started_at: Some(steve_types::Millis(turn_t0 + 350)),
+            duration_ms: None,
+        });
+
+        let snap = k.core.thread_live(WS).expect("main live snapshot");
+        assert_eq!(snap.started_at, steve_types::Millis(turn_t0));
+        assert_eq!(snap.plan.len(), 1);
+        assert!(!snap.plan[0].content.contains("abc.xyz"));
+        assert_eq!(snap.thoughts.len(), 1);
+        assert!(snap.thoughts[0].done);
+        assert!(!snap.thoughts[0].text.contains("secret_123"));
+        assert_eq!(snap.tools.len(), 1);
+        assert!(!snap.tools[0].running);
+        assert_eq!(snap.tools[0].ms, Some(42));
+        assert!(
+            !snap.tools[0]
+                .excerpt
+                .as_deref()
+                .unwrap()
+                .contains("should_hide_this")
+        );
+        assert_eq!(snap.subtasks.len(), 1);
+        assert!(!snap.subtasks[0].title.contains("ghp_0123456789abcdef"));
+
+        // Persisted steps keep redacted plan, thoughts and subtasks for the completed summary.
+        let persisted = lock(&steps).json(500);
+        assert_eq!(persisted["plan"].as_array().map(Vec::len), Some(1));
+        assert_eq!(persisted["thoughts"].as_array().map(Vec::len), Some(1));
+        assert_eq!(persisted["subtasks"].as_array().map(Vec::len), Some(1));
+        assert!(!persisted.to_string().contains("secret_123"));
+        assert!(!persisted.to_string().contains("abc.xyz"));
+        assert!(!persisted.to_string().contains("ghp_0123456789abcdef"));
+
+        let events = k.events.lock().unwrap();
+        assert!(events.iter().any(|e| matches!(
+            e,
+            BusEvent::Live(LiveEvent::Work(WorkLiveEvent::SteveTool {
+                started_at: Some(steve_types::Millis(t)),
+                step_started_at: Some(steve_types::Millis(st)),
+                ms: Some(42),
+                excerpt: Some(ex),
+                ..
+            })) if *t == turn_t0 && *st == turn_t0 + 300 && !ex.contains("should_hide_this")
+        )));
+        assert!(events.iter().any(|e| matches!(
+            e,
+            BusEvent::Live(LiveEvent::Work(WorkLiveEvent::SteveProgress {
+                started_at: Some(steve_types::Millis(t)),
+                body: ThreadProgressKind::Thought { text, .. },
+                ..
+            })) if *t == turn_t0 && !text.contains("secret_123")
+        )));
+
+        // Guest space (`quiet = true`) must publish zero live events and touch no main snapshot.
+        let k_guest = Kit::new();
+        k_guest.events.lock().unwrap().clear();
+        let guest_steps = Mutex::new(Steps::default());
+        let guest_sink = Sink {
+            drafts: Drafts::new(&k_guest.core, WS, "im-1", &stop, true, None),
+            run: "run-guest",
+            steps: &guest_steps,
+            turn_t0,
+            t0: turn_t0,
+            first_text: Mutex::new(None),
+            thoughts: Mutex::default(),
+        };
+        guest_sink.stage(ThreadResearchStage::Thinking);
+        guest_sink.thought("th-g", "guest thought", true);
+        guest_sink.plan(&[ThreadPlanEntry {
+            content: "guest plan".into(),
+            status: ThreadPlanStatus::Pending,
+        }]);
+        guest_sink.tool_running(&ToolRunningSeen {
+            call: Some(1),
+            name: "read_file",
+            kind: "read",
+            brief: "secret.txt",
+            description: "read",
+            step_started_at: turn_t0,
+        });
+        guest_sink.tool(&ToolSeen {
+            call: Some(1),
+            name: "read_file".into(),
+            kind: "read".into(),
+            brief: "secret.txt".into(),
+            ok: true,
+            error: None,
+            ms: 10,
+            description: "read".into(),
+            step_started_at: Some(turn_t0),
+            excerpt: Some("guest excerpt".into()),
+        });
+        guest_sink.subtask(&ThreadSubtask {
+            id: "sub-g".into(),
+            origin: ThreadSubtaskOrigin::Subagent,
+            status: ThreadSubtaskStatus::Done,
+            title: "guest subtask".into(),
+            actor: None,
+            progress: None,
+            summary: None,
+            error: None,
+            started_at: None,
+            duration_ms: Some(5),
+        });
+        assert!(k_guest.events.lock().unwrap().is_empty());
+        assert!(k_guest.core.thread_live(WS).is_none());
     }
 }

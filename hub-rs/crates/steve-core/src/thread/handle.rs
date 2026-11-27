@@ -34,11 +34,16 @@ const REROUTE_WINDOW: i64 = 10 * 60 * 1000;
 struct ThinkingGuard<'a> {
     core: &'a Core,
     ws: &'a str,
+    task_id: &'a str,
     active: bool,
+    is_main: bool,
 }
 
 impl Drop for ThinkingGuard<'_> {
     fn drop(&mut self) {
+        if self.is_main {
+            self.core.end_live_main(self.ws, self.task_id);
+        }
         if self.active {
             self.core
                 .store()
@@ -48,6 +53,8 @@ impl Drop for ThinkingGuard<'_> {
                         on: false,
                         ws: self.ws.to_owned().into(),
                         phase: None,
+                        started_at: None,
+                        at: Some(steve_types::Millis(now())),
                     },
                 ));
         }
@@ -140,23 +147,30 @@ impl Core {
                 }
             }
         };
+        let t0 = now();
         let quiet = conv.guest();
+        let is_main = !quiet && space == super::MAIN;
+        if is_main {
+            self.begin_live_main(ws, &task.id, Some(&task.origin_message_id), t0);
+        }
         if !quiet {
             self.store().store().publish(steve_types::LiveEvent::from(
                 steve_types::WorkLiveEvent::SteveThinking {
                     on: true,
                     ws: ws.to_owned().into(),
                     phase: None,
+                    started_at: Some(steve_types::Millis(t0)),
+                    at: Some(steve_types::Millis(t0)),
                 },
             ));
         }
         let _thinking = ThinkingGuard {
             core: self,
             ws,
+            task_id: &task.id,
             active: !quiet,
+            is_main,
         };
-
-        let t0 = now();
         let steps = Mutex::new(Steps::default());
         if let Err(e) = self
             .execute_task_inner(task, lease, stop, &conv, &steps, t0)
@@ -860,7 +874,9 @@ impl Core {
             }
             "supplement" => {
                 let id = r.item.clone().unwrap_or_default();
-                self.phase(ws, "supplement");
+                if !guest && task.space == super::MAIN {
+                    self.phase(ws, "supplement");
+                }
                 let i = Steps::begin(
                     steps,
                     "supplement",
@@ -1067,7 +1083,9 @@ impl Core {
         t0: i64,
     ) -> Result<()> {
         let ws = &task.workspace_id;
-        self.phase(ws, "config");
+        if task.space == super::MAIN {
+            self.phase(ws, "config");
+        }
         let i = Steps::begin(
             steps,
             "draft_config",

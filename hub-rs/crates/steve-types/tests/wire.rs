@@ -166,6 +166,8 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
             on: true,
             ws: "workspace-a".into(),
             phase: None,
+            started_at: None,
+            at: None,
         },
         "steve.thinking",
         Scope::Ws("workspace-a".into()),
@@ -177,6 +179,8 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
             on: true,
             ws: "workspace-a".into(),
             phase: Some("answer".into()),
+            started_at: Some(Millis(10)),
+            at: Some(Millis(20)),
         },
         "steve.thinking-full",
         Scope::Ws("workspace-a".into()),
@@ -208,6 +212,11 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
             call: None,
             started_at: None,
             at: None,
+            description: String::new(),
+            step_started_at: None,
+            ms: None,
+            excerpt: None,
+            error: None,
         },
         "steve.tool",
         Scope::Ws("workspace-a".into()),
@@ -227,12 +236,60 @@ fn every_wire_variant_has_golden_bytes_and_scope() {
             call: Some(2),
             started_at: Some(Millis(10)),
             at: Some(Millis(20)),
+            description: "Inspect files".into(),
+            step_started_at: Some(Millis(12)),
+            ms: Some(45),
+            excerpt: Some("matched 3 lines".into()),
+            error: Some("partial timeout".into()),
         },
         "steve.tool-full",
         Scope::Ws("workspace-a".into()),
     );
     fixtures.insert("steve.tool-full.json".to_owned());
     workliveevent.insert("steve.tool");
+    check_live(
+        WorkLiveEvent::SteveProgress {
+            ws: "workspace-a".into(),
+            mid: "message-1".into(),
+            run: "run-1".into(),
+            started_at: None,
+            at: None,
+            body: ThreadProgressKind::Stage {
+                stage: ThreadResearchStage::Thinking,
+            },
+        },
+        "steve.progress",
+        Scope::Ws("workspace-a".into()),
+    );
+    fixtures.insert("steve.progress.json".to_owned());
+    workliveevent.insert("steve.progress");
+    check_live(
+        WorkLiveEvent::SteveProgress {
+            ws: "workspace-a".into(),
+            mid: "message-1".into(),
+            run: "run-1".into(),
+            started_at: Some(Millis(10)),
+            at: Some(Millis(20)),
+            body: ThreadProgressKind::Subtask {
+                subtask: ThreadSubtask {
+                    id: "sub-1".into(),
+                    origin: ThreadSubtaskOrigin::Subagent,
+                    status: ThreadSubtaskStatus::Running,
+                    title: "Explore crate".into(),
+                    actor: Some("Explore".into()),
+                    progress: Some("Reading files".into()),
+                    summary: Some("Done reading".into()),
+                    error: Some("none".into()),
+                    started_at: Some(Millis(12)),
+                    duration_ms: Some(45),
+                },
+            },
+        },
+        "steve.progress-full",
+        Scope::Ws("workspace-a".into()),
+    );
+    fixtures.insert("steve.progress-full.json".to_owned());
+    workliveevent.insert("steve.progress");
     check(
         WorkEvent::WorkflowRun {
             id: "entity-1".into(),

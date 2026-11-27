@@ -445,13 +445,19 @@ fn running_jobs(t: &Tx) -> ApiResult<u32> {
         .count() as u32)
 }
 
-/// What the draft and tool rows add to a job's output.
+/// What the draft, tool, plan, and subtask rows add to a job's output.
 fn output_bytes(evs: &[(Subject, EventBody)]) -> u64 {
     evs.iter()
         .map(|(_, b)| match b {
             EventBody::TextDelta { text, .. } => text.len() as u64,
             EventBody::ToolChanged { tool } => {
                 serde_json::to_vec(tool).map_or(0, |v| v.len() as u64)
+            }
+            EventBody::Plan { entries } => {
+                serde_json::to_vec(entries).map_or(0, |v| v.len() as u64)
+            }
+            EventBody::SubtaskChanged { subtask } => {
+                serde_json::to_vec(subtask).map_or(0, |v| v.len() as u64)
             }
             _ => 0,
         })

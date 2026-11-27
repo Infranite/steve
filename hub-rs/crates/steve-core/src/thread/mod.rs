@@ -11,6 +11,7 @@ mod handle;
 pub mod handoff;
 mod offer;
 pub mod onboard;
+pub(crate) mod progress;
 mod reroute;
 pub mod research;
 
@@ -19,7 +20,7 @@ pub use offer::Handled;
 pub use reroute::RerouteTo;
 pub use research::{
     RESUME_WINDOW, ResearchOutcome, ResearchRequest, ResearchSink, Researcher, ResumeFrom, RunEnd,
-    ToolSeen,
+    ToolRunningSeen, ToolSeen,
 };
 
 use crate::Core;
@@ -157,6 +158,9 @@ pub(crate) struct Steps {
     pub(crate) route: Option<Value>,
     pub(crate) answer: Option<Value>,
     pub(crate) research: Option<Value>,
+    pub(crate) plan: Vec<steve_types::ThreadPlanEntry>,
+    pub(crate) thoughts: Vec<steve_types::ThreadLiveThought>,
+    pub(crate) subtasks: Vec<steve_types::ThreadSubtask>,
     pub(crate) tools: Vec<Value>,
 }
 
@@ -171,6 +175,15 @@ impl Steps {
         }
         if let Some(a) = &self.research {
             m.insert("research".into(), a.clone());
+        }
+        if !self.plan.is_empty() {
+            m.insert("plan".into(), json!(self.plan));
+        }
+        if !self.thoughts.is_empty() {
+            m.insert("thoughts".into(), json!(self.thoughts));
+        }
+        if !self.subtasks.is_empty() {
+            m.insert("subtasks".into(), json!(self.subtasks));
         }
         m.insert("tools".into(), json!(self.tools));
         m.insert("ms".into(), json!(ms));
@@ -247,12 +260,18 @@ pub(crate) struct Forwarded {
     pub(crate) asked: bool,
 }
 
+struct LiveMainEntry {
+    task_id: String,
+    snapshot: steve_types::ThreadLiveSnapshot,
+}
+
 /// Ephemeral execution runtime; all durable state lives in `steve-store` (`thread_*` tables).
 pub(crate) struct ThreadRuntime {
     workers: Mutex<HashMap<(String, String), Arc<Notify>>>,
     budget: Arc<Semaphore>,
     stops: Mutex<HashMap<String, Stop>>,
     running_phase: Mutex<HashMap<(String, String), &'static str>>,
+    live_main: Mutex<HashMap<String, LiveMainEntry>>,
     researcher: OnceLock<Arc<dyn Researcher>>,
     host: OnceLock<Arc<dyn ConvHost>>,
     acting: Mutex<()>,
@@ -265,6 +284,7 @@ impl Default for ThreadRuntime {
             budget: Arc::new(Semaphore::new(MAX_CONCURRENT_SPACES)),
             stops: Mutex::default(),
             running_phase: Mutex::default(),
+            live_main: Mutex::default(),
             researcher: OnceLock::new(),
             host: OnceLock::new(),
             acting: Mutex::new(()),
@@ -575,6 +595,58 @@ impl Core {
             .store()
             .read(|r| thread::has_claimed(r, ws, MAIN))
             .unwrap_or(false)
+    }
+
+    /// Lightweight in-flight snapshot of the main conversation task for `/api/summary` hydration.
+    pub fn thread_live(&self, ws: &str) -> Option<steve_types::ThreadLiveSnapshot> {
+        lock(&self.0.thread.live_main)
+            .get(ws)
+            .map(|e| e.snapshot.clone())
+    }
+
+    pub(crate) fn begin_live_main(&self, ws: &str, task_id: &str, mid: Option<&str>, t0: i64) {
+        let mut live = lock(&self.0.thread.live_main);
+        live.insert(
+            ws.to_string(),
+            LiveMainEntry {
+                task_id: task_id.to_string(),
+                snapshot: steve_types::ThreadLiveSnapshot {
+                    run: task_id.to_string(),
+                    started_at: steve_types::Millis(t0),
+                    last_activity_at: steve_types::Millis(t0),
+                    stage: Some(steve_types::ThreadResearchStage::Triage),
+                    phase: None,
+                    plan: vec![],
+                    thoughts: vec![],
+                    tools: vec![],
+                    subtasks: vec![],
+                    draft_text: String::new(),
+                    draft_thought: String::new(),
+                    mid: mid.map(|m| m.to_owned().into()),
+                },
+            },
+        );
+    }
+
+    pub(crate) fn update_live_main(
+        &self,
+        ws: &str,
+        task_id: &str,
+        f: impl FnOnce(&mut steve_types::ThreadLiveSnapshot),
+    ) {
+        let mut live = lock(&self.0.thread.live_main);
+        if let Some(entry) = live.get_mut(ws)
+            && entry.task_id == task_id
+        {
+            f(&mut entry.snapshot);
+        }
+    }
+
+    pub(crate) fn end_live_main(&self, ws: &str, task_id: &str) {
+        let mut live = lock(&self.0.thread.live_main);
+        if live.get(ws).is_some_and(|e| e.task_id == task_id) {
+            live.remove(ws);
+        }
     }
 
     #[cfg(test)]
@@ -1156,11 +1228,36 @@ impl Core {
     }
 
     pub(crate) fn phase(&self, ws: &str, phase: &str) {
+        let at = now();
+        let started_at = {
+            let mut live = lock(&self.0.thread.live_main);
+            if let Some(entry) = live.get_mut(ws) {
+                entry.snapshot.phase = Some(phase.to_string());
+                entry.snapshot.last_activity_at = steve_types::Millis(at);
+                let stage = match phase {
+                    "route" | "triage" => Some(steve_types::ThreadResearchStage::Triage),
+                    "research" => Some(steve_types::ThreadResearchStage::Preparing),
+                    "answer" => Some(steve_types::ThreadResearchStage::Submitted),
+                    "supplement" | "config" | "item" => {
+                        Some(steve_types::ThreadResearchStage::CallingTool)
+                    }
+                    _ => None,
+                };
+                if let Some(stage) = stage {
+                    entry.snapshot.stage = Some(stage);
+                }
+                Some(entry.snapshot.started_at)
+            } else {
+                None
+            }
+        };
         self.store().store().publish(steve_types::LiveEvent::from(
             steve_types::WorkLiveEvent::SteveThinking {
                 on: true,
                 ws: ws.to_owned().into(),
                 phase: Some(phase.into()),
+                started_at,
+                at: Some(steve_types::Millis(at)),
             },
         ));
     }

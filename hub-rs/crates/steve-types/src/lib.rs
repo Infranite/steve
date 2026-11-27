@@ -91,5 +91,8 @@ pub use knowledge::KnowledgeEvent;
 pub use people::{AvatarRef, MemberIdentity, PeopleEvent};
 pub use stats::StatsEvent;
 pub use vault::{VaultEvent, VaultReason};
-pub use work::WorkEvent;
-pub use work::WorkLiveEvent;
+pub use work::{
+    ThreadLiveSnapshot, ThreadLiveThought, ThreadLiveTool, ThreadPlanEntry, ThreadPlanStatus,
+    ThreadProgressKind, ThreadResearchStage, ThreadSubtask, ThreadSubtaskOrigin,
+    ThreadSubtaskStatus, WorkEvent, WorkLiveEvent,
+};

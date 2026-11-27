@@ -157,20 +157,18 @@ async fn a1_a_question_is_researched_in_the_conversation() {
         ev.iter()
             .any(|e| matches!(e, steve_types::BusEvent::Live(steve_types::LiveEvent::Work(steve_types::WorkLiveEvent::SteveTool { name, .. })) if name == "Read"))
     );
-    assert!(
-        ev.contains(&steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
+    assert!(ev.iter().any(|e| matches!(
+        e,
+        steve_types::BusEvent::Live(steve_types::LiveEvent::Work(
             steve_types::WorkLiveEvent::SteveThinking {
                 on: true,
-                ws: {
-                    let value: Option<String> = Some(WS.into());
-                    value
-                        .map(Into::into)
-                        .unwrap_or_else(|| steve_types::WorkspaceId::from(steve_store::WS))
-                },
-                phase: Some("research".into())
+                ws,
+                phase: Some(phase),
+                started_at: Some(_),
+                at: Some(_),
             }
-        )))
-    );
+        )) if ws.as_str() == WS && phase == "research"
+    )));
     /* the request the executor got */
     let req = fr.seen.lock().unwrap()[0].clone();
     assert_eq!(

@@ -12,12 +12,44 @@ impl NodeDomain for Domain {
 }
 
 #[derive(Default)]
-struct Seen(Mutex<Vec<String>>);
+struct Seen {
+    text: Mutex<Vec<String>>,
+    stages: Mutex<Vec<ThreadResearchStage>>,
+    thoughts: Mutex<Vec<(String, String, bool)>>,
+    plans: Mutex<Vec<Vec<ThreadPlanEntry>>>,
+    tools_running: Mutex<Vec<(String, String, String)>>,
+    tools_done: Mutex<Vec<ToolSeen>>,
+    subtasks: Mutex<Vec<ThreadSubtask>>,
+}
 impl ResearchSink for Seen {
     fn text(&self, text: &str) {
-        self.0.lock().unwrap().push(text.into());
+        self.text.lock().unwrap().push(text.into());
     }
-    fn tool(&self, _: &ToolSeen) {}
+    fn tool(&self, t: &ToolSeen) {
+        self.tools_done.lock().unwrap().push(t.clone());
+    }
+    fn tool_running(&self, t: &ToolRunningSeen<'_>) {
+        self.tools_running.lock().unwrap().push((
+            t.name.into(),
+            t.brief.into(),
+            t.description.into(),
+        ));
+    }
+    fn stage(&self, stage: ThreadResearchStage) {
+        self.stages.lock().unwrap().push(stage);
+    }
+    fn thought(&self, id: &str, text: &str, done: bool) {
+        self.thoughts
+            .lock()
+            .unwrap()
+            .push((id.into(), text.into(), done));
+    }
+    fn plan(&self, entries: &[ThreadPlanEntry]) {
+        self.plans.lock().unwrap().push(entries.to_vec());
+    }
+    fn subtask(&self, subtask: &ThreadSubtask) {
+        self.subtasks.lock().unwrap().push(subtask.clone());
+    }
 }
 
 struct Test {
@@ -201,7 +233,7 @@ impl Test {
             Err(_) => {
                 let state =
                     steve_store::testkit::hub::node_fixtures::research_run_trace(&self.store, &run);
-                let text = sink.0.lock().unwrap().clone();
+                let text = sink.text.lock().unwrap().clone();
                 // Best-effort fixture cleanup, still bounded if the Node itself is stuck.
                 // Dropping the timed-out future may already have requested cancellation.
                 let cleanup = tokio::time::timeout(Duration::from_secs(5), self.close()).await;
@@ -236,7 +268,7 @@ async fn research_model_failure_falls_back_before_any_text_or_tools() {
         assert_eq!(out.model.as_deref(), Some("ready"));
         assert_eq!(out.text, "answer");
     }
-    assert_eq!(*seen.0.lock().unwrap(), vec!["answer"; 8]);
+    assert_eq!(*seen.text.lock().unwrap(), vec!["answer"; 8]);
     assert_eq!(
         t.specs()
             .iter()
@@ -321,7 +353,7 @@ async fn stopped_runtime_returns_partial_research_and_persists_cancellation() {
             tokio::select! {
                 out = &mut pending => panic!("ended before runtime stopped: {out:?}"),
                 _ = tokio::time::sleep(Duration::from_millis(10)) => {
-                    if !seen.0.lock().unwrap().is_empty() { break; }
+                    if !seen.text.lock().unwrap().is_empty() { break; }
                 }
             }
         }
@@ -347,5 +379,54 @@ async fn stopped_runtime_returns_partial_research_and_persists_cancellation() {
     })
     .await
     .unwrap();
+    t.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn research_streams_stage_thought_plan_and_enriched_tool_views() {
+    let t = Test::new().await;
+    let seen = Seen::default();
+    let out = t.run(t.request("run-rich", &["rich"]), &seen).await;
+    assert_eq!(out.end, RunEnd::Done, "{out:?}");
+    assert_eq!(out.text, "rich answer");
+
+    let stages = seen.stages.lock().unwrap().clone();
+    assert!(
+        stages.contains(&ThreadResearchStage::Submitted)
+            && stages.contains(&ThreadResearchStage::Responding),
+        "{stages:?}"
+    );
+
+    let plans = seen.plans.lock().unwrap().clone();
+    assert_eq!(plans.len(), 1);
+    assert_eq!(plans[0].len(), 2);
+    assert_eq!(plans[0][0].content, "Inspect repository");
+    assert_eq!(plans[0][0].status, ThreadPlanStatus::InProgress);
+
+    let thoughts = seen.thoughts.lock().unwrap().clone();
+    assert!(
+        thoughts
+            .iter()
+            .any(|(_, text, _)| text.contains("Checking main implementation")),
+        "{thoughts:?}"
+    );
+
+    let running = seen.tools_running.lock().unwrap().clone();
+    assert_eq!(running.len(), 1);
+    assert_eq!(running[0].1, "src/lib.rs");
+    assert_eq!(running[0].2, "Read crate entrypoint");
+
+    let done = seen.tools_done.lock().unwrap().clone();
+    assert_eq!(done.len(), 1);
+    assert_eq!(done[0].description, "Read crate entrypoint");
+    assert!(
+        done[0]
+            .excerpt
+            .as_deref()
+            .is_some_and(|e| e.contains("pub fn run()")),
+        "{done:?}"
+    );
+    assert!(done[0].step_started_at.is_some());
+
     t.close().await;
 }

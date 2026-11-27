@@ -25,9 +25,33 @@ for await (const line of createInterface({ input: process.stdin })) {
       continue
     }
     const text = m.params.prompt.filter(p => p.type === "text").map(p => p.text).join("\n")
+    if (model === "rich") {
+      send({ method: "session/update", params: { sessionId: "expired-session", update: {
+        sessionUpdate: "plan",
+        entries: [{ content: "Inspect repository", status: "in_progress" }, { content: "Summarize", status: "pending" }],
+      } } })
+      send({ method: "session/update", params: { sessionId: "expired-session", update: {
+        sessionUpdate: "agent_thought_chunk",
+        content: { type: "text", text: "Checking main implementation" },
+      } } })
+      send({ method: "session/update", params: { sessionId: "expired-session", update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "t1",
+        kind: "read",
+        title: "Read file",
+        status: "in_progress",
+        rawInput: { file_path: "src/lib.rs", description: "Read crate entrypoint" },
+      } } })
+      send({ method: "session/update", params: { sessionId: "expired-session", update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "t1",
+        status: "completed",
+        content: [{ type: "content", content: { type: "text", text: "pub fn run() {}" } }],
+      } } })
+    }
     send({ method: "session/update", params: { sessionId: "expired-session", update: {
       sessionUpdate: "agent_message_chunk", content: {
-        type: "text", text: text.includes("Steve：answer") ? "fresh answer with prior context" : "answer",
+        type: "text", text: model === "rich" ? "rich answer" : (text.includes("Steve：answer") ? "fresh answer with prior context" : "answer"),
       },
     } } })
     if (model === "slow") continue

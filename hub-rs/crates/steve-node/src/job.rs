@@ -388,6 +388,7 @@ async fn acp_think(
         on_session: None,
         max_output_bytes: spec.run.limits.max_output_bytes,
         on_activity: None,
+        emit_thoughts: false,
     };
     match crate::acp_job::run_cancellable(req, spawned, &event, stop_execution.notified()).await {
         Ok(out) => Ran {

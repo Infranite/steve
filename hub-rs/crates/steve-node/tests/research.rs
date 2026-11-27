@@ -619,9 +619,31 @@ async fn controlled_acp_idle_on(t: T, n: LocalNode, prompt: &str, finish: bool) 
             }]
         );
     }
-    assert!(!t.bodies().iter().any(|e| matches!(e,
-        EventBody::TextDelta { text, .. } if text.contains("private-thought")
+    let bodies = t.bodies();
+    let thought_ids: std::collections::HashSet<&str> = bodies
+        .iter()
+        .filter_map(|e| match e {
+            EventBody::MessageStarted {
+                message,
+                role: Role::Thought,
+                ..
+            } => Some(message.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(!bodies.iter().any(|e| matches!(e,
+        EventBody::TextDelta { message, text, .. }
+            if text.contains("private-thought") && !thought_ids.contains(message.as_str())
     )));
+    assert!(!completion.result.iter().any(|p| matches!(p,
+        Part::Text { text } if text.contains("private-thought")
+    )));
+    if prompt == "thought" {
+        assert!(bodies.iter().any(|e| matches!(e,
+            EventBody::TextDelta { message, text, .. }
+                if text.contains("private-thought") && thought_ids.contains(message.as_str())
+        )));
+    }
     n.shutdown().await;
 }
 

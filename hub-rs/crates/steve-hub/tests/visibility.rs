@@ -135,6 +135,8 @@ async fn actual_sse_filter_preserves_workspace_and_hub_audiences() {
             on: true,
             ws: "workspace-a".into(),
             phase: None,
+            started_at: None,
+            at: None,
         }
         .into(),
     );
