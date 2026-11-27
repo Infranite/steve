@@ -1,8 +1,8 @@
 //! macOS `posix_spawn` wrapper shared by detached-session execution (`DetachedCommand`) and the
 //! backup engine (inherited lock fd). Avoids calling `fork()` in multithreaded macOS processes
-//! where CoreFoundation / Security / libdispatch locks can deadlock child threads, while matching
-//! `std::process::Command` signal semantics (`POSIX_SPAWN_SETSIGDEF` for `SIGPIPE` and empty
-//! `POSIX_SPAWN_SETSIGMASK`).
+//! where CoreFoundation / Security / libdispatch locks can deadlock child threads, resets
+//! `SIGPIPE` to `SIG_DFL` (`POSIX_SPAWN_SETSIGDEF`, matching `std::process::Command`), and clears
+//! the child signal mask (`POSIX_SPAWN_SETSIGMASK`, matching Linux `DetachedCommand`'s `pre_exec`).
 
 use std::collections::BTreeMap;
 use std::ffi::{CString, OsStr, OsString};
@@ -287,8 +287,9 @@ pub fn spawn(spec: SpawnSpec<'_>) -> io::Result<Spawned> {
     keep_alive.extend(extra_srcs);
 
     let mut attr = SpawnAttr::new()?;
-    // Match Rust `std::process::Command`: reset `SIGPIPE` to `SIG_DFL` (the Rust runtime ignores
-    // it) and clear any signals masked on the calling thread.
+    // Reset `SIGPIPE` to `SIG_DFL` (matching `std::process::Command`, since the Rust runtime
+    // ignores `SIGPIPE`) and clear any signals masked on the calling thread (matching Linux
+    // `DetachedCommand`'s `sigprocmask` reset in `pre_exec`).
     // SAFETY: `sigemptyset` and `sigaddset` initialize stack `sigset_t` values.
     let (sigdef, sigmask) = unsafe {
         let mut sigdef: libc::sigset_t = std::mem::zeroed();

@@ -1134,14 +1134,22 @@ fn spawn_detached(
                 d.iter().map(|(k, v)| (k.as_os_str(), v.as_deref())),
             ),
         };
-        // SAFETY: `libc::setsid` is async-signal-safe per POSIX.
+        // SAFETY: `libc::setsid`, `libc::sigemptyset`, and `libc::sigprocmask` are all
+        // async-signal-safe per POSIX. Resetting the signal mask matches macOS `macos_spawn`
+        // (`POSIX_SPAWN_SETSIGMASK` with an empty set), because Rust `std` intentionally inherits
+        // the calling thread's signal mask across `fork`+`exec`.
         unsafe {
             command.pre_exec(|| {
                 if libc::setsid() == -1 {
-                    Err(io::Error::last_os_error())
-                } else {
-                    Ok(())
+                    return Err(io::Error::last_os_error());
                 }
+                let mut empty: libc::sigset_t = std::mem::zeroed();
+                if libc::sigemptyset(&mut empty) != 0
+                    || libc::sigprocmask(libc::SIG_SETMASK, &empty, std::ptr::null_mut()) != 0
+                {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
             });
         }
         spawn_configured_std(&mut command, program, opts)
