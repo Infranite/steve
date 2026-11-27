@@ -925,84 +925,47 @@ pub(crate) async fn fetch(
     Ok(path)
 }
 
+/// Timeout for reading `git rev-parse HEAD` during workspace revision checks.
+const HEAD_PROBE_TIMEOUT: Duration = Duration::from_secs(3);
+/// Per-stream output ceiling for `git rev-parse HEAD` (a 40-byte commit hash; 64 KiB bounds
+/// unexpected output without truncating diagnostics).
+const HEAD_PROBE_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
 /// HEAD of the workspace's repository: `Ok(None)` when it is no repository, an error when it is one
 /// and git cannot tell.
 fn head_of(dir: &Path) -> ApiResult<Option<String>> {
-    head_with(dir, Path::new("git"), Duration::from_secs(3))
+    head_with(dir, Path::new("git"), HEAD_PROBE_TIMEOUT)
 }
 
 fn head_with(dir: &Path, program: &Path, timeout: Duration) -> ApiResult<Option<String>> {
-    use std::os::unix::process::CommandExt;
     let is_repo = dir.join(".git").exists();
-    let mut child = std::process::Command::new(program)
-        .args(["rev-parse", "HEAD"])
-        .current_dir(dir)
-        .process_group(0)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .map_err(internal)?;
-    collect_head_probe(&mut child, is_repo, timeout)
-}
-
-fn collect_head_probe(
-    child: &mut std::process::Child,
-    is_repo: bool,
-    timeout: Duration,
-) -> ApiResult<Option<String>> {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
-    let mut pipe = child.stdout.take().expect("pipe");
-    let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0
-        || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-    {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(internal("cannot bound HEAD pipe"));
-    }
-    let until = std::time::Instant::now() + timeout;
-    let mut output = Vec::new();
-    loop {
-        let mut bytes = [0; 4096];
-        for _ in 0..16 {
-            match pipe.read(&mut bytes) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => output.extend_from_slice(&bytes[..n]),
-            }
-        }
-        if std::time::Instant::now() >= until || output.len() > 65536 {
-            // The direct child has not been reaped: its pid/group cannot be recycled yet.
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(Error::new(
-                Code::Stale,
-                "HEAD probe timed out or exceeded output budget",
-            ));
-        }
-        match child.try_wait().map_err(internal)? {
-            Some(status) => {
-                // Do not wait for descendants holding a pipe after the direct child exits.
-                while let Ok(n) = pipe.read(&mut bytes) {
-                    if n == 0 || output.len() + n > 65536 {
-                        break;
-                    }
-                    output.extend_from_slice(&bytes[..n]);
-                }
-                return if status.success() {
-                    Ok(Some(String::from_utf8_lossy(&output).trim().to_string()))
-                } else if !is_repo {
-                    Ok(None)
-                } else {
-                    Err(internal("cannot read HEAD"))
-                };
-            }
-            None => std::thread::sleep(Duration::from_millis(10)),
-        }
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(["rev-parse", "HEAD"]).current_dir(dir);
+    let out = steve_runtime::process::run_bounded(
+        &mut cmd,
+        "git rev-parse HEAD",
+        steve_runtime::process::BoundedOptions {
+            max_output_bytes: HEAD_PROBE_MAX_OUTPUT_BYTES,
+            ..steve_runtime::process::BoundedOptions::capture("head_probe", timeout)
+        },
+    )
+    .map_err(|err| match err {
+        steve_runtime::process::CommandError::TimedOut { .. }
+        | steve_runtime::process::CommandError::OutputLimitExceeded { .. }
+        | steve_runtime::process::CommandError::PipeDrainTimedOut { .. } => Error::new(
+            Code::Stale,
+            "HEAD probe timed out or exceeded output budget",
+        ),
+        other => internal(other),
+    })?;
+    if out.status.success() {
+        Ok(Some(
+            String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        ))
+    } else if !is_repo {
+        Ok(None)
+    } else {
+        Err(internal("cannot read HEAD"))
     }
 }
 
@@ -5046,35 +5009,28 @@ mod binding_tests {
 
     #[test]
     fn hanging_git_probe_is_bounded_and_reaped() {
-        use std::process::Stdio;
-        use steve_runtime::testkit::{eventually_blocking, process::Command};
+        use std::os::unix::fs::PermissionsExt;
 
         let d = tempfile::tempdir().unwrap();
-        let mut child = Command::new("/bin/sh")
-            .args(["-c", ": > ready && IFS= read -r line"])
-            .current_dir(d.path())
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .spawn()
-            .unwrap();
-        let pid = child.id() as libc::pid_t;
-        // Keep stdin open so the fixture hangs until killed. Do not start the probe's budget
-        // until the shell has signalled readiness, even if launching it took a while.
-        assert!(eventually_blocking(
-            "hanging HEAD probe fixture to signal readiness",
-            || { d.path().join("ready").is_file() || child.try_wait().unwrap().is_some() }
-        ));
-        assert!(
-            child.try_wait().unwrap().is_none(),
-            "fixture exited before the probe"
-        );
+        let pid_file = d.path().join("pid");
+        let script = d.path().join("fake-git");
+        std::fs::write(
+            &script,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$$\" > '{}'\nexec sleep 60\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
 
         let started = std::time::Instant::now();
         let timeout = Duration::from_secs(1);
-        let error = collect_head_probe(&mut child, false, timeout).unwrap_err();
+        let error = head_with(d.path(), &script, timeout).unwrap_err();
         assert_eq!(error.code, Code::Stale);
         assert!(started.elapsed() >= timeout);
         assert!(started.elapsed() < Duration::from_secs(2));
+        let pid: libc::pid_t = std::fs::read_to_string(&pid_file).unwrap().parse().unwrap();
         // A killed but unreaped child would still be waitable.
         assert_eq!(
             unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) },

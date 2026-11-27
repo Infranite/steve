@@ -63,7 +63,12 @@ impl VaultWait {
     /// What a use came to.
     pub(crate) fn record<R>(&mut self, conn: &str, now: i64, r: &Result<R, VaultError>) {
         match r {
-            Err(e @ (VaultError::Locked | VaultError::KeyMissing | VaultError::Denied)) => {
+            Err(
+                e @ (VaultError::Locked
+                | VaultError::KeyMissing
+                | VaultError::Denied
+                | VaultError::TimedOut),
+            ) => {
                 let fails = self.0.get(conn).map_or(0, |(_, f, _)| *f) + 1;
                 let wait = steve_runtime::policy::Backoff {
                     base: std::time::Duration::from_millis((VAULT_WAIT_MS) as u64),

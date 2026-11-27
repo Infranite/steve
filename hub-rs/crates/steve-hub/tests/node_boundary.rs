@@ -271,6 +271,9 @@ const RATIONALE: &[Entry] = &[
     e(Fs, "steve-hub/src/metrics/backup.rs", Hub, "consumes decoded offline observations once as they enter the Hub metrics recorder"),
     e(Dir, "steve-runtime/src/process.rs", Library, "process meters: this process and its own process group (/proc on Linux, libproc on macOS); no workspace data"),
     e(Fs, "steve-runtime/src/process.rs", Library, "process meters: read-only counters of this process (/proc/self on Linux); no workspace data"),
+    e(Spawn, "steve-runtime/src/process/bounded.rs", Library, "unified bounded subprocess runner rebuilding Command::new with a PATH-resolved absolute executable (preventing macOS std PATH fork fallback and running Linux DetachedCommand); callers are independently registered at their own Command/DetachedCommand entry points"),
+    e(Fs, "steve-runtime/src/process/bounded.rs", Library, "PATH executable metadata lookup in resolve_program so bare program names resolve strictly against the child's effective PATH without macOS fork() fallback; no workspace or project data"),
+    e(Spawn, "steve-runtime/src/process/macos_spawn.rs", Library, "unified macOS posix_spawn wrapper avoiding multithreaded fork() for detached-session probes and inherited-fd backup engine runs; callers are independently registered at their Command::new or engine entry points"),
     /* Hub-owned durable outputs, Hub-local temp-dir outputs, and releases */
     e(Dir, "steve-hub/src/api/outputs.rs", Hub, "Hub-owned durable `<home>/workspaces/<id>/outputs/` and Hub-local temp-dir output listing only; every project/worktree directory is read via the Node"),
     e(Fs, "steve-hub/src/api/outputs.rs", Hub, "Hub-owned durable `<home>/workspaces/<id>/outputs/` and Hub-local temp-dir output read only; every project/worktree file is read via the Node"),
@@ -328,7 +331,7 @@ const RATIONALE: &[Entry] = &[
     e(Spawn, "steve-modules/src/net.rs", Hub, "test support: reruns one test in a child"),
     e(Dir, "steve-hub/src/upgrades/mod.rs", Hub, "upgrade operations and release receipts in the Hub data dir"),
     e(Fs, "steve-store-sqlite/src/backup/offline.rs", Hub, "the SQLite driver stages a private online snapshot and verifies the checksum of a private restored copy"),
-    e(Spawn, "steve-hub/src/backup/engine.rs", Hub, "runs the verified release's restic executable for the installation repository with a cleared environment and a pipe for its key"),
+    e(Spawn, "steve-hub/src/backup/engine.rs", Hub, "runs the verified release's restic executable for the installation repository with a cleared environment and a pipe for its key (macOS delegates to steve_runtime::process::macos_spawn; non-macOS uses Command::new)"),
     e(Dir, "steve-hub/src/backup/engine.rs", Hub, "cleans the private backup staging directory while the installation repository lock is held"),
     e(Fs, "steve-hub/src/backup/engine.rs", Hub, "owns the private repository lock, cache and temporary staging lifecycle"),
     e(Dir, "steve-hub/src/backup/files.rs", Hub, "walks the Hub's allowlisted backup sources and excludes regenerable workspaces and key storage"),

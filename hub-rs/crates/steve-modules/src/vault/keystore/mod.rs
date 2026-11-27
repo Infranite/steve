@@ -26,6 +26,7 @@ pub mod signing;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 #[cfg(unix)]
 pub use dir::DirKeyStore;
@@ -46,6 +47,11 @@ pub const SERVICE: &str = match option_env!("STEVE_KEYHELPER_SERVICE") {
     None => "io.github.infranite.steve.vault",
 };
 
+/// Upper bound for a single `steve-keyhelper` invocation (keychain read/write/delete).
+/// Shared cross-platform so callers (such as `supervisor::startup_gate`) can size aggregate vault
+/// probe budgets with margin above a single helper call.
+pub const KEYHELPER_TIMEOUT: Duration = Duration::from_secs(15);
+
 /// Why a key store call failed. No variant carries key material.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum KeyStoreError {
@@ -63,6 +69,9 @@ pub enum KeyStoreError {
     /// Refused to start (`FileKeyStore` for `~/.steve`, unknown backend, no store on this system).
     #[error("{0}")]
     Refused(String),
+    /// The external key store helper did not finish within its deadline and its process group was killed.
+    #[error("key store timed out after {:.1}s", .0.as_secs_f64())]
+    TimedOut(Duration),
     /// Anything else: an OS status code or an I/O error, never the value.
     #[error("key store: {0}")]
     Other(String),

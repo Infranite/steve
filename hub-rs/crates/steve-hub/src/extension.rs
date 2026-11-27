@@ -1263,8 +1263,6 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         None => Vec::new(),
     };
     let cfg = Arc::new(cfg);
-    // collection is on from here; exporting it is optional (`metrics::start`)
-    crate::metrics::install_with_backup(cfg.home.clone(), cfg.db_path());
     let supervised_state: Arc<std::sync::Mutex<Option<crate::api::AppState>>> =
         Arc::new(std::sync::Mutex::new(None));
     if std::env::var("STEVE_MANAGED").as_deref() == Ok("1") {
@@ -1294,6 +1292,9 @@ pub async fn run(asm: Assembly) -> anyhow::Result<()> {
         });
     }
     crate::upgrades::startup_gate(&cfg, &listeners).await?;
+    // Install the in-memory recorder only after `startup_gate` commits so any gate or vault-probe
+    // failure persists its observation to `.backup-observations/` before the candidate exits.
+    crate::metrics::install_with_backup(cfg.home.clone(), cfg.db_path());
     // After commit (post-startup_gate), migrate any legacy shell-wrapper Hub service definition
     // (Linux systemd unit or macOS LaunchAgent plist) to launch `steve-hub` directly.
     if std::env::var("STEVE_MANAGED").as_deref() == Ok("1")

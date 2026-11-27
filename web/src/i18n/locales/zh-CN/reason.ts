@@ -32,4 +32,5 @@ export default {
   "node_stop.research_budget": "研究已达到回合数或工具调用次数上限。",
   "node_stop.stopped_by_node": "Node 已停止运行。",
   "vault.execution_node_unavailable": "当前会话没有可用的执行 Node，机密注入命令不能在 Hub 进程内运行。",
+  "vault.key_store_timed_out": "保险箱暂时打不开：密钥存储响应超时，请稍后再试。",
 } as const

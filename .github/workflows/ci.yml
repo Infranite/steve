@@ -12,11 +12,12 @@ name: CI
 # a newer push replaces the pending run without stopping the running one. Merge queue runs stay independent.
 # cut-release.py releases the newest main commit whose own push run passed, with its release notes on top,
 # so nothing reaches a release untested on macOS. Branch rules on main
-# require the `CI gate` check, by that name. `merge_group` lets GitHub's own merge queue run it too.
+# require the `CI gate` check, by that name, and the `PR description` check of pr-description.yml
+# (the title and description lint, the only check an edited description re-runs). `merge_group` lets GitHub's own merge queue run it too.
 on:
   pull_request:
     branches: [main]
-    types: [opened, synchronize, reopened, edited]
+    types: [opened, synchronize, reopened]
   push:
     branches: [main]
   merge_group:
@@ -36,17 +37,11 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
-      pull-requests: read
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
           python-version: '3.13'
-      - name: Pull request title and release metadata
-        if: github.event_name == 'pull_request'
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: python3 ops/cut-release.py lint --github-event "$GITHUB_EVENT_PATH"
       - name: Install Linux test prerequisites
         run: sh scripts/install-ci-zsh.sh
       - name: Boundary and release scripts
@@ -243,9 +238,10 @@ jobs:
         run: |
           target=$(rustc -vV | sed -n 's/^host: //p')
           python3 scripts/package-release.py restic --target "$target" --out hub-rs/target/debug
-          cp -p hub-rs/target/debug/restic hub-rs/target/debug/deps/restic
       - name: Rust tests
         id: rust-tests
+        env:
+          STEVE_BACKUP_ENGINE: ${{ github.workspace }}/hub-rs/target/debug/restic
         run: cargo nextest run --locked --manifest-path hub-rs/Cargo.toml --workspace --profile ci --retries 0 --no-fail-fast --partition "$PARTITION"
       - name: Rust test report (first-attempt failures remain failures)
         if: ${{ !cancelled() && steps.rust-tests.outcome != 'skipped' }}

@@ -51,7 +51,7 @@ Fs	steve-hub/src/api/files.rs	1
 Fs	steve-hub/src/api/outputs.rs	11
 Fs	steve-hub/src/app.rs	1
 Fs	steve-hub/src/backup.rs	22
-Fs	steve-hub/src/backup/engine.rs	9
+Fs	steve-hub/src/backup/engine.rs	10
 Fs	steve-hub/src/backup/files.rs	10
 Fs	steve-hub/src/backup/repository.rs	15
 Fs	steve-hub/src/check.rs	5
@@ -108,12 +108,13 @@ Fs	steve-mail/src/threads.rs	1
 Fs	steve-mail/src/usage.rs	1
 Fs	steve-modules/src/vault/keystore/dir.rs	7
 Fs	steve-modules/src/vault/keystore/file.rs	8
-Fs	steve-modules/src/vault/keystore/helper.rs	1
+Fs	steve-modules/src/vault/keystore/helper.rs	2
 Fs	steve-node-wire/src/identity.rs	4
 Fs	steve-node-wire/src/tailcat.rs	1
 Fs	steve-research/src/attach.rs	4
 Fs	steve-research/src/guard.rs	1
 Fs	steve-runtime/src/process.rs	3
+Fs	steve-runtime/src/process/bounded.rs	1
 Fs	steve-store-sqlite/src/backup/offline.rs	10
 Fs	steve-store/src/contract/tool_journal.rs	2
 Fs	steve-store/src/db.rs	1
@@ -132,7 +133,7 @@ Spawn	steve-hub/src/plugins/run.rs	1
 Spawn	steve-hub/src/system.rs	1
 Spawn	steve-hub/src/upgrades/cli.rs	1
 Spawn	steve-hub/src/upgrades/runner.rs	2
-Spawn	steve-hub/src/upgrades/supervisor.rs	3
+Spawn	steve-hub/src/upgrades/supervisor.rs	2
 Spawn	steve-hub/src/wire/local_service.rs	2
 Spawn	steve-i18n/src/lib.rs	1
 Spawn	steve-install/src/common.rs	1
@@ -146,3 +147,5 @@ Spawn	steve-install/src/signing.rs	18
 Spawn	steve-keyhelper/src/mac.rs	2
 Spawn	steve-modules/src/net.rs	1
 Spawn	steve-modules/src/vault/keystore/helper.rs	1
+Spawn	steve-runtime/src/process/bounded.rs	1
+Spawn	steve-runtime/src/process/macos_spawn.rs	15

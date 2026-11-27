@@ -479,6 +479,9 @@ const PROBE_TTL: Duration = Duration::from_secs(300);
 const VERSION_PROBE_TIMEOUT: Duration = Duration::from_secs(8);
 /// Per-binary model-list probe timeout.
 const MODEL_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+/// Per-stream output ceiling for `--version` and model-list CLI probes (1 MiB bounds unexpected
+/// output without truncating real version strings or model catalogs).
+const HISTORY_PROBE_MAX_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// What one harness binary says about itself.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -512,19 +515,26 @@ impl Probes {
 
 /// `execFileSync(cmd, args, {timeout})` → trimmed stdout, `""` on any failure.
 async fn run(cmd: &Path, args: &[&str], env: &[(&str, &Path)], timeout: Duration) -> String {
-    let mut c = tokio::process::Command::new(cmd);
+    let mut c = std::process::Command::new(cmd);
     c.env_remove("STEVE_UPGRADE_CONTROL_TOKEN")
         .env_remove("STEVE_SUPERVISOR_PID")
         .env_remove("STEVE_UPGRADE_ID")
-        .args(args)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
+        .args(args);
     for (k, v) in env {
         c.env(k, v);
     }
-    match tokio::time::timeout(timeout, c.output()).await {
-        Ok(Ok(o)) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+    let program = cmd.to_string_lossy().into_owned();
+    match steve_runtime::process::run_bounded_async(
+        c,
+        program,
+        steve_runtime::process::BoundedOptions {
+            max_output_bytes: HISTORY_PROBE_MAX_OUTPUT_BYTES,
+            ..steve_runtime::process::BoundedOptions::capture("history_probe", timeout)
+        },
+    )
+    .await
+    {
+        Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         _ => String::new(),
     }
 }

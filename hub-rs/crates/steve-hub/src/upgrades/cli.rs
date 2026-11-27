@@ -990,48 +990,30 @@ fn write_bytes(path: &Path, bytes: &[u8]) -> Result<()> {
     result
 }
 
+/// Upper bound for local `codesign`/`plutil`/`launchctl` checks invoked by `--upgrade-cli`.
+const UPGRADE_CLI_COMMAND_TIMEOUT: Duration = Duration::from_secs(30);
+
 fn bounded_output(mut command: Command) -> Result<Output> {
-    use std::io::Read;
-    let mut child = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()?;
-    let stdout = child.stdout.take().context("child stdout missing")?;
-    let stderr = child.stderr.take().context("child stderr missing")?;
-    let collect = |reader: Box<dyn Read + Send>| {
-        std::thread::spawn(move || -> std::io::Result<Vec<u8>> {
-            let mut bytes = Vec::new();
-            reader.take(MAX_JSON + 1).read_to_end(&mut bytes)?;
-            Ok(bytes)
-        })
-    };
-    let out = collect(Box::new(stdout));
-    let err = collect(Box::new(stderr));
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let status = loop {
-        if let Some(status) = child.try_wait()? {
-            break Some(status);
+    let program = command.get_program().to_string_lossy().into_owned();
+    steve_runtime::process::run_bounded(
+        &mut command,
+        &program,
+        steve_runtime::process::BoundedOptions {
+            max_output_bytes: MAX_JSON as usize,
+            ..steve_runtime::process::BoundedOptions::capture(
+                "upgrade_cli",
+                UPGRADE_CLI_COMMAND_TIMEOUT,
+            )
+        },
+    )
+    .map_err(|err| match err {
+        steve_runtime::process::CommandError::TimedOut { .. } => {
+            anyhow::anyhow!("service/signature command timed out")
         }
-        if std::time::Instant::now() >= deadline {
-            let _ = child.kill();
-            let _ = child.wait();
-            break None;
+        steve_runtime::process::CommandError::OutputLimitExceeded { .. } => {
+            anyhow::anyhow!("command output exceeds limit")
         }
-        std::thread::sleep(Duration::from_millis(20));
-    };
-    let stdout = out
-        .join()
-        .map_err(|_| anyhow::anyhow!("command output reader stopped"))??;
-    let stderr = err
-        .join()
-        .map_err(|_| anyhow::anyhow!("command error reader stopped"))??;
-    if stdout.len() as u64 > MAX_JSON || stderr.len() as u64 > MAX_JSON {
-        bail!("command output exceeds limit")
-    }
-    Ok(Output {
-        status: status.context("service/signature command timed out")?,
-        stdout,
-        stderr,
+        other => anyhow::Error::new(other),
     })
 }
 

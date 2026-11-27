@@ -923,71 +923,34 @@ pub(crate) fn fingerprint(dir: &Path) -> Option<Revision> {
 }
 
 fn git_fingerprint(dir: &Path) -> Option<Revision> {
-    use std::io::Read;
-    use std::os::fd::AsRawFd;
-    use std::os::unix::process::CommandExt;
-
-    let mut child = Command::new("git")
-        .args([
-            "status",
-            "--porcelain=v2",
-            "--branch",
-            "-z",
-            "--untracked-files=normal",
-        ])
-        .current_dir(dir)
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .process_group(0)
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .spawn()
-        .ok()?;
-    let mut pipe = child.stdout.take()?;
-    let flags = unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_GETFL) };
-    if flags < 0
-        || unsafe { libc::fcntl(pipe.as_raw_fd(), libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0
-    {
-        let _ = child.kill();
-        let _ = child.wait();
+    let mut cmd = Command::new("git");
+    cmd.args([
+        "status",
+        "--porcelain=v2",
+        "--branch",
+        "-z",
+        "--untracked-files=normal",
+    ])
+    .current_dir(dir)
+    .env("GIT_OPTIONAL_LOCKS", "0")
+    .env("GIT_NO_LAZY_FETCH", "1")
+    .env("GIT_TERMINAL_PROMPT", "0");
+    let out = steve_runtime::process::run_bounded(
+        &mut cmd,
+        "git status",
+        steve_runtime::process::BoundedOptions {
+            max_output_bytes: WORKSPACE_PROBE_OUTPUT_CAP,
+            ..steve_runtime::process::BoundedOptions::capture(
+                "workspace_fingerprint",
+                WORKSPACE_PROBE_TIMEOUT,
+            )
+        },
+    )
+    .ok()?;
+    if !out.status.success() {
         return None;
     }
-    let until = std::time::Instant::now() + WORKSPACE_PROBE_TIMEOUT;
-    let mut output = Vec::new();
-    let mut bytes = [0u8; 4096];
-    let ok = loop {
-        for _ in 0..16 {
-            match pipe.read(&mut bytes) {
-                Ok(0) | Err(_) => break,
-                Ok(n) => output.extend_from_slice(&bytes[..n]),
-            }
-        }
-        if std::time::Instant::now() >= until || output.len() > WORKSPACE_PROBE_OUTPUT_CAP {
-            unsafe {
-                libc::kill(-(child.id() as i32), libc::SIGKILL);
-            }
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        match child.try_wait().ok()? {
-            Some(status) => {
-                while let Ok(n) = pipe.read(&mut bytes) {
-                    if n == 0 || output.len() + n > WORKSPACE_PROBE_OUTPUT_CAP {
-                        break;
-                    }
-                    output.extend_from_slice(&bytes[..n]);
-                }
-                break status.success();
-            }
-            None => std::thread::sleep(std::time::Duration::from_millis(10)),
-        }
-    };
-    if !ok {
-        return None;
-    }
+    let output = out.stdout;
 
     let mut hasher = sha2::Sha256::new();
     hasher.update(b"git-v2\0");

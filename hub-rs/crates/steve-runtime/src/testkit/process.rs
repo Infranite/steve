@@ -322,6 +322,57 @@ impl Command {
         }
         child?.wait_with_output()
     }
+    /// Run the guarded command with a hard wall-clock deadline, bounded pipe draining, and safe
+    /// pre-reap teardown. On timeout or error, returns a human-readable diagnostic containing any
+    /// partial stdout/stderr already captured.
+    pub fn output_within(&mut self, timeout: Duration) -> Result<Output, String> {
+        if !self.stdio[0] {
+            self.inner.stdin(Stdio::null());
+        }
+        if !self.stdio[1] {
+            self.inner.stdout(Stdio::piped());
+        }
+        if !self.stdio[2] {
+            self.inner.stderr(Stdio::piped());
+        }
+        let prepared = self
+            .prepare()
+            .map_err(|e| format!("prepare test command: {e}"))?;
+        let spawned = self.inner.spawn();
+        if !self.stdio[0] {
+            self.inner.stdin(Stdio::inherit());
+        }
+        if !self.stdio[1] {
+            self.inner.stdout(Stdio::inherit());
+        }
+        if !self.stdio[2] {
+            self.inner.stderr(Stdio::inherit());
+        }
+        let mut child = spawned.map_err(|e| format!("spawn test command: {e}"))?;
+        let mut life = Some(prepared.release());
+        let pid = child.id();
+        let stdout_fd = child.stdout.take().map(OwnedFd::from);
+        let stderr_fd = child.stderr.take().map(OwnedFd::from);
+        crate::process::bounded::collect_spawned_within(
+            child,
+            stdout_fd,
+            stderr_fd,
+            timeout,
+            crate::process::DEFAULT_MAX_OUTPUT_BYTES,
+            || {
+                if let Some(writer) = life.take() {
+                    writer.teardown();
+                }
+            },
+        )
+        .map_err(|(err, stdout, stderr)| {
+            format!(
+                "test command (pid {pid}): {err}\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&stdout),
+                String::from_utf8_lossy(&stderr),
+            )
+        })
+    }
     pub fn status(&mut self) -> io::Result<ExitStatus> {
         self.spawn()?.wait()
     }

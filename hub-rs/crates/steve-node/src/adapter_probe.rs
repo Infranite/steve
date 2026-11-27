@@ -17,9 +17,16 @@ use steve_node_api::{
     login_shell_path_script, shell_supports_interactive_login,
 };
 
+/// Cache TTL for adapter discovery probes (30 minutes) unless the Hub requests a fresh probe.
 const TTL: Duration = Duration::from_secs(1800);
+/// Upper bound for ACP adapter `initialize` + scratch `session/new` handshake.
 const INITIALIZE: Duration = Duration::from_secs(20);
+/// Upper bound for probing the user's interactive/login shell `PATH` so slow rc scripts cannot
+/// block Node discovery.
 const LOGIN_SHELL_PROBE_TIMEOUT: Duration = Duration::from_secs(LOGIN_SHELL_PROBE_TIMEOUT_SECS);
+/// Maximum stdout/stderr bytes accepted from a login-shell `PATH` probe (256 KiB covers any real
+/// PATH plus rc banners while bounding memory).
+const SHELL_PROBE_MAX_OUTPUT_BYTES: usize = 256 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LoginShellEnv {
@@ -62,63 +69,29 @@ async fn run_shell_probe(
     extra_env: &[(&str, &str)],
     timeout: Duration,
 ) -> Option<String> {
-    let mut cmd = tokio::process::Command::new(shell);
-    cmd.args(args)
-        .env("TERM", "dumb")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
-        .kill_on_drop(true);
+    let mut cmd = steve_runtime::process::DetachedCommand::new(shell);
+    cmd.args(args).env("TERM", "dumb");
     for (key, value) in extra_env {
         cmd.env(key, value);
     }
-    #[cfg(unix)]
-    {
-        // Start a detached session (`setsid`) so interactive shells have no controlling `/dev/tty`
-        // (avoiding SIGTTIN/SIGTTOU stops or `/dev/tty` prompts) while still owning a dedicated
-        // process group (`pgid == pid`) that we can SIGKILL as a whole on timeout.
-        // SAFETY: `libc::setsid` is async-signal-safe per POSIX.
-        unsafe {
-            cmd.pre_exec(|| {
-                if libc::setsid() == -1 {
-                    return Err(std::io::Error::last_os_error());
-                }
-                Ok(())
-            });
-        }
-    }
-    let mut child = cmd.spawn().ok()?;
-    let pid = child.id();
-    let mut stdout_pipe = child.stdout.take()?;
-    let read_task = tokio::spawn(async move {
-        use tokio::io::AsyncReadExt as _;
-        let mut buf = Vec::new();
-        let _ = stdout_pipe.read_to_end(&mut buf).await;
-        buf
-    });
-    let status = match tokio::time::timeout(timeout, child.wait()).await {
-        Ok(Ok(status)) => status,
-        _ => {
-            #[cfg(unix)]
-            if let Some(pid) = pid {
-                // SAFETY: child runs in its own process group (`process_group(0)`), so `-pid`
-                // terminates only the timed-out shell probe and its descendants.
-                unsafe {
-                    libc::kill(-(pid as libc::pid_t), libc::SIGKILL);
-                }
-            }
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            read_task.abort();
-            return None;
-        }
-    };
-    if !status.success() {
-        read_task.abort();
+    // `DetachedCommand` uses `POSIX_SPAWN_SETSID` on macOS (zero `fork()` in multithreaded
+    // `steve-node`) and `setsid()` on Linux so interactive shells have no controlling `/dev/tty`,
+    // while `kill_group_after_exit` terminates any `.zshrc` background helpers BEFORE reaping.
+    let output = steve_runtime::process::run_detached_async(
+        cmd,
+        shell,
+        steve_runtime::process::BoundedOptions {
+            max_output_bytes: SHELL_PROBE_MAX_OUTPUT_BYTES,
+            kill_group_after_exit: true,
+            ..steve_runtime::process::BoundedOptions::capture("shell_probe", timeout)
+        },
+    )
+    .await
+    .ok()?;
+    if !output.status.success() {
         return None;
     }
-    let stdout = read_task.await.ok()?;
-    extract_login_shell_path(&String::from_utf8_lossy(&stdout))
+    extract_login_shell_path(&String::from_utf8_lossy(&output.stdout))
 }
 
 async fn probe_shell_env_for(
@@ -778,6 +751,51 @@ exec /bin/sh -c "$script"
             "expected login_bin from .zprofile fallback in {:?}",
             fallback.path
         );
+
+        // Background grandchild launched by .zshrc inheriting stdout must not hang read_task or survive.
+        let bg_pid_file = dir.path().join("zshrc-bg.pid");
+        std::fs::write(
+            zdotdir.join(".zshrc"),
+            format!(
+                "/bin/sleep 60 & printf '%s' \"$!\" > '{}'\nexport PATH=\"{}:$PATH\"\n",
+                bg_pid_file.display(),
+                rc_bin.display()
+            ),
+        )
+        .unwrap();
+        let started = Instant::now();
+        let bg_probed =
+            probe_shell_env_for(fake_zsh.to_str().unwrap(), &env, LOGIN_SHELL_PROBE_TIMEOUT)
+                .await
+                .expect("background grandchild holding stdout must not hang shell probe");
+        assert_eq!(
+            steve_acp::which_in("agy", Some(OsStr::new(&bg_probed.path))),
+            Some(agy),
+            "expected agy from .zshrc despite background child: {:?}",
+            bg_probed.path
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(3),
+            "grandchild pipe cleanup must return promptly, took {:?}",
+            started.elapsed()
+        );
+        #[cfg(unix)]
+        {
+            let bg_pid: libc::pid_t = std::fs::read_to_string(&bg_pid_file)
+                .unwrap()
+                .trim()
+                .parse()
+                .unwrap();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while unsafe { libc::kill(bg_pid, 0) } == 0 && Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                unsafe { libc::kill(bg_pid, 0) },
+                -1,
+                "background .zshrc child {bg_pid} survived shell probe"
+            );
+        }
     }
 
     fn write_exec(path: &Path, body: &str) {

@@ -24,11 +24,8 @@
 //! `GIT_CONFIG_PARAMETERS`…). With `STEVE_FORBID_REAL_HOSTS=1` (the test guard) a push to anything
 //! but a local path or a loopback address is refused here too, whatever the Hub let through.
 
-use std::io::Read;
-use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use sha2::Digest as _;
 use steve_node_api::*;
@@ -888,11 +885,7 @@ fn git(dir: &Path) -> std::process::Command {
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_OPTIONAL_LOCKS", "0")
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .env("GIT_OPTIONAL_LOCKS", "0");
     c
 }
 
@@ -911,50 +904,32 @@ impl Out {
     }
 }
 
-/// Runs a git read in `dir`, bounded; its group is killed when it ends.
+/// Runs a git read in `dir`, bounded; its group is killed before reaping.
 fn read(dir: &Path, args: &[&str]) -> ApiResult<Out> {
     let mut c = git(dir);
     c.args(args);
-    let mut child = c
-        .spawn()
-        .map_err(|e| Error::new(Code::Internal, format!("git: {e}")))?;
-    let pgid = child.id() as libc::pid_t;
-    let drain = |p: Option<Box<dyn Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut v = Vec::new();
-            if let Some(p) = p {
-                let _ = p.take(READ_CAP as u64 + 1).read_to_end(&mut v);
-            }
-            v
-        })
-    };
-    let out = drain(child.stdout.take().map(|p| Box::new(p) as _));
-    let err = drain(child.stderr.take().map(|p| Box::new(p) as _));
-    let until = Instant::now() + READ_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break Some(s),
-            Ok(None) if Instant::now() < until => std::thread::sleep(Duration::from_millis(5)),
-            _ => break None,
+    let out = steve_runtime::process::run_bounded(
+        &mut c,
+        "git",
+        steve_runtime::process::BoundedOptions {
+            max_output_bytes: READ_CAP,
+            kill_group_after_exit: true,
+            ..steve_runtime::process::BoundedOptions::capture("node_git_read", READ_TIMEOUT)
+        },
+    )
+    .map_err(|err| match err {
+        steve_runtime::process::CommandError::TimedOut { .. }
+        | steve_runtime::process::CommandError::PipeDrainTimedOut { .. } => {
+            Error::new(Code::Stale, "git took too long")
         }
-    };
-    // what it started goes with it (the group's leader may be reaped: only its group id is used)
-    unsafe {
-        libc::kill(-pgid, libc::SIGKILL);
-    }
-    let Some(status) = status else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return Err(Error::new(Code::Stale, "git took too long"));
-    };
-    let stdout = out.join().unwrap_or_default();
-    let stderr = err.join().unwrap_or_default();
-    if stdout.len() > READ_CAP {
-        return Err(Error::new(Code::Exhausted, "git printed too much"));
-    }
+        steve_runtime::process::CommandError::OutputLimitExceeded { .. } => {
+            Error::new(Code::Exhausted, "git printed too much")
+        }
+        other => Error::new(Code::Internal, format!("git: {other}")),
+    })?;
     Ok(Out {
-        code: status.code(),
-        stderr,
+        code: out.status.code(),
+        stderr: out.stderr,
     })
 }
 
