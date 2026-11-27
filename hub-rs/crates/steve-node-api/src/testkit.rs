@@ -196,9 +196,56 @@ pub enum Scripted {
     Unknown,
 }
 
+#[derive(Default)]
+struct DeliveryOrder {
+    pending: std::collections::VecDeque<u64>,
+    next: u64,
+    waiters: HashMap<u64, std::task::Waker>,
+}
+
+struct DeliveryTicket<'a> {
+    node: &'a FakeNode,
+    id: u64,
+}
+
+impl DeliveryTicket<'_> {
+    async fn wait(&self) {
+        std::future::poll_fn(|cx| {
+            let mut d = self.node.delivery.lock().unwrap_or_else(|e| e.into_inner());
+            if d.pending.front() == Some(&self.id) {
+                std::task::Poll::Ready(())
+            } else {
+                d.waiters.insert(self.id, cx.waker().clone());
+                std::task::Poll::Pending
+            }
+        })
+        .await;
+    }
+}
+
+impl Drop for DeliveryTicket<'_> {
+    fn drop(&mut self) {
+        let wake = {
+            let mut d = self.node.delivery.lock().unwrap_or_else(|e| e.into_inner());
+            if let Some(pos) = d.pending.iter().position(|&id| id == self.id) {
+                d.pending.remove(pos);
+            }
+            d.waiters.remove(&self.id);
+            d.pending
+                .front()
+                .copied()
+                .and_then(|front| d.waiters.remove(&front))
+        };
+        if let Some(waker) = wake {
+            waker.wake();
+        }
+    }
+}
+
 pub struct FakeNode {
     node: NodeId,
     st: Mutex<State>,
+    delivery: Mutex<DeliveryOrder>,
     sink: Mutex<Option<Arc<dyn EventSink>>>,
     secrets: Mutex<Option<Arc<dyn HubSecrets>>>,
     hook: Mutex<Option<Hook>>,
@@ -239,10 +286,19 @@ impl FakeNode {
                 now: 1_000,
                 ..Default::default()
             }),
+            delivery: Mutex::new(DeliveryOrder::default()),
             sink: Mutex::new(None),
             secrets: Mutex::new(None),
             hook: Mutex::new(None),
         })
+    }
+
+    fn alloc_delivery(&self) -> DeliveryTicket<'_> {
+        let mut d = self.delivery.lock().unwrap_or_else(|e| e.into_inner());
+        let id = d.next;
+        d.next += 1;
+        d.pending.push_back(id);
+        DeliveryTicket { node: self, id }
     }
 
     fn st(&self) -> std::sync::MutexGuard<'_, State> {
@@ -506,7 +562,7 @@ impl FakeNode {
         self.at(Point::BeforeAccept(method));
         c.check_window()?;
         let digest = c.digest(method)?;
-        let (receipt, events, drop_reply) = {
+        let (receipt, ticket, events, drop_reply) = {
             let mut st = self.st();
             let (drop_reply, unknown) = match Self::admit(&mut st, method, c, &digest)? {
                 Admitted::Resend(r) => return Ok(r),
@@ -517,9 +573,10 @@ impl FakeNode {
             };
             let d = decide(&mut st)?;
             let (receipt, events) = Self::record_new(&mut st, method, c, digest, d, unknown);
-            (receipt, events, drop_reply)
+            let ticket = (!events.is_empty()).then(|| self.alloc_delivery());
+            (receipt, ticket, events, drop_reply)
         };
-        self.finish_accept(method, c, receipt, events, drop_reply)
+        self.finish_accept(method, c, receipt, ticket, events, drop_reply)
             .await
     }
 
@@ -551,7 +608,7 @@ impl FakeNode {
             new
         };
         let secrets = self.take_secrets(&c.id, refs).await?;
-        let (receipt, events) = {
+        let (receipt, ticket, events) = {
             let mut st = self.st();
             // the same command sent twice at once: the first one recorded answers both
             if let Some(a) = st.inbox.get(&c.id) {
@@ -564,9 +621,11 @@ impl FakeNode {
             }
             check(&st)?;
             let d = decide(&mut st, &secrets)?;
-            Self::record_new(&mut st, method, c, digest, d, unknown)
+            let (receipt, events) = Self::record_new(&mut st, method, c, digest, d, unknown);
+            let ticket = (!events.is_empty()).then(|| self.alloc_delivery());
+            (receipt, ticket, events)
         };
-        self.finish_accept(method, c, receipt, events, drop_reply)
+        self.finish_accept(method, c, receipt, ticket, events, drop_reply)
             .await
     }
 
@@ -663,12 +722,13 @@ impl FakeNode {
         method: &'static str,
         c: &Command<T>,
         receipt: Receipt,
+        ticket: Option<DeliveryTicket<'_>>,
         events: Vec<NodeEvent>,
         drop_reply: bool,
     ) -> ApiResult<Receipt> {
         self.at(Point::AfterAccept(method));
         // a Hub that cannot take the events now gets them on replay: the command stays accepted
-        self.deliver(events).await;
+        self.deliver(ticket, events).await;
         if drop_reply {
             return Err(
                 Error::outcome_unknown(&c.id, "the answer was lost (scripted)")
@@ -726,10 +786,14 @@ impl FakeNode {
         ev
     }
 
-    async fn deliver(&self, events: Vec<NodeEvent>) {
+    async fn deliver(&self, ticket: Option<DeliveryTicket<'_>>, events: Vec<NodeEvent>) {
         if events.is_empty() {
             return;
         }
+        let Some(ticket) = ticket else {
+            return;
+        };
+        ticket.wait().await;
         let sink = self.sink.lock().unwrap().clone();
         let Some(sink) = sink else { return };
         self.at(Point::BeforeCommit);
@@ -742,6 +806,7 @@ impl FakeNode {
             }
             Err(_) => self.st().delivery_failures += 1,
         }
+        drop(ticket);
     }
 
     fn apply_ack(&self, ack: &EventAck) -> ApiResult<()> {
@@ -781,7 +846,7 @@ impl FakeNode {
 
     /// What the harness reports while it runs (text, tools, usage…), for a live execution or a session.
     pub async fn emit(&self, subject: Subject, body: EventBody) -> ApiResult<()> {
-        let ev = {
+        let (ticket, ev) = {
             let mut st = self.st();
             match &subject {
                 Subject::Execution(e) => {
@@ -792,16 +857,17 @@ impl FakeNode {
                 }
                 _ => {}
             }
-            Self::record(&mut st, subject, body)
+            let ev = Self::record(&mut st, subject, body);
+            (self.alloc_delivery(), ev)
         };
-        self.deliver(vec![ev]).await;
+        self.deliver(Some(ticket), vec![ev]).await;
         Ok(())
     }
 
     /// The harness asks before a tool runs: the attempt waits until the Hub answers. The same request
     /// again changes nothing; another one under the same id is a conflict.
     pub async fn ask_permission(&self, req: PermissionRequest) -> ApiResult<()> {
-        let ev = {
+        let (ticket, ev) = {
             let mut st = self.st();
             if let Some(old) = st.waiting.get(&req.id) {
                 return if *old == req {
@@ -833,13 +899,14 @@ impl FakeNode {
                 a.receipt.state = Observed::Waiting { on };
             }
             st.waiting.insert(req.id.clone(), req.clone());
-            Self::record(
+            let ev = Self::record(
                 &mut st,
                 Subject::Execution(req.execution.clone()),
                 EventBody::PermissionRequested { request: req },
-            )
+            );
+            (self.alloc_delivery(), ev)
         };
-        self.deliver(vec![ev]).await;
+        self.deliver(Some(ticket), vec![ev]).await;
         Ok(())
     }
 
@@ -854,7 +921,7 @@ impl FakeNode {
                 "the job's end contradicts its outcome",
             ));
         }
-        let evs = {
+        let (ticket, evs) = {
             let mut st = self.st();
             let op = match st.attempts.get(exec.attempt()) {
                 Some((e, op)) if e == exec => op.clone(),
@@ -916,9 +983,10 @@ impl FakeNode {
                 Subject::Execution(exec.clone()),
                 EventBody::AttemptEnded { completion },
             ));
-            evs
+            let ticket = (!evs.is_empty()).then(|| self.alloc_delivery());
+            (ticket, evs)
         };
-        self.deliver(evs).await;
+        self.deliver(ticket, evs).await;
         Ok(())
     }
 
@@ -2451,12 +2519,34 @@ impl Node for FakeNode {
 pub struct RecordingSink {
     held: Mutex<BTreeMap<(StreamId, Epoch, u64), NodeEvent>>,
     fail: Mutex<bool>,
+    on_commit: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl RecordingSink {
-    /// Committed events in stream order.
+    /// Committed events in stream order (including any held past an unreceived sequence gap).
     pub fn events(&self) -> Vec<NodeEvent> {
         self.held.lock().unwrap().values().cloned().collect()
+    }
+    /// Committed events within each `(stream, epoch)`'s contiguous `1..=frontier` prefix.
+    /// When delivery pipelines multiple batches (`IN_FLIGHT > 1`), waiting on an event here
+    /// guarantees every preceding event on the same stream has already been committed.
+    pub fn contiguous_events(&self) -> Vec<NodeEvent> {
+        let held = self.held.lock().unwrap();
+        let mut frontier: BTreeMap<(StreamId, Epoch), u64> = BTreeMap::new();
+        let mut out = Vec::with_capacity(held.len());
+        for ((s, ep, seq), ev) in held.iter() {
+            let f = frontier.entry((s.clone(), ep.clone())).or_insert(0);
+            if *seq == *f + 1 {
+                *f = *seq;
+                out.push(ev.clone());
+            }
+        }
+        out
+    }
+    /// Register a callback invoked after every accepted `commit` so async waiters can wake
+    /// directly on event arrival without polling.
+    pub fn on_commit(&self, f: impl Fn() + Send + Sync + 'static) {
+        *self.on_commit.lock().unwrap() = Some(Arc::new(f));
     }
     /// The body types of committed events, in stream order.
     pub fn kinds(&self) -> Vec<String> {
@@ -2505,6 +2595,7 @@ impl EventSink for RecordingSink {
             .iter()
             .map(|e| (e.cursor.stream.clone(), e.cursor.epoch.clone()))
             .collect();
+        let non_empty = !batch.events.is_empty();
         for e in batch.events {
             let k = (
                 e.cursor.stream.clone(),
@@ -2523,6 +2614,10 @@ impl EventSink for RecordingSink {
             if *seq == *f + 1 {
                 *f = *seq;
             }
+        }
+        drop(held);
+        if non_empty && let Some(cb) = self.on_commit.lock().unwrap().clone() {
+            cb();
         }
         Ok(EventAck {
             durable: frontier

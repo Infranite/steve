@@ -20,6 +20,7 @@ struct T {
     log: PathBuf,
     adapter: PathBuf,
     sink: Arc<RecordingSink>,
+    sink_wake: Arc<tokio::sync::Notify>,
 }
 
 #[tokio::test]
@@ -92,12 +93,17 @@ impl T {
             std::fs::set_permissions(&adapter, std::fs::Permissions::from_mode(0o755)).unwrap();
         }
         std::fs::create_dir_all(root.join("work/proj")).unwrap();
+        let sink = Arc::new(RecordingSink::default());
+        let sink_wake = Arc::new(tokio::sync::Notify::new());
+        let wake = sink_wake.clone();
+        sink.on_commit(move || wake.notify_waiters());
         T {
             root: root.to_path_buf(),
             home,
             log,
             adapter,
-            sink: Arc::new(RecordingSink::default()),
+            sink,
+            sink_wake,
             _dir: None,
         }
     }
@@ -169,7 +175,7 @@ impl T {
 
     fn ended(&self) -> Vec<Completion> {
         self.sink
-            .events()
+            .contiguous_events()
             .into_iter()
             .filter_map(|e| match e.body {
                 EventBody::AttemptEnded { completion } => Some(completion),
@@ -178,9 +184,59 @@ impl T {
             .collect()
     }
 
+    fn attempt_ended(&self, attempt: &str) -> Option<Completion> {
+        self.sink
+            .contiguous_events()
+            .into_iter()
+            .find_map(|e| match (&e.subject, e.body) {
+                (Subject::Execution(exec), EventBody::AttemptEnded { completion })
+                    if exec.attempt().as_str() == attempt =>
+                {
+                    Some(completion)
+                }
+                _ => None,
+            })
+    }
+
+    /// Waits on `RecordingSink` commit notifications until `attempt`'s `AttemptEnded` is delivered
+    /// within its stream's contiguous prefix, so every preceding `TextDelta` on that stream is
+    /// already present in `self.text()`.
+    async fn wait_for_attempt_delivered(
+        &self,
+        n: &LocalNode,
+        op: &str,
+        attempt: &str,
+    ) -> Completion {
+        let op_id = OperationId::new(op).unwrap();
+        let diagnostic = steve_runtime::testkit::on_timeout(|| async {
+            let op_state = n.operation(op_id.clone()).await;
+            let raw_ended = self.sink.events().into_iter().any(|e| {
+                matches!(
+                    (&e.subject, &e.body),
+                    (Subject::Execution(exec), EventBody::AttemptEnded { .. })
+                        if exec.attempt().as_str() == attempt
+                )
+            });
+            let acp_log = std::fs::read_to_string(&self.log).unwrap_or_default();
+            format!(
+                "contiguous AttemptEnded delivery for op={op} attempt={attempt}; \
+                 op_state={op_state:?}, raw_ended_with_gap={raw_ended}, \
+                 delivered_kinds={:?}, delivered_text={:?}, acp_log:\n{acp_log}",
+                self.kinds(),
+                self.text(),
+            )
+        });
+        steve_runtime::testkit::eventually_notified(diagnostic, &self.sink_wake, || {
+            std::future::ready(self.attempt_ended(attempt).is_some())
+        })
+        .await;
+        self.attempt_ended(attempt)
+            .expect("contiguous AttemptEnded after wait")
+    }
+
     fn text(&self) -> String {
         self.sink
-            .events()
+            .contiguous_events()
             .into_iter()
             .filter_map(|e| match e.body {
                 EventBody::TextDelta { text, .. } => Some(text),
@@ -6091,8 +6147,24 @@ async fn antigravity_isolated_state_merges_mcp_allow_and_runs_in_sandbox() {
         t_cmd.run.choice.model = None;
         t_cmd.run.policy.permissions = PermissionMode::FullAccess;
         n.start_turn(now_cmd("op_turn_agy", t_cmd)).await.unwrap();
-        assert!(ok(&finished(&n, "op_turn_agy").await));
-        assert_eq!(t.text(), "cat:EPERM ");
+        let completion = t
+            .wait_for_attempt_delivered(&n, "op_turn_agy", "a_agy_1")
+            .await;
+        assert_eq!(
+            completion.outcome,
+            Outcome::Succeeded,
+            "antigravity sandbox turn did not succeed: {completion:?}; kinds={:?}, text={:?}",
+            t.kinds(),
+            t.text()
+        );
+        let text = t.text();
+        assert_eq!(
+            text,
+            "cat:EPERM ",
+            "expected sandboxed @cat EPERM after contiguous AttemptEnded delivery; completion={completion:?}, kinds={:?}, acp_log:\n{}",
+            t.kinds(),
+            std::fs::read_to_string(&t.log).unwrap_or_default()
+        );
     }
 
     n.shutdown().await;
@@ -6607,14 +6679,29 @@ async fn codex_runs_inside_steve_sandbox_and_blocks_control_plane() {
         t_cmd.run.choice.model = None;
         t_cmd.run.policy.permissions = PermissionMode::FullAccess;
         n.start_turn(now_cmd("op_turn_cx", t_cmd)).await.unwrap();
-        assert!(ok(&finished(&n, "op_turn_cx").await));
+        let completion = t
+            .wait_for_attempt_delivered(&n, "op_turn_cx", "a_cx_1")
+            .await;
+        assert_eq!(
+            completion.outcome,
+            Outcome::Succeeded,
+            "codex sandbox turn did not succeed: {completion:?}; kinds={:?}, text={:?}",
+            t.kinds(),
+            t.text()
+        );
         let text = t.text();
         assert!(
             !text.contains("SECRET_ENV_CANARY"),
             "control-plane steve.env leaked in FullAccess: {text:?}"
         );
         if cfg!(target_os = "macos") {
-            assert_eq!(text, "cat:EPERM ");
+            assert_eq!(
+                text,
+                "cat:EPERM ",
+                "expected sandboxed @cat EPERM after contiguous AttemptEnded delivery; completion={completion:?}, kinds={:?}, acp_log:\n{}",
+                t.kinds(),
+                std::fs::read_to_string(&t.log).unwrap_or_default()
+            );
         }
     }
 

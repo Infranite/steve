@@ -20,7 +20,9 @@ use steve_hub::wire::node_runtime::{
 };
 use steve_node_api::testkit::{FakeNode, Scripted, build};
 use steve_node_api::*;
-use steve_runtime::testkit::{eventually_sync, on_timeout};
+use steve_runtime::testkit::{
+    Description, EVENTUALLY, eventually_notified, eventually_sync, on_timeout,
+};
 use steve_runtime::{Clock, FakeClock};
 use steve_store::testkit::hub::{mutations, node_checks, node_fixtures as fixtures};
 use steve_store::{FnPublisher, Store};
@@ -259,6 +261,7 @@ struct ProxyNode {
     generation: AtomicU64,
     start_intercept: Mutex<Option<StartIntercept>>,
     start_attempts: AtomicUsize,
+    start_wake: tokio::sync::Notify,
 }
 
 impl ProxyNode {
@@ -269,6 +272,7 @@ impl ProxyNode {
             generation: AtomicU64::new(1),
             start_intercept: Mutex::new(None),
             start_attempts: AtomicUsize::new(0),
+            start_wake: tokio::sync::Notify::new(),
         })
     }
 
@@ -313,7 +317,11 @@ impl SessionExecutor for ProxyNode {
                     "interrupted after lease before node admission",
                 ))
             }
-            None => self.inner.start_turn(c).await,
+            None => {
+                let res = self.inner.start_turn(c).await;
+                self.start_wake.notify_waiters();
+                res
+            }
         }
     }
     async fn session(&self, id: SessionId) -> ApiResult<SessionView> {
@@ -444,7 +452,10 @@ struct HubProcess {
 const HUB_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
 impl HubProcess {
-    fn spawn(
+    /// Constructs the simulated Hub's Tokio runtime and `NodeRuntime` without starting its
+    /// background workers yet, so callers can wire/retarget the Node's `EventSink` before the
+    /// first reconcile or command send runs.
+    fn new(
         store: Store,
         node: Arc<ProxyNode>,
         domain: Arc<DomainLog>,
@@ -458,19 +469,20 @@ impl HubProcess {
             .build()
             .unwrap_or_else(|e| {
                 panic!(
-                    "HubProcess::spawn tokio runtime failed: {e}; fds={:?}",
+                    "HubProcess::new tokio runtime failed: {e}; fds={:?}",
                     open_fd_inventory()
                 )
             });
         let rt = NodeRuntime::with_clock(store, node, domain, clock);
-        {
-            let _guard = tokio.enter();
-            rt.start();
-        }
         Self {
             rt,
             tokio: Some(tokio),
         }
+    }
+
+    fn start(&self) {
+        let _guard = self.tokio.as_ref().expect("hub tokio runtime").enter();
+        self.rt.start();
     }
 
     async fn kill(mut self) {
@@ -518,9 +530,10 @@ impl MatrixRig {
         let proxy = ProxyNode::new(node.clone());
         let domain = Arc::new(DomainLog::default());
         let _ = domain.store.set(store.clone());
-        let hub = HubProcess::spawn(store.clone(), proxy.clone(), domain.clone(), clock.clone());
+        let hub = HubProcess::new(store.clone(), proxy.clone(), domain.clone(), clock.clone());
         let sink = GateSink::new(&hub.rt);
         node.connect(sink.clone());
+        hub.start();
         let rig = Self {
             _dir: dir,
             store,
@@ -531,7 +544,8 @@ impl MatrixRig {
             sink,
             hub: Some(hub),
         };
-        eventually_sync("initial reconcile", || rig.rt().is_reconciled()).await;
+        rig.wait_ledger("initial reconcile", || rig.rt().is_reconciled())
+            .await;
         rig.rt()
             .bind(&Binding {
                 session: SESSION.into(),
@@ -585,6 +599,36 @@ impl MatrixRig {
         self.node.set_now(at);
     }
 
+    /// Event-driven wait over committed `NodeRuntime` ledger writes and reconciliation flips.
+    async fn wait_ledger(&self, what: impl Description, mut condition: impl FnMut() -> bool) {
+        let mut rx = self.rt().subscribe_ledger();
+        let deadline = tokio::time::Instant::now() + EVENTUALLY;
+        loop {
+            rx.borrow_and_update();
+            if condition() {
+                return;
+            }
+            match tokio::time::timeout_at(deadline, rx.changed()).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    if condition() {
+                        return;
+                    }
+                    panic!(
+                        "runtime dropped while waiting for {}",
+                        what.describe().await
+                    );
+                }
+                Err(_) => {
+                    if condition() {
+                        return;
+                    }
+                    panic!("timed out waiting for {}", what.describe().await);
+                }
+            }
+        }
+    }
+
     async fn restart_hub(&mut self) {
         if let Some(old) = self.hub.take() {
             old.kill().await;
@@ -592,15 +636,19 @@ impl MatrixRig {
         // Mirror Hub boot closing any cut statistics rows before the new coordinator starts.
         acp_stats::interrupt_open(&self.store, self.clock.now());
         self.proxy.bump_generation();
-        let next = HubProcess::spawn(
+        let next = HubProcess::new(
             self.store.clone(),
             self.proxy.clone(),
             self.domain.clone(),
             self.clock.clone(),
         );
+        // Retarget the Node's EventSink BEFORE starting `next.rt`, so reconciliation ->
+        // `plan_waiting()` -> `start_turn` can never deliver `AttemptStarted` to the dead old Hub.
         self.sink.retarget(&next.rt);
+        next.start();
         self.hub = Some(next);
-        eventually_sync("restarted Hub reconciled", || self.rt().is_reconciled()).await;
+        self.wait_ledger("restarted Hub reconciled", || self.rt().is_reconciled())
+            .await;
     }
 
     async fn restart_node(&self) {
@@ -623,25 +671,30 @@ impl MatrixRig {
     }
 
     async fn finish_active_turn(&self) {
-        eventually_sync(
+        eventually_notified(
             on_timeout(|| async {
                 format!(
-                    "node accepted active turn; starts={}, reconciled={}, observes={}, snap={:?}",
+                    "node accepted active turn; starts={}, reconciled={}, observes={}, delivery_failures={}, unacked={}, snap={:?}",
                     self.node_executed_starts(),
                     self.rt().is_reconciled(),
                     self.proxy.observes.load(Ordering::SeqCst),
+                    self.node.delivery_failures(),
+                    self.node.unacked(),
                     fixtures::session_runtime_snapshot(&self.store, SESSION),
                 )
             }),
-            || self.node_executed_starts() == 1,
+            &self.proxy.start_wake,
+            || std::future::ready(self.node_executed_starts() == 1),
         )
         .await;
         let exec = self.latest_execution();
-        eventually_sync(
+        self.wait_ledger(
             on_timeout(|| async {
                 format!(
-                    "attempt running before finish; attempt={}, snap={:?}",
+                    "attempt running before finish; attempt={}, delivery_failures={}, unacked={}, snap={:?}",
                     exec.attempt(),
+                    self.node.delivery_failures(),
+                    self.node.unacked(),
                     fixtures::session_runtime_snapshot(&self.store, SESSION),
                 )
             }),

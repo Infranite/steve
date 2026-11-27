@@ -2345,25 +2345,39 @@ sys.stderr.flush()
         assert!(pid > 0);
         drop(secret_file);
 
-        let wait_child = |pid: u32| -> libc::c_int {
+        let wait_child = |pid: u32, label: &str| -> libc::c_int {
             let mut status: libc::c_int = 0;
-            let mut reaped = -1;
-            let deadline = Instant::now() + Duration::from_secs(5);
-            while Instant::now() < deadline {
-                reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
-                if reaped != 0 {
-                    break;
+            loop {
+                // SAFETY: `pid` is our direct detached child; blocking `waitpid` waits on the
+                // kernel's child-exit event directly without a wall-clock polling deadline.
+                let reaped = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, 0) };
+                if reaped == pid as libc::pid_t {
+                    return status;
                 }
-                std::thread::sleep(Duration::from_millis(10));
+                let err = io::Error::last_os_error();
+                if reaped < 0 && err.raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                let log_text = fs::read_to_string(&log_path).unwrap_or_default();
+                panic!(
+                    "waitpid for detached {label} child (pid={pid}) returned {reaped}: {err}; log:\n{log_text}"
+                );
             }
-            assert_eq!(reaped, pid as libc::pid_t, "detached child did not exit");
-            status
         };
 
-        let status = wait_child(pid);
-        assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0);
-
+        let status = wait_child(pid, "python3");
         let text = fs::read_to_string(&log_path).unwrap();
+        if libc::WIFSIGNALED(status) {
+            panic!(
+                "detached python3 child (pid={pid}) terminated by signal {}; log:\n{text}",
+                libc::WTERMSIG(status)
+            );
+        }
+        assert!(
+            libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0,
+            "detached python3 child (pid={pid}) exited abnormally (status={status}, code={:?}); log:\n{text}",
+            libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status))
+        );
         assert!(
             text.contains(&format!("OUT:{pid}:{pid}:{pid}:True:[]:False:yes\n")),
             "unexpected stdout in log:\n{text}"
@@ -2381,10 +2395,12 @@ sys.stderr.flush()
             DetachedStdio::Null,
         )
         .unwrap();
-        let sigpipe_status = wait_child(sigpipe_pid);
+        let sigpipe_status = wait_child(sigpipe_pid, "sigpipe");
         assert!(
             libc::WIFSIGNALED(sigpipe_status) && libc::WTERMSIG(sigpipe_status) == libc::SIGPIPE,
-            "expected SIGPIPE termination, got status={sigpipe_status}"
+            "expected SIGPIPE termination for detached child (pid={sigpipe_pid}), got status={sigpipe_status} (exited={:?}, signal={:?})",
+            libc::WIFEXITED(sigpipe_status).then(|| libc::WEXITSTATUS(sigpipe_status)),
+            libc::WIFSIGNALED(sigpipe_status).then(|| libc::WTERMSIG(sigpipe_status))
         );
         let _ = fs::remove_dir_all(&dir);
     }
