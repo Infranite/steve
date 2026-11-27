@@ -5,6 +5,7 @@ from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
+import shutil
 import signal
 import socket
 import subprocess
@@ -86,7 +87,10 @@ with tempfile.TemporaryDirectory(prefix="steve-release-identity-") as temp:
     def candidate(commit, label):
         ident = str(uuid.uuid4())
         target = root / label
-        target.mkdir()
+        (target / "bin").mkdir(parents=True)
+        # a candidate is a whole release: the Hub starts its local Node from the bundle's bin/
+        for name in ("steve-hub", "steve-node"):
+            shutil.copy2(binary.parent / name, target / "bin" / name)
         (target / "release.json").write_text(json.dumps(dict(format_version=1, version=args.version,
             commit=commit, hub_version=args.version, web_version=args.version, api_protocol=1,
             schema=dict(min_read=identity["schema"], max_read=identity["schema"], target=identity["schema"]), assets=[])))
@@ -126,5 +130,8 @@ with tempfile.TemporaryDirectory(prefix="steve-release-identity-") as temp:
     ident, _ = candidate(wrong_commit, "forged-bundle")
     failed = subprocess.run([str(binary)], env=dict(env, STEVE_UPGRADE_ID=ident), cwd=root,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=30)
-    assert failed.returncode != 0 and "compiled identity" in failed.stderr, (failed.returncode, failed.stdout, failed.stderr)
+    # the Hub refuses the bundle before business startup: on its own compiled identity, or first on
+    # the bundled Node's identity, which carries the same commit
+    refused = ("compiled identity", "bin/steve-node identity does not match release manifest")
+    assert failed.returncode != 0 and any(r in failed.stderr for r in refused), (failed.returncode, failed.stdout, failed.stderr)
     print("PASS actual candidate gate rejects a mismatched compiled commit before business startup")
