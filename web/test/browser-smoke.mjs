@@ -73,6 +73,7 @@ export const SMOKE = [
   "no-executor",
   "node-harnesses",
   "node-tabs",
+  "offer-card",
   "onboarding",
   "people-management",
   "person-avatar",

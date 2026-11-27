@@ -17,7 +17,8 @@ import { chatBusy, refresh } from "@/store"
 import { Markdown } from "@/components/markdown"
 import { Textarea } from "@/components/ui/textarea"
 import { clip as clipPlain } from "@/thread/topics"
-import { GITHUB_PR_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, botName, alertClosed, closeAlerts, type Msg, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
+import { GITHUB_PR_MERGE, STEVE_TOOL, st, tm, emit, chatSend, takeOffer, cancelQueued, clearFocus, focusItem, quoteMsg, decisionDraft, decide, botName, alertClosed, closeAlerts, useShellStore, type Msg, type Steps, type Update, type Item, type ItemCardState, type LiveRun } from "@/store"
+import { Select, type SelectOption } from "@/components/affect/select-clean"
 import { ItemRef, ItemNo, AlertClose, go, Pill } from "@/ui"
 import { jumpToMsg, threadMessages, threadMsg, useThreadIds, useThreadMessage } from "@/thread/history"
 import { Trans } from "react-i18next"
@@ -79,17 +80,61 @@ export function researchLiveItems(l: LiveRun): TrailItem[] {
 }
 
 /* ───────── offer · ask ───────── */
-/** "要我改吗？ [做成事项：…] [不用]" under an answer */
+const AUTO_OFFER_BOT = "__auto__"
+/** Minimum popover menu width in px so Bot descriptions and placement reasons remain readable. */
+const OFFER_BOT_MENU_MIN_WIDTH = 220
+
+/** "要我改吗？ [执行 Bot] [做成事项：…] [不用]" under an answer */
 export function OfferLine({ m }: { m: Msg }) {
-  const o = m.offer, [busy, setBusy] = useState(false), [open, setOpen] = useState(false), t = useT()
-  if (!o) return null
+  const o = m.offer
+  if (!o || o.state === "dismissed") return null
   if (o.state === "taken") return o.item ? (threadMessages().some((x) => x.card?.item === o.item) ? <CardLink id={o.item} from={m.id} /> : <ItemRef id={o.item} />) : null
-  if (o.state === "dismissed") return null
-  const act = async (take: boolean) => { setBusy(true); try { await takeOffer(m, take) } finally { setBusy(false) } }
+  return <OpenOfferLine m={m} o={o} />
+}
+
+function OpenOfferLine({ m, o }: { m: Msg; o: NonNullable<Msg["offer"]> }) {
+  useShellStore()
+  const [busy, setBusy] = useState(false), [open, setOpen] = useState(false), [picked, setPicked] = useState(AUTO_OFFER_BOT), t = useT()
+  const previewBot = o.bot && st.bots[o.bot]?.on ? o.bot : undefined
+  const enabledBots = Object.keys(st.bots)
+    .filter((k) => st.bots[k].on)
+    .sort((a, b) => Number(!!st.bots[a].main) - Number(!!st.bots[b].main) || botName(a).localeCompare(botName(b)))
+  const effectivePicked = picked === AUTO_OFFER_BOT || enabledBots.includes(picked) ? picked : AUTO_OFFER_BOT
+  const autoLabel = previewBot
+    ? t("thread:offer.botAutoPreview", { bot: botName(previewBot) })
+    : o.bot === null
+      ? t("thread:offer.botAutoUnassigned")
+      : t("thread:offer.botAuto")
+  const autoDesc = previewBot && o.reason
+    ? [t(`manage:dispatch.selection.${o.reason}`), ...(o.matched ?? [])].filter(Boolean).join(" · ")
+    : o.bot === null
+      ? t("thread:offer.botAutoUnassignedHint")
+      : undefined
+  const options: SelectOption[] = [
+    { value: AUTO_OFFER_BOT, label: autoLabel, description: autoDesc || undefined },
+    ...enabledBots.map((k) => ({
+      value: k,
+      label: st.bots[k].main ? `${botName(k)} · ${t("manage:dispatch.coordinator")}` : botName(k),
+      description: st.bots[k].role || undefined,
+    })),
+  ]
+  const act = async (take: boolean) => {
+    setBusy(true)
+    try {
+      await takeOffer(m, take, take && effectivePicked !== AUTO_OFFER_BOT ? effectivePicked : undefined)
+    } finally {
+      setBusy(false)
+    }
+  }
   if (o.folded && !open) return <button type="button" className="mt-2 self-start type-callout text-muted-foreground hover:text-foreground" onClick={() => setOpen(true)} data-offer-folded={m.id}>{t("thread:offer.folded", { title: o.title })}</button>
   return (
     <div className="mt-3 flex flex-wrap items-center gap-2 anim-in" data-offer={m.id}>
       <span className="type-callout text-muted-foreground">{t("thread:offer.question")}</span>
+      {(enabledBots.length > 0 || previewBot) && (
+        <Select size="sm" value={effectivePicked} options={options} onChange={setPicked} disabled={busy}
+          aria-label={t("thread:offer.chooseBot")} align="start" listMinWidth={OFFER_BOT_MENU_MIN_WIDTH}
+          className="min-w-0 max-w-full" triggerClassName="max-w-full" data-offer-bot={m.id} />
+      )}
       <Button size="sm" variant="outline" className="max-w-full rounded-full" disabled={busy} onClick={() => void act(true)} data-offer-take><span className="truncate">{t("thread:offer.take", { title: o.title })}</span></Button>
       <Button size="sm" variant="ghost" className="text-muted-foreground" disabled={busy} onClick={() => void act(false)} data-offer-dismiss>{t("thread:offer.dismiss")}</Button>
     </div>

@@ -22,7 +22,7 @@ import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, PlacementReason, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onEntityView, onViewKinds, messageView, messageViews, openDecisions, resetViews, settle, settled, subscribeItemScope, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork, useItemView, useSessionView, useViewGroup } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 import { itemDisplayStatusOf, itemState } from "./item-state"
@@ -91,7 +91,11 @@ export type ItemCardState = { item: string; state: string; at?: number; text?: s
   delivery?: { text: string; full?: boolean; decision?: string; at?: number }; reply?: { text: string; ref?: string; at?: number }; released?: { version?: string; at?: number }
   /** a Release build that failed after the item was done */
   build?: { text: string; at?: number } }
-export type Offer = { title: string; goal: string; project?: string | null; bot?: string; state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean }
+export type Offer = {
+  title: string; goal: string; project?: string | null; bot?: string | null
+  reason?: PlacementReason | null; matched?: string[]; tags?: string[]
+  state: "open" | "taken" | "dismissed"; item?: string; folded?: boolean
+}
 /** a key moment of an item made from the conversation, posted back to it (§5.2) */
 export type Update = { kind: "ask" | "reply" | "deliver" | "done" | "drop" | "fail"; item: string; text?: string; decision?: string; full?: boolean; ref?: string }
 /** what Steve did for one message (hub meta.steps): routing, the reasoning behind a direct answer, a research run, tools; times in ms */
@@ -1158,7 +1162,7 @@ export function quoteMsg(id: string | null) { st.quote = id; emit(); requestAnim
 export function clearFocus() { st.focus = null; emit() }
 export const focusItem = () => (st.focus && st.focus.until > Date.now() && !closedSt(it(st.focus.item)?.st) ? st.focus.item : null)
 /* thread routing actions: a 409 (already handled) comes back as its message */
-export async function takeOffer(m: Msg, take: boolean) { if (!m.id) return; const r = await call(api.offer(m.id, take)); if (r?.item) toast(t("core:toast.madeItem", { id: r.item.id })) }
+export async function takeOffer(m: Msg, take: boolean, bot?: string) { if (!m.id) return; const r = await call(api.offer(m.id, take, take ? bot : undefined)); if (r?.item) toast(t("core:toast.madeItem", { id: r.item.id })) }
 /** an A2UI button pressed in a reply: `already` when this surface had been submitted (another tab, a double click that got through) */
 export async function a2uiSubmit(msg: string, a: A2uiSubmit): Promise<{ already: boolean }> {
   const r = await api.a2ui(msg, a)

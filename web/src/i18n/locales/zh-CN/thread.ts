@@ -81,6 +81,11 @@ export default {
   offer: {
     folded: "之前提议过：{{title}}",
     question: "要我改吗？",
+    chooseBot: "选择执行 Bot",
+    botAuto: "自动分配 Bot",
+    botAutoPreview: "自动 · {{bot}}",
+    botAutoUnassigned: "自动（暂无可用 Bot）",
+    botAutoUnassignedHint: "可在此直接指定执行 Bot",
     take: "做成事项：{{title}}",
     dismiss: "不用",
   },

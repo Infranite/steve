@@ -68,9 +68,24 @@ pub(super) fn describe() {
         "Time to assess and rank one Bot dispatch request."
     );
     describe_counter!(
+        "steve_bot_selection_total",
+        Count,
+        "Completed Bot placement selections by winning reason. Label: reason."
+    );
+    describe_counter!(
         "steve_bot_selection_blocked_total",
         Count,
         "Requests with no eligible placement. Counted once for each distinct reason. Label: reason."
+    );
+    describe_counter!(
+        "steve_offer_preview_total",
+        Count,
+        "OFFER card Bot placement previews computed for inline answers. Label: result (placed, coordinator, unassigned)."
+    );
+    describe_counter!(
+        "steve_offer_action_total",
+        Count,
+        "OFFER card user actions handled. Labels: action (take, dismiss, already), bot_override (explicit, auto)."
     );
     describe_counter!(
         "steve_dispatch_no_executor_total",
