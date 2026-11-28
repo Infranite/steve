@@ -54,6 +54,22 @@ fn perm_label_value(k: &str) -> Value {
         .map(|m| json!(perm_label(m)))
         .unwrap_or(Value::Null)
 }
+/// Prompt label for a Bot's [`steve_types::BotAccessory`].
+fn accessory_label(a: steve_types::BotAccessory) -> &'static str {
+    use steve_types::BotAccessory as A;
+    match a {
+        A::Headphones => "耳机",
+        A::Glasses => "眼镜",
+        A::Loupe => "放大镜",
+        A::Book => "书本",
+        A::Pencil => "铅笔",
+        A::Beret => "贝雷帽",
+        A::Hardhat => "安全帽",
+        A::Wrench => "扳手",
+        A::Net => "捕虫网",
+        A::Chart => "图表",
+    }
+}
 const PRO: [&str; 3] = ["只在必要时", "适中", "积极"];
 
 fn label_of(table: &[(&str, &str)], k: &str) -> Value {
@@ -377,11 +393,7 @@ fn bot_fields(
     /* the main bot is always on and keeps its fixed unaccessorized identity */
     if !b.main {
         let cur_avatar = b.avatar.clone();
-        let cur_acc = b
-            .avatar
-            .accessory
-            .map(|a| a.label_zh())
-            .unwrap_or("无");
+        let cur_acc = b.avatar.accessory.map(accessory_label).unwrap_or("无");
         fs.push(BotField {
             spec: FieldSpec {
                 key: "avatar".into(),
@@ -392,7 +404,7 @@ fn bot_fields(
                         .chain(
                             steve_types::BotAccessory::ALL
                                 .iter()
-                                .map(|a| a.label_zh().to_string()),
+                                .map(|a| accessory_label(*a).to_string()),
                         )
                         .collect(),
                 ),
@@ -408,19 +420,19 @@ fn bot_fields(
                         steve_types::BotAccessory::ALL
                             .iter()
                             .copied()
-                            .find(|a| a.label_zh() == trimmed)
+                            .find(|a| accessory_label(*a) == trimmed)
                     })
                 };
                 let mut next = cur_avatar.clone();
                 next.accessory = next_acc;
-                serde_json::to_value(next).unwrap_or_else(|_| json!({}))
+                json!(next)
             })),
             dec: Some(Box::new(|v| {
                 let acc = v
                     .get("accessory")
                     .and_then(Value::as_str)
                     .and_then(steve_types::BotAccessory::parse);
-                json!(acc.map(|a| a.label_zh()).unwrap_or("无"))
+                json!(acc.map(accessory_label).unwrap_or("无"))
             })),
         });
         fs.push(BotField {

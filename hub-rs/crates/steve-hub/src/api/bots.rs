@@ -526,7 +526,11 @@ fn draft_fields_from_reply(
     );
     f.insert(
         "rules".into(),
-        json!(get("rules").map(js::string).unwrap_or_else(|| desc.to_string())),
+        json!(
+            get("rules")
+                .map(js::string)
+                .unwrap_or_else(|| desc.to_string())
+        ),
     );
     f.insert("model".into(), model);
     f.insert("harness".into(), json!(harness_id));

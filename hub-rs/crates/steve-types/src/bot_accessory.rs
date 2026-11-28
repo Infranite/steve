@@ -95,20 +95,4 @@ impl BotAccessory {
             Self::Chart => "chart (data/analytics)",
         }
     }
-
-    /// Chinese label used in Steve's config-drafting field enum.
-    pub const fn label_zh(self) -> &'static str {
-        match self {
-            Self::Headphones => "耳机",
-            Self::Glasses => "眼镜",
-            Self::Loupe => "放大镜",
-            Self::Book => "书本",
-            Self::Pencil => "铅笔",
-            Self::Beret => "贝雷帽",
-            Self::Hardhat => "安全帽",
-            Self::Wrench => "扳手",
-            Self::Net => "捕虫网",
-            Self::Chart => "图表",
-        }
-    }
 }
