@@ -152,7 +152,7 @@ export function seedItems(items: (Pick<Item, "id" | "t" | "st" | "b"> & Partial<
       waits: i.st === "block" ? ["prerequisite"] : [],
       priority: i.pri ?? "中", star: !!i.star, archived: !!i.arch, design_gate: !!i.designGate,
       parent: parent ? { item: parent.item, session: parent.s, at: parent.at } : undefined,
-      accept_mode: i.acc, project_id: i.project ?? undefined, source: i.src?.[1] ?? "",
+      accept_mode: i.acc, project_id: i.project ?? undefined, source: i.src?.[1] ?? "", due: i.due ?? undefined,
       created: i.created ?? 0, updated: i.updated ?? 0,
       goals: i.goals?.length ?? 0,
       tags: i.tags ?? [], deps: i.deps ?? [], plan_total: i.plan?.length ?? 0,

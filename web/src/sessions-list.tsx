@@ -42,9 +42,9 @@ function Ctx({ s }: { s: Sess }) {
   if (!s.contextKnown) return null
   const high = s.ctx >= 80
   return (
-    <span className="inline-flex items-center gap-1.5" title={t("views:sessions.ctx", { pct: s.ctx })} data-session-ctx={s.ctx}>
-      <span className="relative h-1 w-8 overflow-hidden rounded-full bg-foreground/10"><span className={cn("absolute inset-y-0 left-0 rounded-full", high ? "bg-attention" : s.st === "ended" ? "bg-tertiary" : "bg-muted-foreground")} style={{ width: Math.min(100, s.ctx) + "%" }} /></span>
-      <span className={cn("w-7 text-right tabular-nums", high ? "text-attention" : "text-tertiary")}>{s.ctx}%</span>
+    <span className="inline-flex w-full items-center justify-end gap-1.5 whitespace-nowrap" title={t("views:sessions.ctx", { pct: s.ctx })} data-session-ctx={s.ctx}>
+      <span className="relative h-1 w-8 shrink-0 overflow-hidden rounded-full bg-foreground/10"><span className={cn("absolute inset-y-0 left-0 rounded-full", high ? "bg-attention" : s.st === "ended" ? "bg-tertiary" : "bg-muted-foreground")} style={{ width: Math.min(100, s.ctx) + "%" }} /></span>
+      <span className={cn("w-[calc(2.25rem*var(--type-scale))] whitespace-nowrap text-right tabular-nums", high ? "text-attention" : "text-tertiary")}>{s.ctx}%</span>
     </span>
   )
 }
@@ -60,7 +60,7 @@ const SessRow = memo(function SessRow({ s, when, hit, status }: { s: Sess; when:
       className="flex min-w-0 items-center gap-3 rounded-lg px-2 py-2 outline-none transition-colors duration-120 hover:bg-accent focus-visible:ring-[3px] focus-visible:ring-ring/50">
       <StatusDot s={s.st} />
       {/* the item column: its number, or that it has none */}
-      <span className="w-12 shrink-0 truncate sm:w-[4.5rem]">{s.item ? <ItemNo id={s.item} /> : <span className="type-footnote text-tertiary" data-session-unlinked>{t("views:sessions.unlinked")}</span>}</span>
+      <span className="inline-flex w-[7.5ch] shrink-0 items-center truncate type-footnote font-mono sm:w-[max(7.5ch,calc(4.5rem*var(--type-scale)))]">{s.item ? <ItemNo id={s.item} /> : <span className="font-sans text-tertiary" data-session-unlinked>{t("views:sessions.unlinked")}</span>}</span>
       <span className="flex min-w-0 flex-1 flex-col">
         <span className="flex min-w-0 items-baseline gap-2">
           <span className={cn("truncate type-body", live(s) ? "font-medium text-foreground" : s.st === "ended" ? "text-foreground/70" : "text-foreground")} title={s.title}>{s.title}</span>
@@ -88,8 +88,8 @@ const SessRow = memo(function SessRow({ s, when, hit, status }: { s: Sess; when:
       </span>
       <span className="flex shrink-0 items-center gap-4 type-footnote text-muted-foreground">
         {live(s) && <span className={cn("whitespace-nowrap font-medium", s.st === "run" ? "text-blue" : "text-attention")}>{SS[s.st]?.[0]}</span>}
-        <span className="hidden w-[4.25rem] sm:block"><Ctx s={s} /></span>
-        <span className="whitespace-nowrap text-right sm:w-[4.5rem] tabular-nums text-tertiary">{when}</span>
+        <span className="hidden w-[calc(4.75rem*var(--type-scale))] shrink-0 sm:block"><Ctx s={s} /></span>
+        <span data-session-time className="shrink-0 whitespace-nowrap text-right tabular-nums text-tertiary">{when}</span>
       </span>
     </a>
   )

@@ -128,7 +128,7 @@ export function Tags({ ids, className, onRemove, max }: { ids?: string[]; classN
     </span>
   )
 }
-export const ItemNo = ({ id, className }: { id: string; className?: string }) => <span className={cn("shrink-0 type-footnote font-mono tabular-nums text-muted-foreground", className)} data-no>{id}</span>
+export const ItemNo = ({ id, className }: { id: string; className?: string }) => <span className={cn("shrink-0 whitespace-nowrap type-footnote font-mono tabular-nums text-muted-foreground", className)} data-no>{id}</span>
 /** a single line of facts, "a · b · c" (`one`): a "·" between parts, as its own element after each part but the last.
  *  The part keeps a dot-wide right margin and the dot, pulled back over it, takes no width of its own, so a part that
  *  truncates, has a border or a gap keeps it whole. Dots around a part that renders nothing collapse. */

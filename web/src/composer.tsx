@@ -133,7 +133,7 @@ function ComposerInput({ placeholder, onSend, model, modelIcon, left, autoFocus,
   const isFileDrag = (e: React.DragEvent) => [...(e.dataTransfer?.types ?? [])].includes("Files")
   type Opt = { id: string; label: ReactNode; ins: string; cmd?: string }
   const opts: Opt[] = !menu ? [] : menu.kind === "#"
-    ? getItems().filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="w-14" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={itemDisplayStatus(i)} /></> }))
+    ? getItems().filter((i) => !i.arch && (!menu.q || i.id.toLowerCase().includes(menu.q.toLowerCase()) || i.t.includes(menu.q))).slice(0, 6).map((i) => ({ id: i.id, ins: i.id, label: <><ItemNo id={i.id} className="min-w-[7.5ch]" /><span className="min-w-0 flex-1 truncate type-callout">{i.t}</span><Status s={itemDisplayStatus(i)} /></> }))
     : menu.kind === "@" && men.opts ? men.opts
     : menu.kind === "@"
     ? Object.keys(st.bots).filter((k) => st.bots[k].on && !st.bots[k].main && (!menu.q || st.bots[k].n.includes(menu.q))).map((k) => ({ id: k, ins: "@" + st.bots[k].n.replace(/\s+/g, ""), label: <><ActorAvatar actorId={k} size={18} tooltip={false} /><span className="type-callout">{formatBotName(st.bots[k].n, st.bots[k].main)}</span><span className="min-w-0 flex-1 truncate type-footnote text-muted-foreground">{tr("core:composer.handTo", { role: st.bots[k].role })}</span></> }))

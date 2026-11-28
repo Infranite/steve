@@ -22,9 +22,9 @@ import { useHubQuery } from "@/data/use-hub-query"
 import { errMsg } from "@/knowledge/fields"
 import { MetaLink } from "@/knowledge/origin"
 import { fmtMs, fmtN, fmtPct, fmtUsd } from "@/stats/format"
-import { botName, closedSt, newProject, newWorkspace, patchProject, refresh, st, tm, toast, type Item } from "@/store"
+import { botName, closedSt, kindOf, newProject, newWorkspace, patchProject, refresh, st, tm, toast, type Item } from "@/store"
 import { Blank, BotName, Card, closeSheet, DiscChevron, DISC_TRIGGER, Empty, Fact, Figure, go, Group, Loading, Meta, openSheet, Page, Panel, Pill, Row, Section, Segmented } from "@/ui"
-import { ItemRowExport as ItemRow, Select } from "@/view-shared"
+import { itemShowsPlan, ItemRowExport as ItemRow, Select } from "@/view-shared"
 import { cn } from "cn"
 import { ArchiveIcon, ChevronRightIcon, CornerLeftUpIcon, FolderGit2Icon, FolderIcon, PlusIcon, SparklesIcon } from "lucide-react"
 import { Fragment, useCallback, useEffect, useRef, useState } from "react"
@@ -118,11 +118,12 @@ type Parts = { p: RProject; gh: GhOverview | null; ghError: string }
 function Overview({ p, gh, ghError, onSettings }: Parts & { onSettings: () => void }) {
   const t = useT()
   const { open, yours, list } = projectItems(p.id, getItems())
+  const showKind = list.some((i) => !!kindOf(i)), showPlan = list.some(itemShowsPlan)
   return (
     <div className="flex flex-col gap-8 anim-in" data-proj-overview>
       <Section label={t("pages:projects.items")} data-proj-items
         right={open > 0 ? <Meta inline className="font-normal">{yours > 0 && <span className="text-attention" data-proj-yours>{t("pages:projects.yours", { count: yours })}</span>}<span>{t("pages:projects.running", { count: open })}</span></Meta> : undefined}>
-        {list.length ? <Panel>{list.map((i) => <ItemRow key={i.id} i={i} proj={false} />)}</Panel> : <Blank data-proj-none>{t("pages:projects.noItems")}</Blank>}
+        {list.length ? <Panel>{list.map((i) => <ItemRow key={i.id} i={i} proj={false} kind={showKind} plan={showPlan} />)}</Panel> : <Blank data-proj-none>{t("pages:projects.noItems")}</Blank>}
       </Section>
       <AgentsProposals projectId={p.id} />
       <Recent p={p} />
