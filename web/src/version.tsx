@@ -5,6 +5,7 @@ import { readableVersion, updates, updateActive, updateKey, repairKey, sameRelea
 import { downloadPercent, enableOneClick, installLabel, serviceCommands, stageIndex, stageLabel, upgradeGuide, upgradeStages, verifyUpgrade, type Health, type Install } from "@/upgrade-guide"
 import { CheckIcon, CircleAlertIcon, CopyIcon, RefreshCwIcon, ServerIcon } from "lucide-react"
 import { Markdown } from "@/components/markdown"
+import { SteveLogo } from "@/components/steve-logo"
 import { Button } from "@/components/ui/button"
 import { CodeBlock } from "@/components/ui/code-block"
 import { Spinner } from "@/components/ui/spinner"
@@ -34,7 +35,15 @@ export function AboutVersions() {
   const t = useT()
   const newer = !!st.webVersion && st.webVersion !== LOADED_WEB_VERSION
   const differ = !!st.version && st.version !== LOADED_WEB_VERSION
-  return <div className="flex flex-col gap-8"><Section data-version-info label={t("pages:version.section")}>
+  return <div className="flex flex-col gap-8">
+    <div data-about-brand className={cn(LIFT, "flex flex-wrap items-center justify-between gap-4 px-4 py-3.5")}>
+      <SteveLogo variant="horizontal" className="h-9 w-auto" />
+      <div className="min-w-0 text-left sm:text-right">
+        <p className="type-callout font-medium text-foreground">{t("pages:version.tagline")}</p>
+        <p className="type-footnote text-muted-foreground">{t("pages:version.taglineSub")}</p>
+      </div>
+    </div>
+    <Section data-version-info label={t("pages:version.section")}>
     <Panel>
       <Row title={t("pages:version.frontend")} sub={t("pages:version.currentPage")}><VersionValue v={LOADED_WEB_VERSION} label={t("pages:version.frontendVersion")} /></Row>
       <Row title={t("pages:version.backend")} sub="Hub"><VersionValue v={st.version} label={t("pages:version.backendVersion")} /></Row>

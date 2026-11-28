@@ -70,6 +70,7 @@ const MeView = lazyView(() => import("@/people/routes").then((m) => ({ default: 
 const OrgView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.OrgView })))
 const TeamView = lazyView(() => import("@/people/routes").then((m) => ({ default: m.TeamView })))
 import { Robot } from "@/robot"
+import { SteveLogo } from "@/components/steve-logo"
 import { syncPluginThemes } from "@/plugin-themes"
 import { HoldBanner, LocalNodeBanner } from "@/hold-banner"
 const StatsRoute = lazyView(() => import("@/stats/page").then((m) => ({ default: m.StatsRoute })))
@@ -236,7 +237,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     ready: !pairing && (up || !!login || hub === "missing"), authenticated: !login && hub === "ok" && !!workspace,
   }, !!login && (others || intent === "add") || hub === "missing")
   /* the sign-in page shows Steve's live face, whose eyes follow the pointer (it keeps still under reduced motion); the other splash pages keep the static one */
-  const title = (sub: string, live = false) => <><Robot k="steve" size={72} live={live} /><div><div className="type-title">Steve</div><div className="mt-1 type-callout text-muted-foreground">{sub}</div></div></>
+  const title = (sub: string, live = false) => <><Robot k="steve" size={72} live={live} /><div><h1 className="flex items-center justify-center"><SteveLogo variant="wordmark" className="h-7 w-auto" decorative /><span className="sr-only">Steve</span></h1><div className="mt-1 type-callout text-muted-foreground">{sub}</div></div></>
   const list = others || intent === "add"
   if (pairing) return <Splash><PairClaim /></Splash>
   if ((a === "settings" || a === "devices") && b === "hub" && !signInPath && (hub === "missing" || (!ready && !!error))) return <HubOfflinePage />

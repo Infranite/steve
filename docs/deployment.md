@@ -1,3 +1,12 @@
+<p>
+  <a href="../README.md">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/brand/steve-logo-horizontal-dark.svg">
+      <img src="assets/brand/steve-logo-horizontal-light.svg" alt="Steve" height="36">
+    </picture>
+  </a>
+</p>
+
 # Deploying and upgrading Steve
 
 [README](../README.md) describes the Homebrew installation and source-based development setup. This page covers first-time configuration, user services, managed releases and upgrades.
