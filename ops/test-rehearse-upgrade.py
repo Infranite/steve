@@ -11,10 +11,13 @@ import os
 from pathlib import Path
 import plistlib
 import shutil
+import signal
+import subprocess
 import sys
 import tarfile
 import tempfile
 import threading
+import time
 import unittest
 from unittest.mock import patch
 
@@ -54,6 +57,59 @@ COMMIT = MANIFEST["commit"]
 TARGET = os.environ.get("FAKE_TARGET", "aarch64-apple-darwin")
 LEGACY_POLICY = bool(MANIFEST.get("fake_legacy_policy", False))
 HAS_LEGACY_OPS = (BUNDLE / "ops/run.sh").is_file()
+PID_LOG_ENV_VARS = ("FAKE_REHEARSAL_PID_LOG", "STEVE_TEST_PID_LOG")
+NODE_BOOT_DELAY_SECS = 0.2
+SUPERVISOR_POLL_SECS = 0.2
+PROC_TERM_WAIT_SECS = 3.0
+PROC_KILL_WAIT_SECS = 2.0
+PID_POLL_INTERVAL_SECS = 0.1
+
+
+def record_pid(role: str, pid: int) -> None:
+    log_path = next(
+        (os.environ.get(name, "").strip() for name in PID_LOG_ENV_VARS if os.environ.get(name, "").strip()),
+        "",
+    )
+    if not log_path:
+        return
+    try:
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError:
+        return
+    try:
+        os.write(fd, f"{pid}\t{role}\n".encode("utf-8"))
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def stop_proc(proc: subprocess.Popen | None, pid_file: Path | None = None) -> None:
+    if proc is None:
+        return
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=PROC_TERM_WAIT_SECS)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=PROC_KILL_WAIT_SECS)
+            except subprocess.TimeoutExpired:
+                pass
+    if pid_file is not None and pid_file.is_file():
+        try:
+            lines = pid_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        if lines and lines[0].strip() == str(proc.pid):
+            pid_file.unlink(missing_ok=True)
 
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -116,7 +172,11 @@ def plist_path_for(home: Path, label: str) -> Path:
 def stop_pid_file(pid_file: Path) -> None:
     if not pid_file.is_file():
         return
-    first = pid_file.read_text(encoding="utf-8").splitlines()[0].strip()
+    lines = pid_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    if not lines:
+        pid_file.unlink(missing_ok=True)
+        return
+    first = lines[0].strip()
     try:
         pid = int(first)
     except ValueError:
@@ -126,17 +186,23 @@ def stop_pid_file(pid_file: Path) -> None:
     except ProcessLookupError:
         pid_file.unlink(missing_ok=True)
         return
-    for _ in range(30):
+    for _ in range(int(PROC_TERM_WAIT_SECS / PID_POLL_INTERVAL_SECS)):
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
             break
-        time.sleep(0.1)
+        time.sleep(PID_POLL_INTERVAL_SECS)
     else:
         try:
             os.kill(pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+        for _ in range(int(PROC_KILL_WAIT_SECS / PID_POLL_INTERVAL_SECS)):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(PID_POLL_INTERVAL_SECS)
     pid_file.unlink(missing_ok=True)
 
 
@@ -144,18 +210,22 @@ def spawn_fake_node(home: Path, bundle: Path) -> subprocess.Popen:
     node_dir = home / "data/node"
     node_dir.mkdir(parents=True, exist_ok=True)
     node_exe = str(home / "current/bin/steve-node")
+    env = os.environ.copy()
+    env["STEVE_HOME"] = str(home)
     real_proc = subprocess.Popen(
         [node_exe, "--local-node"],
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
+    record_pid("fake-node", real_proc.pid)
     (node_dir / "service.pid").write_text(f"{real_proc.pid}\n{VERSION}\n", encoding="utf-8")
     return real_proc
 
 
-def start_detached_hub(home: Path, bundle: Path, label: str | None = None, supervise: bool = False) -> None:
+def start_detached_hub(home: Path, bundle: Path, label: str | None = None, supervise: bool = False) -> subprocess.Popen:
     log_dir = home / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
@@ -177,11 +247,14 @@ def start_detached_hub(home: Path, bundle: Path, label: str | None = None, super
             stderr=log_f,
             start_new_session=True,
         )
+    record_pid("fake-supervisor" if supervise else "fake-hub", proc.pid)
     pid_name = "fake-supervisor.pid" if supervise else "fake-hub.pid"
     (home / pid_name).write_text(f"{proc.pid}\n", encoding="utf-8")
+    return proc
 
 
 def serve_hub(home: Path, supervise: bool = False) -> int:
+    record_pid("fake-supervisor" if supervise else "fake-hub", os.getpid())
     env_map = parse_env(home / "steve.env")
     port = int(os.environ.get("STEVE_PORT") or env_map["STEVE_PORT"])
     web_port = int(os.environ.get("STEVE_WEB_PORT") or env_map.get("STEVE_WEB_PORT") or str(port + 1))
@@ -190,14 +263,73 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
     ensure_sqlite_marker(home)
     lock = threading.Lock()
 
-    node_state = {"linked": False, "version": None, "proc": None}
-    if not no_resume:
-        def _boot_node():
-            time.sleep(0.2)
-            node_state["proc"] = spawn_fake_node(home, BUNDLE)
-            node_state["version"] = VERSION
-            node_state["linked"] = True
-        threading.Thread(target=_boot_node, daemon=True).start()
+    if supervise:
+        stop_flag = threading.Event()
+        hub_lock = threading.Lock()
+        hub_state: dict[str, subprocess.Popen | None] = {
+            "proc": start_detached_hub(home, BUNDLE, supervise=False)
+        }
+
+        def _stop_supervisor(*_args):
+            stop_flag.set()
+
+        signal.signal(signal.SIGTERM, _stop_supervisor)
+        signal.signal(signal.SIGINT, _stop_supervisor)
+
+        def _watch_updates():
+            while not stop_flag.is_set():
+                active = home / "updates/active.json"
+                if active.is_file():
+                    op_id = json.loads(active.read_text(encoding="utf-8")).get("id")
+                    op_file = home / "updates/operations" / f"{op_id}.json"
+                    if op_file.is_file():
+                        op = json.loads(op_file.read_text(encoding="utf-8"))
+                        if op.get("phase") == "ready":
+                            target = Path(op["target"])
+                            prev = (home / "current").resolve()
+                            op["previous"] = str(prev)
+                            op["backup_snapshot"] = "snap-linux-1"
+                            (home / "backups/snap-linux-1.json").parent.mkdir(parents=True, exist_ok=True)
+                            (home / "backups/snap-linux-1.json").write_text(
+                                json.dumps(load_db(home)), encoding="utf-8"
+                            )
+                            with hub_lock:
+                                cur_proc = hub_state["proc"]
+                                hub_state["proc"] = None
+                                stop_proc(cur_proc, home / "fake-hub.pid")
+                                stop_pid_file(home / "fake-hub.pid")
+                                stop_pid_file(home / "data/node/service.pid")
+                                for lp, tgt in ((home / "current", target), (home / "web/current", target / "web/dist")):
+                                    tmp = lp.parent / f".{lp.name}.tmp"
+                                    tmp.unlink(missing_ok=True)
+                                    os.symlink(tgt, tmp)
+                                    os.replace(tmp, lp)
+                                unit = Path.home() / ".config/systemd/user" / f"{os.environ.get('FAKE_LABEL', 'steve')}.service"
+                                if unit.is_file():
+                                    prev_unit = unit.with_suffix(".service.previous")
+                                    prev_unit.write_text(unit.read_text(encoding="utf-8"), encoding="utf-8")
+                                    unit.write_text(f"[Service]\nExecStart={home}/current/bin/steve-hub --supervise\n", encoding="utf-8")
+                                if not stop_flag.is_set():
+                                    hub_state["proc"] = start_detached_hub(home, target, supervise=False)
+                                    op["phase"] = "succeeded"
+                                    op_file.write_text(json.dumps(op), encoding="utf-8")
+                stop_flag.wait(SUPERVISOR_POLL_SECS)
+
+        watcher = threading.Thread(target=_watch_updates, daemon=True)
+        watcher.start()
+        while not stop_flag.is_set():
+            stop_flag.wait(SUPERVISOR_POLL_SECS)
+        watcher.join(timeout=5.0)
+        with hub_lock:
+            cur_proc = hub_state["proc"]
+            hub_state["proc"] = None
+        stop_proc(cur_proc, home / "fake-hub.pid")
+        stop_pid_file(home / "fake-hub.pid")
+        stop_pid_file(home / "data/node/service.pid")
+        return 0
+
+    node_lock = threading.Lock()
+    node_state: dict[str, object] = {"linked": False, "version": None, "proc": None, "closed": False}
 
     class WebHandler(http.server.BaseHTTPRequestHandler):
         def do_GET(self):
@@ -236,9 +368,11 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
         def do_GET(self):
             path = urllib.parse.urlparse(self.path).path
             if path == "/healthz":
-                node_obj = {"enabled": not no_resume, "reconciled": node_state["linked"]}
+                with node_lock:
+                    node_linked = bool(node_state["linked"])
+                node_obj = {"enabled": not no_resume, "reconciled": node_linked}
                 if not LEGACY_POLICY:
-                    node_obj["linked"] = node_state["linked"]
+                    node_obj["linked"] = node_linked
                 self._send(200, {
                     "ok": True,
                     "version": VERSION,
@@ -247,6 +381,20 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
                     "drain": False,
                     "recovery": {"state": "ok"},
                     "node": node_obj,
+                })
+                return
+            if path == "/api/nodes":
+                with node_lock:
+                    node_linked = bool(node_state["linked"])
+                    node_version = node_state["version"]
+                self._send(200, {
+                    "nodes": [{
+                        "node_id": "local",
+                        "local": True,
+                        "linked": node_linked,
+                        "state": "active" if node_linked else "offline",
+                        "node_version": node_version,
+                    }]
                 })
                 return
             with lock:
@@ -274,17 +422,6 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
                         self._send(404, {"error": "not found"})
                     else:
                         self._send(200, item)
-                    return
-                if path == "/api/nodes":
-                    self._send(200, {
-                        "nodes": [{
-                            "node_id": "local",
-                            "local": True,
-                            "linked": node_state["linked"],
-                            "state": "active" if node_state["linked"] else "offline",
-                            "node_version": node_state["version"],
-                        }]
-                    })
                     return
                 if path == "/api/approval-policy":
                     if not LEGACY_POLICY:
@@ -372,57 +509,15 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
         def log_message(self, *_args):
             pass
 
-    if supervise:
-        start_detached_hub(home, BUNDLE, supervise=False)
-
-        def _watch_updates():
-            while not stop_flag.is_set():
-                active = home / "updates/active.json"
-                if active.is_file():
-                    op_id = json.loads(active.read_text(encoding="utf-8")).get("id")
-                    op_file = home / "updates/operations" / f"{op_id}.json"
-                    if op_file.is_file():
-                        op = json.loads(op_file.read_text(encoding="utf-8"))
-                        if op.get("phase") == "ready":
-                            target = Path(op["target"])
-                            prev = (home / "current").resolve()
-                            op["previous"] = str(prev)
-                            op["backup_snapshot"] = "snap-linux-1"
-                            (home / "backups/snap-linux-1.json").parent.mkdir(parents=True, exist_ok=True)
-                            (home / "backups/snap-linux-1.json").write_text(
-                                json.dumps(load_db(home)), encoding="utf-8"
-                            )
-                            stop_pid_file(home / "fake-hub.pid")
-                            stop_pid_file(home / "data/node/service.pid")
-                            for lp, tgt in ((home / "current", target), (home / "web/current", target / "web/dist")):
-                                tmp = lp.parent / f".{lp.name}.tmp"
-                                tmp.unlink(missing_ok=True)
-                                os.symlink(tgt, tmp)
-                                os.replace(tmp, lp)
-                            unit = Path.home() / ".config/systemd/user" / f"{os.environ.get('FAKE_LABEL', 'steve')}.service"
-                            if unit.is_file():
-                                prev_unit = unit.with_suffix(".service.previous")
-                                prev_unit.write_text(unit.read_text(encoding="utf-8"), encoding="utf-8")
-                                unit.write_text(f"[Service]\nExecStart={home}/current/bin/steve-hub --supervise\n", encoding="utf-8")
-                            start_detached_hub(home, target, supervise=False)
-                            op["phase"] = "succeeded"
-                            op_file.write_text(json.dumps(op), encoding="utf-8")
-                time.sleep(0.2)
-
-        stop_flag = threading.Event()
-        threading.Thread(target=_watch_updates, daemon=True).start()
-        signal.signal(signal.SIGTERM, lambda *_: stop_flag.set())
-        while not stop_flag.is_set():
-            time.sleep(0.2)
-        stop_pid_file(home / "fake-hub.pid")
-        stop_pid_file(home / "data/node/service.pid")
-        return 0
-
     api_srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), ApiHandler)
+    api_srv.daemon_threads = True
     web_srv = http.server.ThreadingHTTPServer(("127.0.0.1", web_port), WebHandler)
+    web_srv.daemon_threads = True
     stop_evt = threading.Event()
 
     def _shutdown(*_args):
+        if stop_evt.is_set():
+            return
         stop_evt.set()
         threading.Thread(target=api_srv.shutdown, daemon=True).start()
         threading.Thread(target=web_srv.shutdown, daemon=True).start()
@@ -430,13 +525,34 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
     threading.Thread(target=web_srv.serve_forever, daemon=True).start()
+    boot_thread: threading.Thread | None = None
     try:
+        if not no_resume and not supervise:
+            def _boot_node() -> None:
+                if stop_evt.wait(NODE_BOOT_DELAY_SECS):
+                    return
+                with node_lock:
+                    if node_state["closed"] or stop_evt.is_set():
+                        return
+                    proc = spawn_fake_node(home, BUNDLE)
+                    node_state["proc"] = proc
+                    node_state["version"] = VERSION
+                    node_state["linked"] = True
+
+            boot_thread = threading.Thread(target=_boot_node, daemon=True)
+            boot_thread.start()
         api_srv.serve_forever()
     finally:
+        stop_evt.set()
         api_srv.server_close()
         web_srv.server_close()
-        if node_state["proc"] is not None:
-            stop_pid_file(home / "data/node/service.pid")
+        with node_lock:
+            node_state["closed"] = True
+            node_proc = node_state["proc"]
+            node_state["proc"] = None
+        if boot_thread is not None:
+            boot_thread.join(timeout=2.0)
+        stop_proc(node_proc, home / "data/node/service.pid")
     return 0
 
 
@@ -589,6 +705,29 @@ TARGET = os.environ.get("FAKE_TARGET", "aarch64-apple-darwin")
 BROKEN_SETUP = bool(MANIFEST.get("fake_broken_setup", False))
 HAS_LEGACY_OPS = (BUNDLE / "ops/run.sh").is_file()
 IS_LINUX = TARGET.endswith("unknown-linux-gnu")
+PID_LOG_ENV_VARS = ("FAKE_REHEARSAL_PID_LOG", "STEVE_TEST_PID_LOG")
+PROC_TERM_WAIT_SECS = 3.0
+PROC_KILL_WAIT_SECS = 2.0
+PID_POLL_INTERVAL_SECS = 0.1
+
+
+def record_pid(role: str, pid: int) -> None:
+    log_path = next(
+        (os.environ.get(name, "").strip() for name in PID_LOG_ENV_VARS if os.environ.get(name, "").strip()),
+        "",
+    )
+    if not log_path:
+        return
+    try:
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError:
+        return
+    try:
+        os.write(fd, f"{pid}\t{role}\n".encode("utf-8"))
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
 
 
 def parse_env(path: Path) -> dict[str, str]:
@@ -616,7 +755,11 @@ def service_def_path(label: str) -> Path:
 def stop_pid(pid_file: Path) -> None:
     if not pid_file.is_file():
         return
-    first = pid_file.read_text(encoding="utf-8").splitlines()[0].strip()
+    lines = pid_file.read_text(encoding="utf-8", errors="replace").splitlines()
+    if not lines:
+        pid_file.unlink(missing_ok=True)
+        return
+    first = lines[0].strip()
     try:
         pid = int(first)
     except ValueError:
@@ -626,12 +769,23 @@ def stop_pid(pid_file: Path) -> None:
     except ProcessLookupError:
         pid_file.unlink(missing_ok=True)
         return
-    for _ in range(30):
+    for _ in range(int(PROC_TERM_WAIT_SECS / PID_POLL_INTERVAL_SECS)):
         try:
             os.kill(pid, 0)
         except ProcessLookupError:
             break
-        time.sleep(0.1)
+        time.sleep(PID_POLL_INTERVAL_SECS)
+    else:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        for _ in range(int(PROC_KILL_WAIT_SECS / PID_POLL_INTERVAL_SECS)):
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                break
+            time.sleep(PID_POLL_INTERVAL_SECS)
     pid_file.unlink(missing_ok=True)
 
 
@@ -723,6 +877,7 @@ def main() -> int:
                         stderr=lf,
                         start_new_session=True,
                     )
+                record_pid("fake-supervisor" if IS_LINUX else "fake-hub", proc.pid)
                 pid_file.write_text(f"{proc.pid}\n", encoding="utf-8")
             print(json.dumps({"ok": True, "started": True, "label": label}))
             return 0
@@ -747,6 +902,101 @@ def main() -> int:
             print(json.dumps({"installed": False, "changed": True, "label": label}))
             return 0
     return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+FAKE_NODE_CODE = r'''#!/usr/bin/env python3
+import errno
+import json
+import os
+from pathlib import Path
+import signal
+import sys
+import time
+
+VERSION = "__FAKE_VERSION__"
+COMMIT = "__FAKE_COMMIT__"
+TARGET = "__FAKE_TARGET__"
+POLL_INTERVAL_SECS = 0.1
+MAX_LIFETIME_SECS = 600.0
+PID_LOG_ENV_VARS = ("FAKE_REHEARSAL_PID_LOG", "STEVE_TEST_PID_LOG")
+
+
+def record_pid(role: str, pid: int) -> None:
+    log_path = next(
+        (os.environ.get(name, "").strip() for name in PID_LOG_ENV_VARS if os.environ.get(name, "").strip()),
+        "",
+    )
+    if not log_path:
+        return
+    try:
+        fd = os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    except OSError:
+        return
+    try:
+        os.write(fd, f"{pid}\t{role}\n".encode("utf-8"))
+    except OSError:
+        pass
+    finally:
+        os.close(fd)
+
+
+def _capture_watched(path: Path) -> tuple[Path, tuple[int, int]] | None:
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return path, (st.st_dev, st.st_ino)
+
+
+def _watched_intact(path: Path, expected: tuple[int, int]) -> bool:
+    try:
+        st = path.stat()
+    except (FileNotFoundError, NotADirectoryError):
+        return False
+    except OSError as exc:
+        if exc.errno in (errno.ENOENT, errno.ENOTDIR):
+            return False
+        return True
+    return (st.st_dev, st.st_ino) == expected
+
+
+def main() -> int:
+    args = sys.argv[1:]
+    if args == ["--local-node"]:
+        def _handle_exit(_signum: int, _frame) -> None:
+            raise SystemExit(0)
+
+        signal.signal(signal.SIGTERM, _handle_exit)
+        signal.signal(signal.SIGINT, _handle_exit)
+
+        watched: list[tuple[Path, tuple[int, int]]] = []
+        exe_watched = _capture_watched(Path(__file__).resolve())
+        if exe_watched is None:
+            return 0
+        watched.append(exe_watched)
+
+        steve_home = os.environ.get("STEVE_HOME", "").strip()
+        if steve_home:
+            home_watched = _capture_watched(Path(steve_home))
+            if home_watched is None:
+                return 0
+            watched.append(home_watched)
+
+        record_pid("fake-node", os.getpid())
+
+        deadline = time.monotonic() + MAX_LIFETIME_SECS
+        while time.monotonic() < deadline:
+            if any(not _watched_intact(path, ident) for path, ident in watched):
+                return 0
+            time.sleep(POLL_INTERVAL_SECS)
+        return 0
+
+    print(json.dumps({"version": VERSION, "commit": COMMIT, "target": TARGET}))
+    return 0
 
 
 if __name__ == "__main__":
@@ -792,16 +1042,13 @@ def make_fake_bundle(
     hub.chmod(0o755)
 
     node = root / "bin/steve-node"
-    node.write_text(
-        f"#!{sys.executable}\n"
-        "import json, signal, sys, time\n"
-        "if sys.argv[1:] == ['--local-node']:\n"
-        "    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))\n"
-        "    while True:\n"
-        "        time.sleep(1)\n"
-        f"print(json.dumps({{'version': {version!r}, 'commit': {commit!r}, 'target': {target!r}}}))\n",
-        encoding="utf-8",
+    node_code = (
+        FAKE_NODE_CODE.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1)
+        .replace('"__FAKE_VERSION__"', repr(version))
+        .replace('"__FAKE_COMMIT__"', repr(commit))
+        .replace('"__FAKE_TARGET__"', repr(target))
     )
+    node.write_text(node_code, encoding="utf-8")
     node.chmod(0o755)
 
     restic = root / "bin/restic"
@@ -836,12 +1083,114 @@ class RehearseUpgradeTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory(prefix="steve-test-reh-")
         self.addCleanup(self._tmp.cleanup)
+        self.addCleanup(self._cleanup_recorded_pids)
         self.root = Path(self._tmp.name).resolve()
+        self.pid_log = self.root / "spawned-pids.log"
         self.fake_home = self.root / "operator-home"
         self.fake_home.mkdir(parents=True)
         (self.fake_home / ".steve").mkdir()
         (self.fake_home / ".steve/steve.env").write_text("STEVE_PORT=8440\n", encoding="utf-8")
         self.system_calls: list[list[str]] = []
+
+    def _read_recorded_pids(self) -> dict[int, set[str]]:
+        records: dict[int, set[str]] = {}
+        if not self.pid_log.is_file():
+            return records
+        for raw_line in self.pid_log.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+            pid_s, _, role = line.partition("\t")
+            try:
+                pid = int(pid_s)
+            except ValueError:
+                continue
+            records.setdefault(pid, set()).add(role or "unknown")
+        return records
+
+    def _wait_for_recorded_pid(
+        self,
+        pid: int,
+        *,
+        proc: subprocess.Popen | None = None,
+        timeout: float = 5.0,
+    ) -> None:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if pid in self._read_recorded_pids():
+                return
+            if proc is not None and proc.poll() is not None:
+                self.fail(f"fake process {pid} exited early with code {proc.returncode} before recording PID")
+            time.sleep(0.02)
+        self.fail(f"fake process {pid} did not record PID within {timeout}s")
+
+    def _is_our_recorded_process(self, pid: int) -> tuple[bool, str]:
+        if pid <= 1 or pid == os.getpid():
+            return False, "invalid or self pid"
+        if not REH.process_is_alive(pid):
+            return False, "exited"
+        ident = REH.process_identity(pid)
+        if ident is None:
+            if REH.process_is_alive(pid):
+                return True, "alive (identity unavailable)"
+            return False, "exited"
+        exec_path, argv = ident
+        candidates = [exec_path or "", *argv]
+        root_str = str(self.root)
+        if any(root_str in part for part in candidates):
+            return True, repr(ident)
+        return False, f"unrelated pid {ident!r}"
+
+    def _cleanup_recorded_pids(self) -> None:
+        for pid in sorted(self._read_recorded_pids()):
+            ours, _ = self._is_our_recorded_process(pid)
+            if not ours:
+                continue
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                continue
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                if not REH.process_is_alive(pid):
+                    break
+                time.sleep(0.05)
+            else:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+    def _assert_no_recorded_processes_alive(
+        self,
+        *,
+        min_nodes: int = 0,
+        min_hubs: int = 0,
+        exact_nodes: int | None = None,
+        exact_supervisors: int | None = None,
+    ) -> dict[int, set[str]]:
+        records = self._read_recorded_pids()
+        node_pids = [pid for pid, roles in records.items() if "fake-node" in roles]
+        hub_pids = [pid for pid, roles in records.items() if "fake-hub" in roles]
+        supervisor_pids = [pid for pid, roles in records.items() if "fake-supervisor" in roles]
+        self.assertGreaterEqual(len(node_pids), min_nodes, msg=f"recorded PIDs={records!r}")
+        self.assertGreaterEqual(len(hub_pids), min_hubs, msg=f"recorded PIDs={records!r}")
+        if exact_nodes is not None:
+            self.assertEqual(len(node_pids), exact_nodes, msg=f"recorded node PIDs={node_pids!r} all={records!r}")
+        if exact_supervisors is not None:
+            self.assertEqual(
+                len(supervisor_pids),
+                exact_supervisors,
+                msg=f"recorded supervisor PIDs={supervisor_pids!r} all={records!r}",
+            )
+
+        alive: list[tuple[int, list[str], str]] = []
+        for pid, roles in sorted(records.items()):
+            ours, detail = self._is_our_recorded_process(pid)
+            if ours:
+                alive.append((pid, sorted(roles), detail))
+        self.assertEqual(alive, [], msg=f"leftover fake rehearsal processes still alive: {alive!r}")
+        return records
 
     def _run_with_platform(
         self,
@@ -865,7 +1214,14 @@ class RehearseUpgradeTests(unittest.TestCase):
         full_argv = [*argv, "--report-out", str(report_path)]
 
         with (
-            patch.dict(os.environ, {"HOME": str(self.fake_home), "STEVE_PORT": "9999"}),
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": str(self.fake_home),
+                    "STEVE_PORT": "9999",
+                    "FAKE_REHEARSAL_PID_LOG": str(self.pid_log),
+                },
+            ),
             patch.object(REH, "detect_target", return_value=(platform_key, rust_target)),
             patch.object(REH, "run_command", side_effect=fake_run_command),
             patch("sys.stdout", stdout_buf),
@@ -916,6 +1272,7 @@ class RehearseUpgradeTests(unittest.TestCase):
         self.assertEqual(by_name["confirm"]["status"], "pass")
         self.assertEqual(list(work_dir.iterdir()), [])
         self.assertEqual(list((self.fake_home / "Library/LaunchAgents").glob("*rehearsal*")), [])
+        self._assert_no_recorded_processes_alive(min_nodes=4, min_hubs=5)
 
     def test_macos_skip_rollback_with_tarball_candidate_and_json_output(self) -> None:
         prev_dir = make_fake_bundle(
@@ -955,6 +1312,7 @@ class RehearseUpgradeTests(unittest.TestCase):
         self.assertTrue(by_name["verify_pass1"]["details"]["permission_writes_checked"])
         self.assertEqual(by_name["confirm"]["status"], "pass")
         self.assertEqual(list(work_dir.iterdir()), [])
+        self._assert_no_recorded_processes_alive(min_nodes=2, min_hubs=2)
 
     def test_linux_full_rehearsal_and_confirm_skipped(self) -> None:
         prev_dir = make_fake_bundle(
@@ -986,6 +1344,7 @@ class RehearseUpgradeTests(unittest.TestCase):
         self.assertEqual(by_name["verify_pass2"]["details"]["local_node_version"], "0.14.1")
         self.assertTrue(any("systemctl" in c[0] and "daemon-reload" in c for c in self.system_calls))
         self.assertEqual(list(work_dir.iterdir()), [])
+        self._assert_no_recorded_processes_alive(exact_nodes=4, min_hubs=4, exact_supervisors=2)
 
     def test_failure_during_upgrade_and_verify_still_cleans_up(self) -> None:
         prev_dir = make_fake_bundle(
@@ -1017,6 +1376,7 @@ class RehearseUpgradeTests(unittest.TestCase):
         self.assertIn("hub_log_tail", report.get("diagnostics", {}))
         self.assertEqual(list(work_dir.iterdir()), [])
         self.assertEqual(list((self.fake_home / "Library/LaunchAgents").glob("*rehearsal*")), [])
+        self._assert_no_recorded_processes_alive(min_nodes=1, min_hubs=1)
 
     def test_isolation_and_tar_validation_guards(self) -> None:
         with patch.dict(os.environ, {"HOME": str(self.fake_home)}):
@@ -1089,6 +1449,7 @@ class RehearseUpgradeTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertTrue(report["cleanup_ok"])
         self.assertEqual(report["steps"][0]["status"], "fail")
+        self._assert_no_recorded_processes_alive()
 
     def test_snapshot_operator_state_handles_permission_error(self) -> None:
         resolved_steve = (self.fake_home / ".steve").resolve()
@@ -1218,6 +1579,175 @@ class RehearseUpgradeTests(unittest.TestCase):
         finally:
             if runner.sandbox.exists():
                 shutil.rmtree(runner.sandbox, ignore_errors=True)
+
+    def test_fake_node_self_exits_when_home_removed_or_replaced(self) -> None:
+        bundle = make_fake_bundle(
+            self.root / "retire-bundle",
+            version="0.15.0",
+            commit="a" * 40,
+            target="aarch64-apple-darwin",
+            include_cli=False,
+        )
+        home = self.root / "retire-home"
+        home.mkdir(parents=True)
+        env = os.environ.copy()
+        env["STEVE_HOME"] = str(home)
+        env["FAKE_REHEARSAL_PID_LOG"] = str(self.pid_log)
+        node_exe = bundle / "bin/steve-node"
+
+        # Case 1: deleting STEVE_HOME causes fake node to self-exit promptly.
+        proc1 = subprocess.Popen(
+            [str(node_exe), "--local-node"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            self._wait_for_recorded_pid(proc1.pid, proc=proc1)
+            self.assertIsNone(proc1.poll())
+            shutil.rmtree(home)
+            self.assertEqual(proc1.wait(timeout=5), 0)
+        finally:
+            if proc1.poll() is None:
+                proc1.kill()
+                proc1.wait(timeout=5)
+
+        # Case 2: replacing STEVE_HOME at the same path (inode change) causes self-exit.
+        home.mkdir(parents=True)
+        proc2 = subprocess.Popen(
+            [str(node_exe), "--local-node"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            self._wait_for_recorded_pid(proc2.pid, proc=proc2)
+            self.assertIsNone(proc2.poll())
+            home.rename(self.root / "retire-home-old")
+            home.mkdir(parents=True)
+            self.assertEqual(proc2.wait(timeout=5), 0)
+        finally:
+            if proc2.poll() is None:
+                proc2.kill()
+                proc2.wait(timeout=5)
+
+        # Case 3: deleting the steve-node executable causes self-exit.
+        proc3 = subprocess.Popen(
+            [str(node_exe), "--local-node"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        try:
+            self._wait_for_recorded_pid(proc3.pid, proc=proc3)
+            self.assertIsNone(proc3.poll())
+            node_exe.unlink()
+            self.assertEqual(proc3.wait(timeout=5), 0)
+        finally:
+            if proc3.poll() is None:
+                proc3.kill()
+                proc3.wait(timeout=5)
+
+        self._assert_no_recorded_processes_alive(min_nodes=3)
+
+    def test_fake_node_handles_sigterm_and_sigint(self) -> None:
+        bundle = make_fake_bundle(
+            self.root / "signal-bundle",
+            version="0.15.0",
+            commit="b" * 40,
+            target="aarch64-apple-darwin",
+            include_cli=False,
+        )
+        home = self.root / "signal-home"
+        home.mkdir(parents=True)
+        env = os.environ.copy()
+        env["STEVE_HOME"] = str(home)
+        env["FAKE_REHEARSAL_PID_LOG"] = str(self.pid_log)
+        node_exe = bundle / "bin/steve-node"
+
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            proc = subprocess.Popen(
+                [str(node_exe), "--local-node"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            try:
+                self._wait_for_recorded_pid(proc.pid, proc=proc)
+                self.assertIsNone(proc.poll())
+                proc.send_signal(sig)
+                self.assertEqual(proc.wait(timeout=3), 0)
+            finally:
+                if proc.poll() is None:
+                    proc.kill()
+                    proc.wait(timeout=5)
+
+        self._assert_no_recorded_processes_alive(min_nodes=2)
+
+    def test_process_belongs_to_home_and_stop_verified_local_node_on_fake_node(self) -> None:
+        home = self.root / "verify-stop-home"
+        rel = make_fake_bundle(
+            home / "releases/0.14.1",
+            version="0.14.1",
+            commit="c" * 40,
+            target="aarch64-apple-darwin",
+            include_cli=False,
+        )
+        os.symlink(rel, home / "current")
+        (home / "data/node").mkdir(parents=True)
+
+        env = os.environ.copy()
+        env["STEVE_HOME"] = str(home)
+        env["FAKE_REHEARSAL_PID_LOG"] = str(self.pid_log)
+        snippet = (
+            "import subprocess, sys; "
+            "p = subprocess.Popen([sys.argv[1], '--local-node'], "
+            "stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, "
+            "start_new_session=True); "
+            "print(p.pid)"
+        )
+        launcher = subprocess.run(
+            [sys.executable, "-c", snippet, str(home / "current/bin/steve-node")],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        pid = int(launcher.stdout.strip())
+        try:
+            self._wait_for_recorded_pid(pid)
+            (home / "data/node/service.pid").write_text(f"{pid}\n0.14.1\n", encoding="utf-8")
+            belongs = False
+            detail = ""
+            deadline = time.monotonic() + 2.0
+            while time.monotonic() < deadline:
+                belongs, detail = REH.process_belongs_to_home(pid, home, require_local_node=True)
+                if belongs:
+                    break
+                time.sleep(0.05)
+            self.assertTrue(belongs, msg=detail)
+            other_belongs, _ = REH.process_belongs_to_home(
+                pid, self.root / "other-home", require_local_node=True
+            )
+            self.assertFalse(other_belongs)
+            self.assertTrue(REH.stop_verified_local_node(home))
+            self.assertFalse(REH.process_is_alive(pid))
+        finally:
+            if REH.process_is_alive(pid):
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+
+        self._assert_no_recorded_processes_alive(min_nodes=1)
 
 
 if __name__ == "__main__":
