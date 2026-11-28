@@ -27,6 +27,11 @@ env:
   # How many runners share each platform's Rust tests (`--partition hash:k/N`). Linux runners are
   # plentiful; macOS ones are scarce (and run only on main), so it takes fewer of them.
   RUST_TEST_SHARDS: '{"ubuntu-22.04": 4, "macos-15": 3}'
+  # Tests start real Hubs and Nodes, which refuse to prepare workspaces below the disk floor
+  # (default 10 GiB free). Hosted runners, macOS ones especially, can have less than that once the
+  # build is done, so every session-opening test would wait out its deadline instead. Tests set
+  # their own floor; the product default is unchanged.
+  STEVE_DISK_FLOOR_GB: '1'
 concurrency:
   group: ci-${{ github.event_name == 'push' && 'main' || github.event_name == 'pull_request' && github.ref || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
