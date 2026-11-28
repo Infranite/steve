@@ -167,6 +167,9 @@ impl Db {
     pub fn bot_in_workspace(&self, id: &str, ws: &str) -> Result<bool> {
         Ok(self.s.bots().in_workspace(id, ws)?)
     }
+    pub fn bot_default_project(&self, id: &str, ws: &str) -> Result<Option<String>> {
+        Ok(self.s.bots().default_project(id, ws)?)
+    }
     /// Seed-only insert (never overwrites what the user changed); `b` is a `NewBot` as JSON.
     pub fn bot_seed(&self, id: &str, main: bool, b: Value, ws: &str) -> Result<()> {
         Ok(self
@@ -179,6 +182,18 @@ impl Db {
     }
     pub fn bot_patch(&self, id: &str, p: &Map<String, Value>, author: &str) -> Result<()> {
         self.s.bots().patch(id, &decode(p.clone())?, author)?;
+        Ok(())
+    }
+    pub fn bot_patch_in(
+        &self,
+        ws: &str,
+        id: &str,
+        p: &Map<String, Value>,
+        author: &str,
+    ) -> Result<()> {
+        self.s
+            .bots()
+            .patch_in(ws, id, &decode(p.clone())?, author)?;
         Ok(())
     }
     pub fn memories(&self, bot: &str, ws: &str) -> Result<Vec<Memory>> {

@@ -11,9 +11,10 @@ use crate::{Result, StoreError};
 /// read-only connection).
 pub(crate) struct Sqlite<'c>(pub(crate) &'c Connection);
 
-/// The database failing (retry later) versus this write breaking a rule.
+/// The database failing (transient contention vs durable/environmental error) versus this write breaking a rule.
 pub(crate) fn err(e: rusqlite::Error) -> StoreError {
     match e.sqlite_error_code() {
+        Some(code) if crate::transient_storage_failure(code) => StoreError::Busy(e.to_string()),
         Some(code) if crate::storage_failure(code) => StoreError::Storage(e.to_string()),
         _ => StoreError::Rejected(e.to_string()),
     }

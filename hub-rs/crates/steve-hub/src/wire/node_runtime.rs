@@ -72,6 +72,7 @@ pub use heads::{
     CaughtUp, NodeSnapshot, Pull, Receive, ReplayCheck, catch_up_streams, read_snapshot,
 };
 pub use ledger::LedgerEntry;
+pub(crate) use ledger::is_transient_ledger_error;
 pub use lifecycle::{Release, bound, bound_strict, decision_session, health, waiting_card};
 pub(crate) use node_jobs::normalized_usage;
 pub use node_jobs::{
@@ -155,10 +156,6 @@ struct End {
     attempt: Option<String>,
     stop: String,
     error: Option<String>,
-}
-
-fn now() -> i64 {
-    steve_store::now()
 }
 
 fn uid(p: &str) -> String {
@@ -900,13 +897,19 @@ fn settled_status(stop_reason: &str) -> &'static str {
 }
 
 /// A `system` entry of the session, for the people reading it.
-fn system_in(tx: &mut W<'_>, session: &str, text: &str) -> Result<(), StoreError> {
-    event_in(tx, session, "system", json!({ "text": text }))
+fn system_in(tx: &mut W<'_>, session: &str, text: &str, at: i64) -> Result<(), StoreError> {
+    event_in(tx, session, "system", json!({ "text": text }), at)
 }
 
 /// A session entry of the Hub's own (not one of a Node's events), in `tx`'s write.
-fn event_in(tx: &mut W<'_>, session: &str, kind: &str, data: Value) -> Result<(), StoreError> {
-    tx.events().add(session, kind, data, None, now())?;
+fn event_in(
+    tx: &mut W<'_>,
+    session: &str,
+    kind: &str,
+    data: Value,
+    at: i64,
+) -> Result<(), StoreError> {
+    tx.events().add(session, kind, data, None, at)?;
     Ok(())
 }
 

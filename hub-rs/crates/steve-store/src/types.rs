@@ -236,7 +236,6 @@ pub struct Bot {
     /// stays a number in TS (not converted to bool)
     pub proactive: i64,
     pub avatar: Avatar,
-    pub default_project: Option<String>,
     pub prompt: Option<String>,
     pub device: Option<String>,
     pub owner: Option<String>,
@@ -271,7 +270,6 @@ impl Bot {
             persona: r.get("persona")?,
             proactive: r.get("proactive")?,
             avatar: json_col(r, "avatar", Avatar::default())?,
-            default_project: r.get("default_project")?,
             prompt: r.get("prompt")?,
             device: r.get("device")?,
             owner: r.get("owner")?,
@@ -286,6 +284,7 @@ impl Bot {
 pub struct BotWorkspace {
     pub workspace_id: String,
     pub duty: String,
+    pub default_project: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]

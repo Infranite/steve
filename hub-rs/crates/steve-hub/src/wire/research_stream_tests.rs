@@ -146,76 +146,11 @@ impl Test {
     }
 
     fn project(&self, device: &str) -> steve_core::repo::Project {
-        steve_core::repo::Project {
-            id: format!("project-{device}"),
-            workspace_id: steve_store::WS.into(),
-            name: device.into(),
-            description: String::new(),
-            device_id: device.into(),
-            path: if device == "hub" {
-                self.root.join("project").display().to_string()
-            } else {
-                "/remote/unavailable".into()
-            },
-            kind: "dir".into(),
-            worktree: false,
-            default_bot: None,
-            release: None,
-            archived: false,
-            created: 1,
-            updated: 1,
-        }
+        sample_project(&self.root, device)
     }
 
     fn request(&self, run: &str, models: &[&str]) -> ResearchRequest {
-        ResearchRequest {
-            run: run.into(),
-            ws: steve_store::WS.into(),
-            mid: "message".into(),
-            user: None,
-            full: false,
-            brief: String::new(),
-            question: "@wire-check".into(),
-            history: vec![],
-            main: steve_core::repo::Bot {
-                specialties: vec![],
-                id: "main".into(),
-                workspace_id: steve_store::WS.into(),
-                owner: None,
-                name: "Steve".into(),
-                role: String::new(),
-                main: true,
-                harness: "test-research".into(),
-                model: None,
-                rules: String::new(),
-                accept_mode: String::new(),
-                perm_mode: "plan".into(),
-                enabled: true,
-                revision: 1,
-                updated: 1,
-                persona: String::new(),
-                proactive: 1,
-                avatar: Default::default(),
-                default_project: None,
-                prompt: None,
-                device: None,
-                reasoning_effort: steve_types::ReasoningEffort::Default,
-            },
-            context: String::new(),
-            project: Some(self.project("hub")),
-            readable: vec![self.project("hub")],
-            files: vec![],
-            earlier_files: vec![],
-            resume: None,
-            stop: Arc::new(AtomicBool::new(false)),
-            mcp: None,
-            models: steve_core::models::Choice {
-                harness: "test-research".into(),
-                models: models.iter().map(|m| m.to_string()).collect(),
-                effort: None,
-            },
-            ui: false,
-        }
+        sample_request(&self.root, run, models)
     }
 
     fn specs(&self) -> Vec<JobSpec> {
@@ -429,4 +364,111 @@ async fn research_streams_stage_thought_plan_and_enriched_tool_views() {
     assert!(done[0].step_started_at.is_some());
 
     t.close().await;
+}
+
+fn sample_project(root: &Path, device: &str) -> steve_core::repo::Project {
+    steve_core::repo::Project {
+        id: format!("project-{device}"),
+        workspace_id: steve_store::WS.into(),
+        name: device.into(),
+        description: String::new(),
+        device_id: device.into(),
+        path: if device == "hub" {
+            root.join("project").display().to_string()
+        } else {
+            "/remote/unavailable".into()
+        },
+        kind: "dir".into(),
+        worktree: false,
+        default_bot: None,
+        release: None,
+        archived: false,
+        created: 1,
+        updated: 1,
+    }
+}
+
+fn sample_request(root: &Path, run: &str, models: &[&str]) -> ResearchRequest {
+    ResearchRequest {
+        run: run.into(),
+        ws: steve_store::WS.into(),
+        mid: "message".into(),
+        user: None,
+        full: false,
+        brief: String::new(),
+        question: "@wire-check".into(),
+        history: vec![],
+        main: steve_core::repo::Bot {
+            specialties: vec![],
+            id: "main".into(),
+            workspace_id: steve_store::WS.into(),
+            owner: None,
+            name: "Steve".into(),
+            role: String::new(),
+            main: true,
+            harness: "test-research".into(),
+            model: None,
+            rules: String::new(),
+            accept_mode: String::new(),
+            perm_mode: "plan".into(),
+            enabled: true,
+            revision: 1,
+            updated: 1,
+            persona: String::new(),
+            proactive: 1,
+            avatar: Default::default(),
+            prompt: None,
+            device: None,
+            reasoning_effort: steve_types::ReasoningEffort::Default,
+        },
+        context: String::new(),
+        project: Some(sample_project(root, "hub")),
+        readable: vec![sample_project(root, "hub")],
+        files: vec![],
+        earlier_files: vec![],
+        resume: None,
+        stop: Arc::new(AtomicBool::new(false)),
+        mcp: None,
+        models: steve_core::models::Choice {
+            harness: "test-research".into(),
+            models: models.iter().map(|m| m.to_string()).collect(),
+            effort: None,
+        },
+        ui: false,
+    }
+}
+
+#[tokio::test]
+async fn research_probe_failure_fails_explicitly_without_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let store = Store::open(root.join("steve.sqlite3"), steve_store::FnPublisher(|_| {})).unwrap();
+    store.ensure_workspace().unwrap();
+    let fake = steve_node_api::testkit::FakeNode::new("hub");
+    fake.refuse_next("probe", Error::new(Code::Internal, "probe boom"));
+    let runtime = NodeRuntime::new(store.clone(), fake, Arc::new(Domain));
+    let adapter = ResearchAdapter::new(
+        crate::wire::research::policy::ResearchConfig::new(),
+        steve_core::repo::Db::new(store),
+        root.join("data"),
+    )
+    .on_node(NodeResearch {
+        runtime,
+        roots: Arc::new(|| Ok(vec![])),
+    });
+
+    let out = adapter
+        .research(
+            sample_request(&root, "run-probe-err", &["ready"]),
+            &Seen::default(),
+        )
+        .await;
+    assert_eq!(out.end, RunEnd::Failed, "{out:?}");
+    assert!(
+        out.error
+            .as_deref()
+            .is_some_and(|e| e.contains("probe boom")),
+        "expected probe error detail, got: {:?}",
+        out.error
+    );
 }

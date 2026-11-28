@@ -84,7 +84,7 @@ fn provider_stream_interruption_never_spends_the_continue_budget_and_deduplicate
 fn provider_capacity_never_spends_continues_and_keeps_one_actionable_card() {
     let k = kit(2);
     let (item, sid) = started(&k);
-    let error = "已自动重试 3 次仍失败；预计恢复时间：2026-11-18T08:02:00Z；503 no eligible upstream account";
+    let error = "已自动重试 3 次仍失败；expected to be available at 2026-11-18T08:02:00Z；503 no eligible upstream account";
     k.rt.end_turn(
         &k.core,
         &sid,
@@ -192,12 +192,39 @@ fn a_stop_reported_twice_is_continued_once() {
 }
 
 #[test]
-fn a_question_in_plain_words_is_for_you() {
+fn plain_question_without_steve_ask_is_continued_and_steve_ask_opens_card() {
     let k = kit(2);
     let (item, sid) = started(&k);
     stop(&k, &sid, "要先合并 PR 还是先等 CI？");
-    assert_eq!(k.open_fails(&item).len(), 1);
-    assert!(steve_lines(&k, &item).is_empty());
+    assert!(k.open_fails(&item).is_empty(), "plain text is continued");
+    assert_eq!(steve_lines(&k, &item).len(), 1);
+    let p = k.rt.prompts_of(&sid).pop().unwrap();
+    assert!(p.contains("steve_ask"), "{p}");
+
+    let (item2, sid2) = started(&k);
+    k.core
+        .tool_ask(
+            &k.db().session(&sid2).unwrap().unwrap(),
+            "要先合并 PR 还是先等 CI？",
+            &["先合并 PR".into(), "先等 CI".into()],
+        )
+        .unwrap();
+    k.rt.end_turn(&k.core, &sid2, "end_turn", None);
+    assert!(steve_lines(&k, &item2).is_empty());
+    assert_eq!(
+        k.rt.prompts_of(&sid2).len(),
+        1,
+        "not continued after steve_ask"
+    );
+    assert_eq!(
+        k.db()
+            .decisions_of_item(&item2)
+            .unwrap()
+            .into_iter()
+            .filter(|d| d.status == steve_types::DecisionStatus::Open)
+            .count(),
+        1
+    );
 }
 
 /// ST-49, changed 2026-11-09: the agent stopped to lay out a plan (a heading says so), far above its
@@ -218,20 +245,6 @@ fn a_plan_it_stopped_to_report_is_reminded_first() {
     assert!(p.contains("steve_ask、steve_deliver 仍然可用"), "{p}");
     assert!(p.contains("用 steve_deliver 交付"), "{p}");
     assert!(p.contains("等用户确认的内容"), "{p}");
-}
-
-/// ST-54: the agent stopped with a list of things for you to confirm.
-#[test]
-fn something_it_stopped_for_you_to_confirm_is_for_you() {
-    let k = kit(2);
-    let (item, sid) = started(&k);
-    stop(
-        &k,
-        &sid,
-        "改好了一半。\n\n**待确认**\n- 旧接口是否直接删掉\n- 迁移要不要保留回退",
-    );
-    assert_eq!(k.open_fails(&item).len(), 1);
-    assert!(steve_lines(&k, &item).is_empty());
 }
 
 /// You asked the item something from the conversation: its answer ends the turn on purpose.
@@ -521,6 +534,21 @@ fn different_refusals_are_continued_with_the_latest_reason() {
     assert_eq!(steve_lines(&k, &item).len(), 2);
     let p = k.rt.prompts_of(&sid).pop().unwrap();
     assert!(p.contains(&format!("原因：{scope}")), "{p}");
+}
+
+#[test]
+fn continue_prompt_tells_agent_to_use_steve_ask_for_user_only_actions() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    stop(&k, &sid, "请先在终端扫码登录微信，完成后告诉我。");
+    assert!(k.open_fails(&item).is_empty());
+    assert_eq!(steve_lines(&k, &item).len(), 1);
+    let p = k.rt.prompts_of(&sid).pop().unwrap();
+    assert!(p.contains("steve_ask"), "{p}");
+    assert!(
+        p.contains("只有用户能做的事") && p.contains("不要当成用户已经完成、不要自行继续"),
+        "{p}"
+    );
 }
 
 /* ── your Finish when nothing can take Steve's follow-up (#347) ── */

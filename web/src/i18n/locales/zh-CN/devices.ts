@@ -351,6 +351,7 @@ export default {
     summaryWorkPaused: "已暂停接收 · 上限 {{max}}",
     actionPending: "这台 Node 正在等待确认指纹，确认后才会开始接活。",
     actionOffline: "{{status}} · {{why}}。恢复在线前，派给它的会话会排队等待。",
+    actionUnconfined: "系统沙箱隔离未启用或不可用（{{reason}}），此 Node 上的任务当前没有 OS 沙箱隔离。",
     actionFileAccess: "缺少 macOS 受保护目录访问权限（{{locations}}），请在那台 Mac 授权后重新检查。",
     actionFileAccessPlain: "缺少 macOS 文件访问权限，请在那台 Mac 授权后重新检查。",
     actionHarnessAuth: "{{names}} 需要登录或配置凭据，完成配置后重新探测即可恢复。",
@@ -405,6 +406,15 @@ export default {
     projectBoundaryDesc: "配对本身不授予目录访问权；仅已绑定的项目目录会被派发会话",
     badgeLocal: "本机受控",
     badgeOwnerOnly: "仅限本人",
+    confinementTitle: "系统沙箱隔离",
+    confinementState: {
+      confined: "已启用（{{backend}}）",
+      unconfined: "未启用隔离",
+      unknown: "尚未上报",
+    },
+    confinementConfinedDesc: "受支持的命令与作业运行在 {{backend}} 系统沙箱中。",
+    confinementUnconfinedDesc: "当前未启用 OS 沙箱隔离：{{reason}}。",
+    confinementUnknownDesc: "Node 上报宿主机状态后将显示系统沙箱隔离情况。",
     execPolicyTitle: "执行策略（policy.json）",
     execPolicyState: {
       allowed: "已允许（exec: true）",

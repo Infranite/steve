@@ -17,12 +17,13 @@ impl Pg {
 fn error(e: postgres::Error) -> StoreError {
     if let Some(db) = e.as_db_error() {
         let code = db.code().code();
+        if code == "55P03" || code.starts_with("40") {
+            return StoreError::Busy(db.to_string());
+        }
         if !(code.starts_with("08")
-            || code.starts_with("40")
             || code.starts_with("53")
             || code.starts_with("57")
-            || code.starts_with("58")
-            || code == "55P03")
+            || code.starts_with("58"))
         {
             return StoreError::Rejected(db.to_string());
         }

@@ -22,8 +22,6 @@ base64 = "=0.23.1"
 libc = "=0.2.191"
 metrics = "=0.24.6"
 regex = "=1.13.1"
-chrono = { version = "=0.4.45", default-features = false, features = ["std"] }
-httpdate = "=1.0.3"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.154", features = ["preserve_order"] }
 similar = "=3.2.1"

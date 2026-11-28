@@ -602,8 +602,14 @@ impl HubTools for NodeTools {
                                 attempt.as_str().to_string(),
                             );
                             match blocking(move || {
-                                super::node_runtime::deliver_mid_turn(&st, &s, &t, &a)
-                                    .map_err(internal)
+                                super::node_runtime::deliver_mid_turn(
+                                    &st,
+                                    &s,
+                                    &t,
+                                    &a,
+                                    steve_store::now(),
+                                )
+                                .map_err(internal)
                             })
                             .await
                             {

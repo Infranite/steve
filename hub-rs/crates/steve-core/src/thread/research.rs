@@ -769,7 +769,61 @@ impl Core {
                 self.research_now(task, lease, stop, text, files, info, r, t0)
                     .await
             }
-            _ => {
+            (true, None) => {
+                tracing::error!(
+                    run = %task.id,
+                    ws = %task.workspace_id,
+                    "research requested without a mounted researcher runtime"
+                );
+                metrics::counter!("steve_thread_research_unavailable_total").increment(1);
+                let steps = Mutex::new(Steps {
+                    route: info.step_json.clone(),
+                    ..Default::default()
+                });
+                let mut meta = self.inline_meta(
+                    task,
+                    text,
+                    files,
+                    &info,
+                    info.offer.as_ref(),
+                    lock(&steps).json(now() - t0),
+                )?;
+                meta["error"] = json!(true);
+                meta[SYSTEM] = json!(true);
+                meta["error_code"] = json!("researcher_unavailable");
+                let reply_text = steve_i18n::stored(|| {
+                    if conv.guest() {
+                        steve_i18n::t!("core.thread.researcher_unavailable_guest")
+                    } else {
+                        steve_i18n::t!("core.thread.researcher_unavailable")
+                    }
+                });
+                let committed = self.commit_inline_reply(
+                    task,
+                    lease,
+                    false,
+                    "failed",
+                    &reply_text,
+                    meta.clone(),
+                    &info,
+                    None,
+                    None,
+                    None,
+                    0,
+                    0,
+                    None,
+                    Some("researcher_unavailable: research runtime unavailable"),
+                )?;
+                if let CommitOutcome::Committed {
+                    reply_message_id: Some(ref id),
+                    ..
+                } = committed
+                {
+                    self.after_inline_commit(&task.workspace_id, task, id, &meta)?;
+                }
+                Ok(())
+            }
+            (false, _) => {
                 self.answer_now(task, lease, stop, conv, text, files, info, t0)
                     .await
             }
@@ -1507,7 +1561,6 @@ impl Core {
                     route_model: info.model.as_deref(),
                     route_confidence: info.confidence,
                     route_signals: &info.signals,
-                    route_fallback: info.fallback,
                     route_ms: info.ms,
                     route_outcome: None,
                     item_id: None,

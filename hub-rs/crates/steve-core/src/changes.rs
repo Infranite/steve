@@ -201,6 +201,7 @@ fn sanitize_bot_for_harness(
 /// the Hub's adapters offer even when the same draft switches `harness`.
 fn bot_fields(
     b: &Bot,
+    default_project: Option<&str>,
     projects: &[crate::repo::Project],
     harnesses: &[crate::harnesses::Harness],
 ) -> Vec<BotField> {
@@ -369,7 +370,7 @@ fn bot_fields(
                 ),
                 current: json!(
                     ps.iter()
-                        .find(|(id, _)| Some(id) == b.default_project.as_ref())
+                        .find(|(id, _)| Some(id.as_str()) == default_project)
                         .map(|(_, n)| n.as_str())
                         .unwrap_or("无")
                 ),
@@ -486,7 +487,6 @@ fn blank_bot(ws: &str, name: &str, m: &crate::models::Models) -> Bot {
         persona: String::new(),
         proactive: 1,
         avatar: Default::default(),
-        default_project: None,
         prompt: None,
         device: None,
         reasoning_effort: steve_types::ReasoningEffort::Default,
@@ -1322,10 +1322,16 @@ impl Core {
                     Some(b) if db.bot_in_workspace(&b.id, ws)? => b,
                     _ => return Err(msg(steve_i18n::t!("core.bot.not_found"))),
                 };
-                let fs: Vec<FieldSpec> = bot_fields(&b, &db.projects(ws)?, &harnesses)
-                    .into_iter()
-                    .map(|f| f.spec)
-                    .collect();
+                let default_project = db.bot_default_project(&b.id, ws)?;
+                let fs: Vec<FieldSpec> = bot_fields(
+                    &b,
+                    default_project.as_deref(),
+                    &db.projects(ws)?,
+                    &harnesses,
+                )
+                .into_iter()
+                .map(|f| f.spec)
+                .collect();
                 (
                     steve_i18n::t!("core.draft.title.bot", bot = b.display()),
                     format!("#/bots/{}", b.id),
@@ -1501,13 +1507,26 @@ impl Core {
                         .bot(&id)?
                         .ok_or_else(|| msg(steve_i18n::t!("core.bot.not_found")))?,
                 };
-                let mut fs = bot_fields(&b, &db.projects(ws)?, &harnesses);
+                let default_project = if fresh.is_some() {
+                    None
+                } else {
+                    db.bot_default_project(&b.id, ws)?
+                };
+                let mut fs = bot_fields(
+                    &b,
+                    default_project.as_deref(),
+                    &db.projects(ws)?,
+                    &harnesses,
+                );
                 /* a new bot starts enabled */
                 if fresh.is_some() {
                     fs.retain(|f| f.spec.key != "enabled");
                 }
                 let specs: Vec<FieldSpec> = fs.iter().map(|f| f.spec.clone()).collect();
-                let bv = serde_json::to_value(&b)?;
+                let mut bv = serde_json::to_value(&b)?;
+                if let Value::Object(ref mut m) = bv {
+                    m.insert("default_project".into(), json!(default_project));
+                }
                 let what = match fresh {
                     Some("") => "a new bot (it does not exist yet; fill in only what the request says about this one bot)".to_string(),
                     Some(n) => format!("a new bot \"{n}\" (it does not exist yet; fill in only what the request says about this one bot)"),
@@ -2384,7 +2403,13 @@ impl ChangeOp for CoreBotPatch {
             .bot(tid)
             .map_err(core_err)?
             .ok_or_else(|| ApiError::rule(steve_i18n::t!("core.bot.not_found")))?;
-        let b = serde_json::to_value(&cur_bot).map_err(core_err)?;
+        let mut b = serde_json::to_value(&cur_bot).map_err(core_err)?;
+        if let Value::Object(ref mut obj) = b {
+            obj.insert(
+                "default_project".into(),
+                json!(db.bot_default_project(tid, cx.ws).map_err(core_err)?),
+            );
+        }
         let hs = self.0.models().harnesses();
         self.0
             .models()
@@ -2397,10 +2422,19 @@ impl ChangeOp for CoreBotPatch {
         for k in bp.keys() {
             before.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
         }
-        db.bot_patch(tid, &bp, cx.actor).map_err(core_err)?;
+        db.bot_patch_in(cx.ws, tid, &bp, cx.actor)
+            .map_err(core_err)?;
         let mut after = Map::new();
-        if let Some(b) = db.bot(tid).map_err(core_err)? {
-            let b = serde_json::to_value(b).map_err(core_err)?;
+        if let Some(bot) = db.bot(tid).map_err(core_err)? {
+            let mut b = serde_json::to_value(bot).map_err(core_err)?;
+            if bp.contains_key("default_project")
+                && let Value::Object(ref mut obj) = b
+            {
+                obj.insert(
+                    "default_project".into(),
+                    json!(db.bot_default_project(tid, cx.ws).map_err(core_err)?),
+                );
+            }
             for k in bp.keys() {
                 after.insert(k.clone(), b.get(k).cloned().unwrap_or(Value::Null));
             }
@@ -2418,7 +2452,7 @@ impl ChangeOp for CoreBotPatch {
         let tid = op_id(op)?;
         let (before_map, after_map) = before_after(before);
         let db = self.0.store();
-        let now = db
+        let mut now = db
             .bot(tid)
             .map_err(core_err)?
             .map(serde_json::to_value)
@@ -2426,12 +2460,19 @@ impl ChangeOp for CoreBotPatch {
             .map_err(core_err)?
             .and_then(|v| v.as_object().cloned())
             .unwrap_or_default();
+        if !now.is_empty() && before_map.contains_key("default_project") {
+            now.insert(
+                "default_project".into(),
+                json!(db.bot_default_project(tid, cx.ws).map_err(core_err)?),
+            );
+        }
         let harnesses = self.0.models().harnesses();
         let back = steve_modules::changes::still_ours(cx, before_map, after_map, &now, |k| {
             field_shown("bot", k, false, k, &harnesses)
         });
         if !back.is_empty() {
-            db.bot_patch(tid, &back, cx.actor).map_err(core_err)?;
+            db.bot_patch_in(cx.ws, tid, &back, cx.actor)
+                .map_err(core_err)?;
         }
         Ok(())
     }

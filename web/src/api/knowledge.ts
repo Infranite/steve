@@ -90,7 +90,7 @@ export const kb = {
   patchMem: (id: string, p: Partial<{ text: string; level: Level; status: "confirmed" | "stale"; visibility: string }>) => req<Mem>("PATCH", "/mems/" + enc(id), p),
   deleteMem: (id: string) => req<{ ok: true }>("DELETE", "/mems/" + enc(id)),
   /** the same delete, sent so it survives the page going away (reload, tab closed): fire and forget */
-  deleteMemOnLeave: (id: string) => { void fetch(hubUrl("/api/mems/" + enc(id)), { method: "DELETE", keepalive: true, credentials: "include", headers: wsHeaders() }).catch(() => {}) },
+  deleteMemOnLeave: (id: string) => { void fetch(hubUrl("/api/mems/" + enc(id)), { method: "DELETE", keepalive: true, credentials: "include", headers: wsHeaders() }).catch((e) => console.warn("deleteMemOnLeave failed", { id, error: e })) },
   candidates: () => get<Candidate[]>("/kb/candidates"),
   resolve: (ids: string[], choice: "yes" | "no") => req<{ ok: true; done: number }>("POST", "/kb/candidates/resolve", { ids, choice }),
   /** candidates that expired unanswered; `restore` puts one back for another 30 days */

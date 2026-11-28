@@ -27,6 +27,7 @@ fn read() -> HostInfo {
             .map(|n| n.get() as u32),
         mem_total: crate::vitals::memory().0,
         file_access: None,
+        confinement: None,
     }
 }
 

@@ -434,7 +434,6 @@ fn migration_is_prospective_and_assigns_final_commit_not_timestamp_order() {
                     route_model: None,
                     route_confidence: None,
                     route_signals: &[],
-                    route_fallback: false,
                     route_ms: 0,
                     route_outcome: None,
                     item_id: None,

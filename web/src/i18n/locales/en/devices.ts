@@ -360,6 +360,7 @@ export default {
     summaryWorkPaused: "Paused · Limit {{max}}",
     actionPending: "This Node is waiting for fingerprint confirmation before it can take work.",
     actionOffline: "{{status}} · {{why}}. Sessions assigned to it queue until it reconnects.",
+    actionUnconfined: "OS sandbox confinement is disabled or unavailable ({{reason}}). Jobs on this Node run without OS sandbox isolation.",
     actionFileAccess: "macOS protected folder access is missing ({{locations}}). Grant access on that Mac, then recheck.",
     actionFileAccessPlain: "macOS file access is required. Grant access on that Mac, then recheck.",
     actionHarnessAuth: "{{names}} needs authentication. Configure credentials on this Node, then probe again.",
@@ -415,6 +416,15 @@ export default {
     projectBoundaryDesc: "Pairing alone grants no folder access; only explicitly bound project folders receive sessions",
     badgeLocal: "Local controlled",
     badgeOwnerOnly: "Owner only",
+    confinementTitle: "OS sandbox confinement",
+    confinementState: {
+      confined: "Active ({{backend}})",
+      unconfined: "Unconfined",
+      unknown: "Not reported",
+    },
+    confinementConfinedDesc: "Supported commands and jobs run inside the {{backend}} OS sandbox.",
+    confinementUnconfinedDesc: "OS sandbox confinement is not active: {{reason}}.",
+    confinementUnknownDesc: "Confinement state will appear after this Node reports host capabilities.",
     execPolicyTitle: "Execution policy (policy.json)",
     execPolicyState: {
       allowed: "Allowed (exec: true)",

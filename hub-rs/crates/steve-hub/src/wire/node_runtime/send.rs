@@ -259,6 +259,7 @@ impl NodeRuntime {
                         running = room.running,
                         max = room.max
                     ),
+                    self.clock.now(),
                 )?;
             }
         }
@@ -285,6 +286,7 @@ impl NodeRuntime {
                 tx,
                 &session,
                 &steve_i18n::t!("hub.node.waiting_for_node", detail = e.safe_detail.as_str()),
+                self.clock.now(),
             )?;
         }
         Ok(())
@@ -525,6 +527,7 @@ impl NodeRuntime {
                         &format!(
                             "Node 无法确定这次执行的结果（{detail}），等待对账。点停止可请求放弃。"
                         ),
+                        self.clock.now(),
                     )?;
                 }
             }
@@ -539,6 +542,7 @@ impl NodeRuntime {
                         what = recover::what(&method),
                         detail = detail
                     ),
+                    self.clock.now(),
                 )?;
             }
             ("prepare_workspace" | "abandon", ReceiptState::Unknown) => {
@@ -556,6 +560,7 @@ impl NodeRuntime {
                             },
                             detail = detail
                         ),
+                        self.clock.now(),
                     )?;
                 }
             }
@@ -716,6 +721,7 @@ impl NodeRuntime {
             &format!(
                 "Node 没能打开这个会话（{detail}），已停止自动重试，请修正 Bot 配置后从失败卡重试。"
             ),
+            self.clock.now(),
         )?;
         self.release_if_ended_in(tx, s)?;
         if self.ended_in(s)? {
@@ -790,6 +796,7 @@ impl NodeRuntime {
             tx,
             &s,
             &format!("放弃这次执行没有成功（{detail}），会话仍在等待对账；可以再点一次停止。"),
+            self.clock.now(),
         )?;
         Ok(None)
     }

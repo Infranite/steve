@@ -14,6 +14,7 @@ import { Row, go, Panel, Section, Card, Notice, Note, Chevron, Tile, LIFT, EASE 
 import { ChevronRightIcon } from "lucide-react"
 import { cn } from "cn"
 import { LOADED_WEB_VERSION, st, toast, useStore } from "@/store"
+import { copyText } from "@/lib/clipboard"
 import { useT } from "@/i18n"
 import { clockDur, date, num } from "@/i18n/format"
 
@@ -25,7 +26,7 @@ function VersionValue({ v, label }: { v: string; label: string }) {
     <span className="type-callout tabular-nums text-muted-foreground" title={r.raw} data-version-value>
       {r.when ? <>{r.when}<span className="mx-1.5 text-tertiary">·</span><span className="type-code">{r.commit}</span></> : <span className="type-code">{r.raw}</span>}
     </span>
-    <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("pages:version.copyAria", { label })} className="text-muted-foreground" onClick={() => { navigator.clipboard?.writeText(r.raw).catch(() => {}); toast(t("pages:version.copiedValue", { value: r.raw })) }} />}><CopyIcon /></TooltipTrigger><TooltipContent>{t("pages:version.copyFull")}</TooltipContent></Tooltip>
+    <Tooltip><TooltipTrigger render={<Button variant="ghost" size="icon-xs" aria-label={t("pages:version.copyAria", { label })} className="text-muted-foreground" onClick={async () => { const res = await copyText(r.raw); if (!res.ok) { console.warn("version copy failed", res.error); toast(t("common:action.copyFailed")); return } toast(t("pages:version.copiedValue", { value: r.raw })) }} />}><CopyIcon /></TooltipTrigger><TooltipContent>{t("pages:version.copyFull")}</TooltipContent></Tooltip>
   </span>
 }
 

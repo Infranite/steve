@@ -33,9 +33,7 @@ pub mod usage;
 mod util;
 pub use state_dir::StateDirRuntime;
 
-pub use capacity::{
-    capacity_error_tail, capacity_recovery_at, capacity_summary, is_capacity_error,
-};
+pub use capacity::{capacity_error_tail, is_capacity_error};
 pub use config::{
     AcpConfig, default_claude_adapter, default_claude_executable, default_codex_adapter,
     is_executable_file, is_node_script, npm_root, probe_harnesses, resolve_builtin_adapters,

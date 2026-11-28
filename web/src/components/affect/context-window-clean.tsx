@@ -360,12 +360,16 @@ export function ContextWindow({
     setBusy(part.id);
     const before = part.tokens;
     // The shimmer runs at least long enough to be seen
-    await Promise.all([
-      Promise.resolve(onCompact?.(part.id)).catch(() => {}),
+    const [compactResult] = await Promise.allSettled([
+      Promise.resolve(onCompact?.(part.id)),
       wait(reduced() ? 0 : 1300),
     ]);
     if (!alive.current) return;
     setBusy(null);
+    if (compactResult.status === "rejected") {
+      console.warn("ContextWindow compact failed", { partId: part.id, error: compactResult.reason });
+      return;
+    }
     // Compacted parts can't be compacted again – until they have grown past this size
     setCompacted((c) => ({ ...c, [part.id]: before }));
     setFarewell({ id: part.id, leaving: false });

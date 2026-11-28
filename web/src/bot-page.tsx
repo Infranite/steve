@@ -172,7 +172,7 @@ function PromptAssistant({ k, field, base, onApplied, autoAsk }: { k: string; fi
       const r = await api.draft({ kind: "bot", id: k, field, base }, q)
       const after = r.patch?.[field]
       if (typeof after === "string" && after.trim() && after.trim() !== base.trim()) { setDr({ id: r.id, field, before: base, after }); setV("") }
-      else { setNote(t("manage:prompt.noChange")); void api.dropConfig(r.id).catch(() => {}) }
+      else { setNote(t("manage:prompt.noChange")); void api.dropConfig(r.id).catch((e) => console.warn("dropConfig failed", { id: r.id, error: e })) }
     } catch (e) { toast((e as Error).message) } finally { setBusy(false) }
   }
   /* "let Steve draft it" on an empty prompt asks once per press */
@@ -180,13 +180,13 @@ function PromptAssistant({ k, field, base, onApplied, autoAsk }: { k: string; fi
   useEffect(() => { if (autoAsk && autoAsk.n !== asked.current) { asked.current = autoAsk.n; void ask(autoAsk.text) } }, [autoAsk?.n]) // eslint-disable-line react-hooks/exhaustive-deps
   /* a draft is of the text it was asked about; once that text changes it no longer applies */
   useEffect(() => { if (dr && dr.before !== base) setDr(null) }, [base]) // eslint-disable-line react-hooks/exhaustive-deps
-  const drop = () => { if (dr) void api.dropConfig(dr.id).catch(() => {}); setDr(null) }
+  const drop = () => { if (dr) void api.dropConfig(dr.id).catch((e) => console.warn("dropConfig failed", { id: dr.id, error: e })); setDr(null) }
   const apply = async () => {
     if (!dr) return
     setSaving(true)
     try {
       await saveBot(k, dr.field === "prompt" ? { prompt: dr.after } : { rule: dr.after }, dr.field === "prompt" ? t("manage:prompt.appliedPrompt") : t("manage:prompt.appliedRules"))
-      void api.dropConfig(dr.id).catch(() => {})
+      void api.dropConfig(dr.id).catch((e) => console.warn("dropConfig failed", { id: dr.id, error: e }))
       onApplied(dr.after); setDr(null)
     } finally { setSaving(false) }
   }
@@ -228,7 +228,7 @@ export function BotPrompt({ k }: { k: string }) {
   const b = st.bots[k]
   const [prompt, setPrompt] = useState<{ generated: string; custom: string | null } | null>(null), [pdraft, setPdraft] = useState<string | null>(null)
   const [auto, setAuto] = useState<{ text: string; n: number } | undefined>(undefined)
-  useEffect(() => { api.botPrompt(k).then(setPrompt).catch(() => {}) }, [k, b?.prompt, memories, b?.rule, b?.role, b?.pers, b?.pro])
+  useEffect(() => { api.botPrompt(k).then(setPrompt).catch((e) => console.warn("botPrompt load failed", { botId: k, error: e })) }, [k, b?.prompt, memories, b?.rule, b?.role, b?.pers, b?.pro])
   if (!b) return null
   const custom = b.prompt != null || pdraft != null
   const text = pdraft ?? b.prompt ?? ""

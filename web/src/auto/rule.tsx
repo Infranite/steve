@@ -11,6 +11,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { Page, Row, Segmented, StatusDot, Meta, Empty, go, Panel, SectionLabel, Pill } from "@/ui"
 import { Composer } from "@/composer"
 import { tm, toast } from "@/store"
+import { copyText } from "@/lib/clipboard"
 import { flowApi, errText, sourceLabel, type Flow, type GNode, type Graph, type Run } from "@/api/flow"
 import { useHubQuery } from "@/data/use-hub-query"
 import { HubError } from "@/api"
@@ -169,7 +170,7 @@ export function RuleView({ id }: { id: string }) {
           : <div className="flex flex-col gap-2" data-code-view>
               <Textarea aria-label={t("auto:rule.codeAria")} className="min-h-[460px] rounded-xl bg-muted/60 type-code" value={toYaml(f.name, f.version, work)} readOnly />
               <div className="flex items-center gap-2 px-1 type-footnote text-muted-foreground"><span className="flex-1">{t("auto:rule.codeHint")}</span>
-                <Button size="xs" variant="ghost" onClick={() => void navigator.clipboard.writeText(JSON.stringify(work, null, 2)).then(() => toast(t("auto:rule.copiedJson")))}><CopyIcon />{t("auto:rule.copyJson")}</Button></div>
+                <Button size="xs" variant="ghost" onClick={async () => { const res = await copyText(JSON.stringify(work, null, 2)); if (!res.ok) { console.warn("flow json copy failed", res.error); toast(t("common:action.copyFailed")); return } toast(t("auto:rule.copiedJson")) }}><CopyIcon />{t("auto:rule.copyJson")}</Button></div>
             </div>}
         <Composer placeholder={t("auto:rule.composer")} onSend={(x) => void steve(x)} testId="rule" disabled={busy === "steve"} />
         <div className="px-1 type-footnote text-muted-foreground">{t("auto:rule.footer")} <a href="#/signals" className="text-blue hover:underline">{t("auto:rule.viewInSignals")}</a></div>

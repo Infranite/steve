@@ -380,7 +380,7 @@ pub fn bots_list(store: &Store, ws: &str) -> Result<BotsListResponse, String> {
                     })
                 })
                 .collect();
-            let default_project = bot.default_project.as_ref().and_then(|pid| {
+            let default_project = facts.default_projects_by_bot.get(&bot.id).and_then(|pid| {
                 facts.projects.get(pid).map(|name| NamedRef {
                     id: pid.clone(),
                     name: name.clone(),

@@ -233,11 +233,9 @@ async fn create_now(
     // whatever the user left open (bot, project, title, tags) Steve decides, the same way as in the conversation
     let needs_route = project.is_none() || title.as_deref().is_none_or(str::is_empty);
     let r = if needs_route {
-        Some(
-            st.domain
-                .route_for_team(&c.ws, &goal, team.as_deref())
-                .await?,
-        )
+        st.domain
+            .route_for_team(&c.ws, &goal, team.as_deref())
+            .await?
     } else {
         None
     };
@@ -259,7 +257,12 @@ async fn create_now(
         tag_ids = r.tag_ids.iter().cloned().chain(made).collect();
     }
     let title = title
-        .or_else(|| r.as_ref().map(|r| r.title.clone()))
+        .filter(|t| !t.trim().is_empty())
+        .or_else(|| {
+            r.as_ref()
+                .map(|r| r.title.clone())
+                .filter(|t| !t.trim().is_empty())
+        })
         .unwrap_or_else(|| js::slice(&goal, 24));
     let project = match project {
         Some(p) => Some(p),

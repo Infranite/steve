@@ -115,21 +115,6 @@ fn a_registered_dependency_wait_is_not_a_stall() {
     assert!(k.open_fails(&item).is_empty());
 }
 
-/// An agent that stops waiting for something only you can do is yours: Steve does not continue it
-/// (it would only take the step as done), and the card waits for you.
-#[test]
-fn an_agent_waiting_for_your_own_action_is_not_continued() {
-    let k = kit(2);
-    let i = k.item("run", "执行", None);
-    let s = k.session(&i, "idle");
-    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
-    k.rt.say(&s, "代码已改好。需要你本人在手机上确认登录，完成后告诉我。");
-    k.rt.end_turn(&k.core, &s, "end_turn", None);
-    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
-    assert!(steve_lines(&k, &i).is_empty());
-    assert_eq!(k.open_fails(&i).len(), 1, "the card is yours");
-}
-
 /// 2026-11-12: the Node could not link for hours and input waited with only "queued" to show. What
 /// waits on it says the Node is not linked and why, and stops saying so once it links.
 #[test]
@@ -246,74 +231,6 @@ fn an_open_stop_card_does_not_hold_back_a_continue() {
     assert_eq!(steve_lines(&k, &i).len(), 1);
 }
 
-/// ST-25 #2 at the turn end: a request to scan at the start of a long final reply, streamed in many
-/// pieces and not ending in a question, is still a wait on you. Steve does not continue it.
-#[test]
-fn a_long_final_reply_asking_you_to_scan_is_not_continued() {
-    let k = kit(2);
-    let i = k.item("run", "执行", None);
-    let s = k.session(&i, "idle");
-    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
-    k.rt.say(&s, "请扫码授权，完成后告诉我。");
-    for _ in 0..120 {
-        k.rt.say(&s, "阅读说明。");
-    }
-    k.rt.say(&s, "我在这里等着");
-    k.rt.end_turn(&k.core, &s, "end_turn", None);
-    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
-    assert!(steve_lines(&k, &i).is_empty());
-    assert_eq!(k.open_fails(&i).len(), 1, "the card is yours");
-    // and the stall watch later on does not continue it either
-    assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-    assert_eq!(k.rt.prompts_of(&s).len(), 1);
-
-    // what it said before its last tool call is not what it waits for now
-    let i = k.item("run", "执行", None);
-    let s = k.session(&i, "idle");
-    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
-    k.rt.say(&s, "看到文档里写着请扫码授权。");
-    k.db()
-        .event_add(&s, steve_transcript::TOOL, json!({"tool": {"id": "t1"}}))
-        .unwrap();
-    k.rt.say(&s, "改好了一半，接着做。");
-    k.rt.end_turn(&k.core, &s, "end_turn", None);
-    assert_eq!(k.rt.prompts_of(&s).len(), 2, "continued by Steve");
-}
-
-/// ST-25 #8 at the turn end: an English request to sign in and say when done, with no question mark.
-#[test]
-fn an_english_request_to_log_in_is_not_continued() {
-    let k = kit(2);
-    for said in [
-        "Please log in to your account, then reply Done.",
-        "Please log in to GitHub and tell me when done.",
-    ] {
-        let i = k.item("run", "执行", None);
-        let s = k.session(&i, "idle");
-        k.rt.prompt(&s, "do it", "me", &[]).unwrap();
-        k.rt.say(&s, said);
-        k.rt.end_turn(&k.core, &s, "end_turn", None);
-        assert_eq!(k.rt.prompts_of(&s).len(), 1, "{said}: not continued");
-        assert_eq!(k.open_fails(&i).len(), 1, "{said}: the card is yours");
-    }
-}
-
-/// ST-25 #9 at the turn end: words about codes in a report are no wait on you; Steve continues it.
-#[test]
-fn a_report_about_codes_is_continued() {
-    let k = kit(2);
-    let i = k.item("run", "执行", None);
-    let s = k.session(&i, "idle");
-    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
-    k.rt.say(
-        &s,
-        "验证码有效期改成 120 秒了，OTP 位数和二维码组件也换好了，测试通过。",
-    );
-    k.rt.end_turn(&k.core, &s, "end_turn", None);
-    assert_eq!(k.rt.prompts_of(&s).len(), 2, "continued by Steve");
-    assert!(k.open_fails(&i).is_empty());
-}
-
 /// ST-25 #4: you stop an ordinary item's turn and the Hub restarts before the stall watch opens a
 /// card. Your Stop is kept with the session, not in memory: after the restart the card is yours and
 /// nothing continues it.
@@ -388,40 +305,6 @@ fn a_late_old_turn_end_does_not_undo_your_stop_but_your_message_does() {
     assert!(!crate::turn_wait::yours(&kept), "{kept:?}");
     assert_eq!(k.rt.prompts_of(&s).len(), 3, "continued by Steve");
     assert_eq!(steve_lines(&k, &i).len(), 1);
-}
-
-/// ST-37 #1 at the turn end and Steve's continue (takeover): asked to type a code before going on,
-/// or to use a passkey, the agent waits on you. Steve spends no continue on it and the stall watch
-/// does not either; a report of how the code step was built is continued as usual.
-#[test]
-fn a_code_to_type_or_a_passkey_is_not_continued() {
-    let k = kit(2);
-    for said in [
-        "输入验证码后继续",
-        "Use your passkey",
-        "登录页已打开。Use your passkey to sign in, then reply.",
-    ] {
-        let i = k.item("run", "执行", None);
-        let s = k.session(&i, "idle");
-        k.rt.prompt(&s, "做事", "me", &[]).unwrap();
-        k.rt.say(&s, said);
-        k.rt.end_turn(&k.core, &s, "end_turn", None);
-        assert_eq!(k.rt.prompts_of(&s).len(), 1, "{said}: not continued");
-        assert!(steve_lines(&k, &i).is_empty(), "{said}");
-        assert_eq!(k.open_fails(&i).len(), 1, "{said}: the card is yours");
-        assert!(k.core.tx().check_stalls(later()).unwrap().is_empty());
-        assert_eq!(k.rt.prompts_of(&s).len(), 1, "{said}");
-    }
-    let i = k.item("run", "执行", None);
-    let s = k.session(&i, "idle");
-    k.rt.prompt(&s, "做事", "me", &[]).unwrap();
-    k.rt.say(
-        &s,
-        "已实现：用户输入验证码后继续登录，passkey 也支持了，测试通过。",
-    );
-    k.rt.end_turn(&k.core, &s, "end_turn", None);
-    assert_eq!(k.rt.prompts_of(&s).len(), 2, "continued by Steve");
-    assert!(k.open_fails(&i).is_empty());
 }
 
 /// ST-37 #2 at the Core: the same end of the same attempt told again after a restart (the same
@@ -538,17 +421,15 @@ fn a_newer_turns_end_after_your_message_is_not_your_stop() {
     assert_eq!(k.rt.prompts_of(&s).len(), 3, "continued by Steve");
 }
 
-/// ST-37 #6: the agent asked you to scan, then a tool call made that moot (a local substitute, no
-/// authorization needed), and the turn ended with nothing said after the call. Its final reply is
-/// empty: the obsolete request is not read as a wait on you, Steve continues it. A long request
-/// streamed after the last tool call is read whole and stays yours.
+/// ST-37 #6: an agent's final reply ends at tool calls (unless an update targets an earlier call)
+/// and streams cleanly across pieces without reviving text from before the last tool call.
 #[test]
-fn no_final_text_after_tool_does_not_revive_obsolete_request() {
+fn no_final_text_after_tool_does_not_revive_obsolete_text() {
     let k = kit(2);
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "idle");
     k.rt.prompt(&s, "做事", "me", &[]).unwrap();
-    k.rt.say(&s, "请扫码授权，完成后告诉我。");
+    k.rt.say(&s, "准备先检查旧状态。");
     k.db()
         .event_add(
             &s,
@@ -561,28 +442,25 @@ fn no_final_text_after_tool_does_not_revive_obsolete_request() {
     assert_eq!(k.rt.prompts_of(&s).len(), 2, "continued by Steve");
     assert!(k.open_fails(&i).is_empty());
 
-    // after the last tool call: a long request, streamed in pieces, read whole and yours
+    // after the last tool call: a long reply streamed in pieces is read whole
     let i = k.item("run", "执行", None);
     let s = k.session(&i, "idle");
     k.rt.prompt(&s, "做事", "me", &[]).unwrap();
     k.db()
         .event_add(&s, steve_transcript::TOOL, json!({"tool": {"id": "t1"}}))
         .unwrap();
-    k.rt.say(&s, "请扫码授权，");
-    k.rt.say(&s, "完成后告诉我。");
+    k.rt.say(&s, "第一段说明，");
+    k.rt.say(&s, "第二段结论。");
     for _ in 0..120 {
         k.rt.say(&s, "阅读说明。");
     }
-    k.rt.say(&s, "我在这里等着");
+    k.rt.say(&s, "末尾摘要");
     let reply = k.db().final_reply(&s).unwrap();
     assert!(
-        reply.starts_with("请扫码授权，完成后告诉我。") && reply.ends_with("我在这里等着"),
+        reply.starts_with("第一段说明，第二段结论。") && reply.ends_with("末尾摘要"),
         "{}",
         reply.len()
     );
-    k.rt.end_turn(&k.core, &s, "end_turn", None);
-    assert_eq!(k.rt.prompts_of(&s).len(), 1, "not continued");
-    assert_eq!(k.open_fails(&i).len(), 1, "the card is yours");
 
     // an update of a call begun before the reply, coming after it, does not hide the reply
     let i = k.item("run", "执行", None);
@@ -595,7 +473,7 @@ fn no_final_text_after_tool_does_not_revive_obsolete_request() {
             json!({"tool": {"id": "t9", "status": "in_progress"}}),
         )
         .unwrap();
-    k.rt.say(&s, "请扫码授权，完成后告诉我。");
+    k.rt.say(&s, "请确认是否继续。");
     k.db()
         .event_add(
             &s,
@@ -603,10 +481,7 @@ fn no_final_text_after_tool_does_not_revive_obsolete_request() {
             json!({"tool": {"id": "t9", "status": "completed"}}),
         )
         .unwrap();
-    assert_eq!(
-        k.db().final_reply(&s).unwrap(),
-        "请扫码授权，完成后告诉我。"
-    );
+    assert_eq!(k.db().final_reply(&s).unwrap(), "请确认是否继续。");
 }
 
 /// Your Stop whose outcome the backend could not tell (its answer an error): the Stop stays kept,

@@ -321,7 +321,7 @@ function RemoteInstall({ op, onChange }: { op: RInstall | null; onChange: (op: R
   useEffect(() => {
     if (op?.state !== "running") return
     let live = true
-    const timer = setInterval(() => { void api.install(op.id).then((v) => { if (live) show(v) }).catch(() => {}) }, 1000)
+    const timer = setInterval(() => { void api.install(op.id).then((v) => { if (live) show(v) }).catch((e) => console.warn("install status poll failed", { id: op.id, error: e })) }, 1000)
     return () => { live = false; clearInterval(timer) }
   }, [op?.id, op?.state])
   if (!op) return error ? <p role="alert" className="type-callout text-destructive">{error}</p> : <Spinner className="size-4" />

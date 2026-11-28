@@ -118,12 +118,12 @@ async fn an_explicit_target_supplements_the_item() {
         )),
         "steve.thinking carries the phase and turn started_at"
     );
-    /* unknown references go through the router; with the router down that is an answer, never an item */
+    /* unknown references go through the router; with the router down an explicit error is recorded, never an item */
     k.core.say(WS, "XX-99 是什么", &[]).unwrap();
     let ms = settle(&k, 4).await;
-    assert!(ms[3].text.starts_with("（回答失败"), "{}", ms[3].text);
+    assert_eq!(ms[3].meta["error"], json!(true));
+    assert_eq!(ms[3].meta["error_code"], json!("route_failed"));
     assert_eq!(ms[3].item_id, None);
-    assert_eq!(ms[3].meta["steps"]["route"]["fallback"], true);
 }
 
 #[tokio::test]
@@ -501,7 +501,7 @@ async fn stop_ends_an_answer_at_once_and_the_queue_goes_next() {
     )
     .await;
     *k.gw.slow.lock().unwrap() = None;
-    let next = k.core.say(WS, "然后呢", &[]).unwrap();
+    let next = k.core.say(WS, "接着说", &[]).unwrap();
     let view = k
         .db()
         .store()
@@ -711,7 +711,6 @@ async fn replies_carry_what_steve_did() {
     let ms = settle(&k, 2).await;
     let st = &ms[1].meta["steps"];
     assert_eq!(st["route"]["why"], "要改代码");
-    assert_eq!(st["route"]["fallback"], false);
     let t = &st["tools"][0];
     assert_eq!(
         (t["name"].as_str(), t["status"].as_str()),
@@ -720,16 +719,12 @@ async fn replies_carry_what_steve_did() {
     assert!(t["args"]["bot"].is_null());
     assert_eq!(t["result"]["bot"], "dev");
     assert_eq!(t["result"]["item"], json!(ms[1].item_id));
-    /* a router failure is recorded as the fallback */
+    /* a router failure records an explicit failure reply instead of silent fallback */
     k.gw.set(|_, _| Err(msg("down")));
     k.core.say(WS, "随便", &[]).unwrap();
     let ms = settle(&k, 4).await;
-    assert_eq!(
-        ms[3].meta["steps"]["route"]["why"],
-        "没能判断，先在这里回答"
-    );
-    assert_eq!(ms[3].meta["steps"]["route"]["fallback"], true);
-    assert_eq!(ms[3].meta["steps"]["route"]["guard"], "6");
+    assert_eq!(ms[3].meta["error"], json!(true));
+    assert_eq!(ms[3].meta["error_code"], json!("route_failed"));
     assert_eq!(ms[3].item_id, None, "a failed router never makes an item");
 }
 
@@ -741,11 +736,11 @@ async fn a_json_answer_splits_thought_and_text() {
             Ok(r#"{"kind":"answer"}"#.into())
         } else {
             assert!(p.contains("Reply with ONLY one JSON object: {\"thought\""));
-            assert!(p.ends_with("User: 天为什么是蓝的"));
+            assert!(p.ends_with("User: 聊聊瑞利散射"));
             Ok(r#"{"thought":"问的是散射","answer":"因为瑞利散射。"}"#.into())
         }
     });
-    k.core.say(WS, "天为什么是蓝的", &[]).unwrap();
+    k.core.say(WS, "聊聊瑞利散射", &[]).unwrap();
     let ms = settle(&k, 2).await;
     assert_eq!(ms[1].text, "因为瑞利散射。");
     assert_eq!(ms[1].meta["steps"]["answer"]["thought"], "问的是散射");
@@ -946,7 +941,7 @@ async fn a_question_that_needs_tools_says_to_make_it_an_item() {
         }
     });
     let before = k.db().items(WS).unwrap().len();
-    k.core.say(WS, "看下我现在磁盘情况", &[]).unwrap();
+    k.core.say(WS, "帮我看下我现在磁盘情况", &[]).unwrap();
     let ms = settle(&k, 2).await;
     assert_eq!(ms[1].item_id, None, "{}", ms[1].text);
     assert_eq!(k.db().items(WS).unwrap().len(), before);

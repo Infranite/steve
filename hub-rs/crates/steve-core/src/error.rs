@@ -68,6 +68,8 @@ pub enum CoreError {
     NoNodeAvailable(String),
     #[error(transparent)]
     Gateway(#[from] steve_modules::gateway::GatewayError),
+    #[error(transparent)]
+    Route(#[from] crate::gateway::RouteError),
 }
 
 pub type Result<T> = std::result::Result<T, CoreError>;

@@ -30,6 +30,10 @@ pub(super) static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
 
 const REROUTE_WINDOW: i64 = 10 * 60 * 1000;
 
+/// Maximum retries when the thread router returns unusable (malformed/invalid) output.
+/// One retry recovers occasional bad JSON without hiding persistent failures or stalling turns.
+const ROUTE_UNUSABLE_OUTPUT_MAX_RETRIES: u32 = 1;
+
 /// Publishes `steve.thinking = false` when the task exits (even on early return or error).
 struct ThinkingGuard<'a> {
     core: &'a Core,
@@ -69,7 +73,6 @@ pub(super) struct RouteInfo {
     pub model: Option<String>,
     pub confidence: Option<f64>,
     pub signals: Vec<String>,
-    pub fallback: bool,
     pub ms: i64,
     pub project: Option<String>,
     pub tags: Vec<String>,
@@ -86,7 +89,6 @@ impl Default for RouteInfo {
             model: None,
             confidence: None,
             signals: vec![],
-            fallback: false,
             ms: 0,
             project: None,
             tags: vec![],
@@ -261,7 +263,6 @@ impl Core {
                     route_model: route.model.as_deref(),
                     route_confidence: route.confidence,
                     route_signals: &route.signals,
-                    route_fallback: route.fallback,
                     route_ms: route.ms,
                     route_outcome,
                     item_id,
@@ -326,6 +327,77 @@ impl Core {
             ReceiptDispatch::NoDispatch,
             None,
             None,
+        )?;
+        Ok(())
+    }
+
+    fn commit_route_failed(
+        &self,
+        task: &ThreadTask,
+        lease: &str,
+        steps: &Mutex<Steps>,
+        t0: i64,
+        guest: bool,
+        err: &crate::CoreError,
+    ) -> Result<()> {
+        let local_updating = matches!(
+            err,
+            crate::CoreError::Gateway(crate::gateway::GatewayError::LocalNodeUpdating)
+                | crate::CoreError::Route(crate::gateway::RouteError::ModelCall(
+                    crate::gateway::GatewayError::LocalNodeUpdating,
+                ))
+        );
+        let (error_code, reply_text, detail) = if local_updating {
+            tracing::warn!(
+                run = %task.id,
+                ws = %task.workspace_id,
+                "thread router deferred: local node updating"
+            );
+            (
+                "local_node_updating",
+                steve_i18n::stored(|| steve_i18n::t!("core.node.local_updating")),
+                "local_node_updating".to_string(),
+            )
+        } else {
+            let detail = err.to_string();
+            tracing::error!(
+                run = %task.id,
+                ws = %task.workspace_id,
+                "thread router failed: {detail}"
+            );
+            (
+                "route_failed",
+                steve_i18n::stored(|| {
+                    if guest {
+                        steve_i18n::t!("core.thread.route_failed_guest")
+                    } else {
+                        steve_i18n::t!("core.thread.route_failed")
+                    }
+                }),
+                detail,
+            )
+        };
+        let mut meta = Map::new();
+        meta.insert("origin".into(), json!(task.origin_message_id));
+        meta.insert("error".into(), json!(true));
+        meta.insert("error_code".into(), json!(error_code));
+        meta.insert(SYSTEM.into(), json!(true));
+        meta.insert("steps".into(), lock(steps).json(now() - t0));
+        let route = RouteInfo::default();
+        self.commit_simple(
+            task,
+            lease,
+            false,
+            "failed",
+            Some(&reply_text),
+            None,
+            Value::Object(meta),
+            &route,
+            None,
+            None,
+            ReceiptDispatch::NoDispatch,
+            Some(error_code),
+            Some(&detail),
         )?;
         Ok(())
     }
@@ -623,7 +695,6 @@ impl Core {
                         route_model: None,
                         route_confidence: Some(1.0),
                         route_signals: &[],
-                        route_fallback: false,
                         route_ms: 0,
                         route_outcome: Some("offer_taken"),
                         item_id: h.item.as_ref().map(|i| i.id.as_str()),
@@ -714,24 +785,12 @@ impl Core {
 
         let deterministic = if meeting {
             Some((
-                Route {
-                    kind: "research".into(),
-                    confidence: 1.0,
-                    why: "初次见面，没有问路由".into(),
-                    ..Route::fallback(text, None)
-                }
-                .plain(),
+                Route::deterministic("research", text, None, "初次见面，没有问路由"),
                 "meet",
             ))
         } else if decide::obvious_reply(text, !files.is_empty()) {
             Some((
-                Route {
-                    kind: "answer".into(),
-                    confidence: 1.0,
-                    why: "简短寒暄或致谢，直接回复".into(),
-                    ..Route::fallback(text, None)
-                }
-                .plain(),
+                Route::deterministic("answer", text, None, "简短寒暄或致谢，直接回复"),
                 "obvious",
             ))
         } else if decide::without_router(text, !files.is_empty(), guest, &[]).is_some() {
@@ -744,13 +803,7 @@ impl Core {
                         .map(|p| p.id.clone())
                 });
                 (
-                    Route {
-                        kind: kind.into(),
-                        confidence: 1.0,
-                        why: "纯问题，没有问路由".into(),
-                        ..Route::fallback(text, project)
-                    }
-                    .plain(),
+                    Route::deterministic(kind, text, project, "纯问题，没有问路由"),
                     "q",
                 )
             })
@@ -758,7 +811,11 @@ impl Core {
             None
         };
 
-        // 8. Ambiguous message -> single router model call raced against stop.
+        // 8. Ambiguous message -> bounded router model call raced against stop.
+        enum RouteAttempt {
+            Routed(Result<Route>),
+            Stopped,
+        }
         let r0 = now();
         let (r, ms, det_guard) = match deterministic {
             Some((r, g)) => (r, now() - r0, Some(g)),
@@ -769,14 +826,54 @@ impl Core {
                     self.phase(ws, "route");
                 }
                 let routed = super::routed_text(text, &files);
-                let maybe = tokio::select! {
-                    res = self.route_in(ws, &routed, &history, false, guest) => Some(res?),
-                    _ = stop.stopped() => None,
+                let mut unusable_retries = 0u32;
+                let r = loop {
+                    let attempt = tokio::select! {
+                        res = self.route_in(ws, &routed, &history, false, guest) => RouteAttempt::Routed(res),
+                        _ = stop.stopped() => RouteAttempt::Stopped,
+                    };
+                    if stop.is_stopped() {
+                        lock(&self.0.thread.running_phase)
+                            .remove(&(ws.to_string(), space.to_string()));
+                        return self.commit_stopped(task, lease, steps, t0, &RouteInfo::default());
+                    }
+                    match attempt {
+                        RouteAttempt::Stopped => {
+                            lock(&self.0.thread.running_phase)
+                                .remove(&(ws.to_string(), space.to_string()));
+                            return self.commit_stopped(
+                                task,
+                                lease,
+                                steps,
+                                t0,
+                                &RouteInfo::default(),
+                            );
+                        }
+                        RouteAttempt::Routed(Ok(r)) => break r,
+                        RouteAttempt::Routed(Err(crate::CoreError::Route(
+                            crate::gateway::RouteError::UnusableOutput(ref raw),
+                        ))) if unusable_retries < ROUTE_UNUSABLE_OUTPUT_MAX_RETRIES => {
+                            unusable_retries += 1;
+                            tracing::warn!(
+                                run = %task.id,
+                                ws = %task.workspace_id,
+                                attempt = unusable_retries,
+                                "thread router returned unusable output ({raw}); retrying"
+                            );
+                            metrics::counter!(
+                                "steve_router_retries_total",
+                                "reason" => "unusable_output"
+                            )
+                            .increment(1);
+                        }
+                        RouteAttempt::Routed(Err(e)) => {
+                            lock(&self.0.thread.running_phase)
+                                .remove(&(ws.to_string(), space.to_string()));
+                            return self.commit_route_failed(task, lease, steps, t0, guest, &e);
+                        }
+                    }
                 };
                 lock(&self.0.thread.running_phase).remove(&(ws.to_string(), space.to_string()));
-                let Some(r) = maybe.filter(|_| !stop.is_stopped()) else {
-                    return self.commit_stopped(task, lease, steps, t0, &RouteInfo::default());
-                };
                 (r, now() - r0, None)
             }
         };
@@ -794,7 +891,8 @@ impl Core {
             d = decide::for_owner(d, conv.owner_only && conv.research);
         }
         if !guest
-            && d.kind == "supplement"
+            && r.kind == "supplement"
+            && matches!(d.kind.as_str(), "supplement" | "research")
             && let Some(id) = r.item.as_deref()
             && db.item(id)?.is_some_and(|i| i.is_closed())
         {
@@ -824,9 +922,8 @@ impl Core {
             model_kind: r.kind.clone(),
             guard: d.guard.map(String::from),
             model: r.model.clone(),
-            confidence: (!r.fallback).then_some(r.confidence),
+            confidence: Some(r.confidence),
             signals: r.signals.clone(),
-            fallback: r.fallback,
             ms,
             project: r.project.clone(),
             tags: r.tag_ids.clone(),

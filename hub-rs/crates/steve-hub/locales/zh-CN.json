@@ -357,6 +357,7 @@
   "hub.node.workspace_conflict": "工作区的准备方式已改变，旧目录和记录已保留。点“继续”将在当前项目创建新会话。",
   "hub.node.workspace_conflict_question": "开不了会话：工作区的准备方式已改变，旧目录和记录已保留。点“继续”将在当前项目创建新会话。",
   "hub.node.local_updating": "本机 Node 正在更新，等当前回合结束后会自动完成切换，请稍候再试。",
+  "hub.route.failed": "消息判断暂时不可用，请稍后重试。",
   "hub.preflight.harness_not_ready": "%{harness} 在所有设备上都还没装好、没就绪或没登录，现在不能运行。请在设备上安装它，或在那台设备上让它自己登录（Steve 用的就是 harness 在那台设备上的登录），再到「设备」页面查看。",
   "hub.handoff.no_eligible_session": "当前事项还没有可交接的会话",
   "hub.handoff.readonly_session": "只读或外部导入的会话不能交接",

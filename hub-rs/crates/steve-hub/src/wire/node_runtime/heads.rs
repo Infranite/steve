@@ -124,16 +124,18 @@ pub async fn catch_up_streams(
     node: &dyn Node,
     heads: &[StreamHead],
     pull_with: Option<Pull<'_>>,
+    clock: &dyn Clock,
 ) -> ApiResult<CaughtUp> {
     let internal = |e: StoreError| Error::new(Code::Internal, e.to_string());
     let node_id = node.id().clone();
     let mut out = CaughtUp::default();
+    let at = clock.now();
     let looked: Vec<(StreamHead, Head, bool)> = store
         .write(|w| {
             heads
                 .iter()
                 .map(|h| {
-                    let (head, fresh) = compare(w, &node_id, h)?;
+                    let (head, fresh) = compare(w, &node_id, h, at)?;
                     Ok((h.clone(), head, fresh))
                 })
                 .collect::<Result<Vec<_>, StoreError>>()
@@ -146,10 +148,12 @@ pub async fn catch_up_streams(
         let (h, hub) = match head {
             Head::Faulted => continue,
             Head::Behind { hub } => (h, hub),
-            Head::Ahead { hub } => match confirm_ahead(store, node, &h, hub, &mut out).await? {
-                Some(now) => (now, hub),
-                None => continue,
-            },
+            Head::Ahead { hub } => {
+                match confirm_ahead(store, node, &h, hub, &mut out, clock).await? {
+                    Some(now) => (now, hub),
+                    None => continue,
+                }
+            }
         };
         if hub > h.acknowledged {
             // the Hub holds it, the Node never heard so (the ack was lost with a restart)
@@ -167,7 +171,7 @@ pub async fn catch_up_streams(
             continue;
         }
         if let Some(with) = pull_with {
-            pull(store, node, &h, hub, with, &mut out).await?;
+            pull(store, node, &h, hub, with, &mut out, clock).await?;
         }
     }
     Ok(out)
@@ -184,6 +188,7 @@ async fn confirm_ahead(
     h: &StreamHead,
     hub: u64,
     out: &mut CaughtUp,
+    clock: &dyn Clock,
 ) -> ApiResult<Option<StreamHead>> {
     let now = node
         .streams()
@@ -196,8 +201,9 @@ async fn confirm_ahead(
     if now.produced >= hub {
         return Ok(Some(now));
     }
+    let at = clock.now();
     let fresh = store
-        .write(|w| fault(w, node.id(), &now, hub, Fault::Ahead))
+        .write(|w| fault(w, node.id(), &now, hub, Fault::Ahead, at))
         .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
     if fresh {
         out.faulted += 1;
@@ -215,6 +221,7 @@ async fn pull(
     hub: u64,
     with: Pull<'_>,
     out: &mut CaughtUp,
+    clock: &dyn Clock,
 ) -> ApiResult<()> {
     let mut from = hub;
     let mut budget = REPLAY_BYTES;
@@ -243,7 +250,7 @@ async fn pull(
                 return Ok(());
             }
             Err(e) if e.code == Code::Gap => {
-                match recover_replay_gap(store, node, h, from, out, e).await? {
+                match recover_replay_gap(store, node, h, from, out, e, clock).await? {
                     std::ops::ControlFlow::Continue(hub) => {
                         from = hub;
                         continue;
@@ -307,6 +314,7 @@ async fn recover_replay_gap(
     from: u64,
     out: &mut CaughtUp,
     e: Error,
+    clock: &dyn Clock,
 ) -> ApiResult<std::ops::ControlFlow<(), u64>> {
     let internal = |e: StoreError| Error::new(Code::Internal, e.to_string());
     // the Node dropped what the Hub lacks, or its journal changed since the snapshot:
@@ -319,15 +327,16 @@ async fn recover_replay_gap(
     let Some(now) = now.filter(|x| x.epoch == h.epoch) else {
         return Ok(std::ops::ControlFlow::Break(()));
     };
+    let at = clock.now();
     let (head, fresh) = store
-        .write(|w| compare(w, node.id(), &now))
+        .write(|w| compare(w, node.id(), &now, at))
         .map_err(internal)?;
     if fresh {
         out.faulted += 1;
     }
     let hub = match head {
         Head::Behind { hub } => hub,
-        Head::Ahead { hub } => match confirm_ahead(store, node, &now, hub, out).await? {
+        Head::Ahead { hub } => match confirm_ahead(store, node, &now, hub, out, clock).await? {
             Some(_) => hub,
             None => return Ok(std::ops::ControlFlow::Break(())),
         },
@@ -352,7 +361,12 @@ async fn tell(node: &dyn Node, w: Watermark) {
 /// One head against what the Hub applied, in `w`: faults it on a gap (the Hub's own value only
 /// grows, so a head read before it cannot make one up); the Hub holding more than the head is
 /// [`Head::Ahead`], for [`confirm_ahead`]. The bool: it faulted now.
-fn compare(w: &mut W<'_>, node: &NodeId, h: &StreamHead) -> Result<(Head, bool), StoreError> {
+fn compare(
+    w: &mut W<'_>,
+    node: &NodeId,
+    h: &StreamHead,
+    at: i64,
+) -> Result<(Head, bool), StoreError> {
     let st = w.streams().state(StreamKey {
         node: node.as_str(),
         stream: h.stream.as_str(),
@@ -363,7 +377,7 @@ fn compare(w: &mut W<'_>, node: &NodeId, h: &StreamHead) -> Result<(Head, bool),
     }
     let hub = st.map_or(0, |st| st.applied.max(0) as u64);
     if hub < h.acknowledged {
-        let fresh = fault(w, node, h, hub, Fault::Gap)?;
+        let fresh = fault(w, node, h, hub, Fault::Gap, at)?;
         return Ok((Head::Faulted, fresh));
     }
     if hub > h.produced {
@@ -379,6 +393,7 @@ fn fault(
     h: &StreamHead,
     hub: u64,
     fault: Fault,
+    at: i64,
 ) -> Result<bool, StoreError> {
     let k = StreamKey {
         node: node.as_str(),
@@ -412,7 +427,7 @@ fn fault(
         );
         if let Some(session) = &session {
             w.events()
-                .add(session, "system", json!({ "text": note }), None, now())?;
+                .add(session, "system", json!({ "text": note }), None, at)?;
         }
     }
     Ok(fresh)
@@ -439,6 +454,6 @@ impl NodeRuntime {
             receive: &receive,
             largest: self.largest_replay.load(Ordering::Relaxed),
         };
-        catch_up_streams(&self.store, &*self.node, heads, Some(with)).await
+        catch_up_streams(&self.store, &*self.node, heads, Some(with), &*self.clock).await
     }
 }

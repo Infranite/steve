@@ -288,6 +288,7 @@ impl NodeRuntime {
                     tx,
                     &session,
                     &steve_i18n::stored(|| steve_i18n::t!("hub.node.stranger")),
+                    self.clock.now(),
                 )?;
                 *changed += 1;
             }

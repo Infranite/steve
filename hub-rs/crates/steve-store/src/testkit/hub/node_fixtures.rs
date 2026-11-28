@@ -1062,3 +1062,18 @@ pub fn session_runtime_snapshot(store: &Store, session: &str) -> Result<SessionR
         })
     })
 }
+
+pub fn set_command_receipt_raw(
+    store: &Store,
+    operation_id: &str,
+    state: &str,
+    receipt: &str,
+) -> Result<()> {
+    store.write(|tx| {
+        tx.conn.execute(
+            "UPDATE node_commands SET state = ?1, receipt = ?2 WHERE operation_id = ?3",
+            rusqlite::params![state, receipt, operation_id],
+        )?;
+        Ok(())
+    })
+}

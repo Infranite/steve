@@ -24,6 +24,7 @@ export function nodeHref(id: string, tab: NodeTab = "overview"): string {
 export type NodeActionKind =
   | "pending"
   | "offline"
+  | "unconfined"
   | "fileAccess"
   | "harnessAuth"
   | "harnessProbeFailed"
@@ -58,6 +59,7 @@ export type NodeActionItem = {
   names?: string[]
   locations?: string[]
   offlineReason?: string
+  confinementReason?: string
   protocolOlder?: NodeProtocolOlder | null
 }
 
@@ -160,6 +162,15 @@ export function nodeActionItems(v: NodeView, ctx: NodeActionContext = {}): NodeA
 
   // macOS Full Disk Access / protected folders missing (applies to both local and remote macOS Nodes)
   const isMac = v.node?.host?.os === "macos" || (!v.node?.host && hostOf(v).kind === "mac")
+  if (v.linked && v.node?.host?.confinement?.state === "unconfined") {
+    out.push({
+      kind: "unconfined",
+      tone: "warn",
+      tab: "access",
+      command: "openTab",
+      confinementReason: v.node.host.confinement.reason,
+    })
+  }
   const fileAccess = v.linked && isMac && v.node?.host?.file_access?.status !== "not_applicable"
     ? v.node?.host?.file_access
     : undefined
@@ -321,6 +332,7 @@ export function nodeDiagnosticSnapshot(
       mem_gb: host.memGb,
       hostname: host.hostname,
       file_access: v.node?.host?.file_access ?? null,
+      confinement: v.node?.host?.confinement ?? null,
     },
     upgrade: v.node?.upgrade
       ? {

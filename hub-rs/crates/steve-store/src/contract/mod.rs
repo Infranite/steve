@@ -87,7 +87,7 @@ pub mod sessions;
 pub mod settings;
 mod signal_rows;
 pub mod sources;
-mod sqlite;
+pub(crate) mod sqlite;
 mod steward_rows;
 mod systems;
 pub mod tags;

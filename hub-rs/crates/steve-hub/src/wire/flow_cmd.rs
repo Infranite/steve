@@ -89,9 +89,11 @@ impl FlowCmd {
         op: &str,
     ) -> Result<(), String> {
         let mut asked = false;
+        let mut last_err: Option<StoreError> = None;
         runtime
             .wait_ledger_until(op, LOST_WAIT, |res| match res {
                 Ok(Some(l)) if l.state == "unknown" => {
+                    last_err = None;
                     // asked once: a recover the Node could not finish leaves it as it is
                     if !asked {
                         asked = true;
@@ -108,13 +110,18 @@ impl FlowCmd {
                     std::ops::ControlFlow::Continue(())
                 }
                 Ok(_) => std::ops::ControlFlow::Break(Ok(())),
-                Err(e) => {
+                Err(e) if super::node_runtime::is_transient_ledger_error(&e) => {
                     tracing::warn!("flow cmd {op}: {e}");
+                    last_err = Some(e);
                     std::ops::ControlFlow::Continue(())
+                }
+                Err(e) => {
+                    tracing::error!("flow cmd {op}: permanent ledger read error: {e}");
+                    std::ops::ControlFlow::Break(Err(e.to_string()))
                 }
             })
             .await
-            .unwrap_or_else(|| Err(LOST_RUNS.into()))
+            .unwrap_or_else(|| Err(last_err.map_or_else(|| LOST_RUNS.into(), |e| e.to_string())))
     }
 
     /// The project directory as a workspace on `node`.
@@ -263,22 +270,36 @@ impl CmdNode for FlowCmd {
             // the same step asked again: wait for the one there is, never a second one
             match runtime.ledger(&op) {
                 Ok(Some(l)) if l.subject == subject => {}
-                _ => return CmdRan::NotRun(e.to_string()),
+                Ok(_) => return CmdRan::NotRun(e.to_string()),
+                Err(ledger_err) => {
+                    return CmdRan::NotRun(format!("{e}; ledger read failed: {ledger_err}"));
+                }
             }
         }
         runtime
-            .wait_ledger_until(&op, req.timeout + ANSWER_GRACE, |res| match res {
-                Ok(Some(l)) if l.is_settled() => std::ops::ControlFlow::Break(ran(&l)),
-                Ok(Some(_)) => std::ops::ControlFlow::Continue(()),
-                Ok(None) => std::ops::ControlFlow::Break(CmdRan::Unknown),
-                // the store is there again later; the command is in the ledger either way
-                Err(e) => {
-                    tracing::warn!("flow cmd {op}: {e}");
-                    std::ops::ControlFlow::Continue(())
-                }
-            })
+            .wait_ledger_until(&op, req.timeout + ANSWER_GRACE, |res| poll_ledger(res, &op))
             .await
             .unwrap_or(CmdRan::Unknown)
+    }
+}
+
+fn poll_ledger(
+    res: Result<Option<super::node_runtime::LedgerEntry>, StoreError>,
+    op: &str,
+) -> std::ops::ControlFlow<CmdRan> {
+    match res {
+        Ok(Some(l)) if l.is_settled() => std::ops::ControlFlow::Break(ran(&l)),
+        Ok(Some(_)) => std::ops::ControlFlow::Continue(()),
+        Ok(None) => std::ops::ControlFlow::Break(CmdRan::Unknown),
+        // Transient storage errors retry until deadline; a deadline still leaves outcome unknown.
+        Err(e) if super::node_runtime::is_transient_ledger_error(&e) => {
+            tracing::warn!("flow cmd {op}: {e}");
+            std::ops::ControlFlow::Continue(())
+        }
+        Err(e) => {
+            tracing::error!("flow cmd {op}: permanent ledger read error: {e}");
+            std::ops::ControlFlow::Break(CmdRan::NotRun(e.to_string()))
+        }
     }
 }
 
@@ -708,5 +729,17 @@ mod tests {
         // nothing open in the workspace any more: tidy is allowed
         let view = t.node.workspace(w.clone()).await.unwrap();
         t.node.tidy_workspace(tidy(view.revision)).await.unwrap();
+    }
+
+    #[test]
+    fn transient_ledger_error_keeps_polling_while_permanent_stops() {
+        assert!(matches!(
+            poll_ledger(Err(StoreError::Busy("database is locked".into())), "op_1"),
+            std::ops::ControlFlow::Continue(())
+        ));
+        assert_eq!(
+            poll_ledger(Err(StoreError::Storage("corrupt".into())), "op_1"),
+            std::ops::ControlFlow::Break(CmdRan::NotRun("corrupt".into()))
+        );
     }
 }

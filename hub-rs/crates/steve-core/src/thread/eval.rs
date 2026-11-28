@@ -76,7 +76,6 @@ fn route_ctx(c: &Ctx) -> RouteCtx {
                 persona: String::new(),
                 proactive: 1,
                 avatar: Default::default(),
-                default_project: None,
                 prompt: None,
                 device: None,
             })
@@ -146,13 +145,22 @@ struct Scored {
 
 fn score(ctx: &RouteCtx, c: &Case, raw: Option<&str>) -> Scored {
     let named = false;
-    let r = raw
-        .and_then(|raw| gateway::parse_route(ctx, &routed(c), raw, false))
-        .unwrap_or_else(|| gateway::Route::fallback(&c.text, ctx.steve_project.clone()));
+    let text = crate::util::js_head(&c.text, 30).replace('\n', " ");
+    let Some(r) = raw.and_then(|raw| gateway::parse_route(ctx, &routed(c), raw, false)) else {
+        return Scored {
+            id: c.id.clone(),
+            text,
+            model_kind: "error".into(),
+            kind: "error".into(),
+            guard: None,
+            hit: false,
+            question_to_item: false,
+        };
+    };
     let d = decide(&r, &c.text, DecideCtx { named_bot: named });
     Scored {
         id: c.id.clone(),
-        text: crate::util::js_head(&c.text, 30).replace('\n', " "),
+        text,
         model_kind: r.kind.clone(),
         hit: c.expect.contains(&d.kind),
         question_to_item: c.question && d.kind == "item",

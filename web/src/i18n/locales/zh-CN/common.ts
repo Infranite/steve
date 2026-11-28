@@ -10,6 +10,7 @@ export default {
     edit: "编辑",
     copy: "复制",
     copied: "已复制",
+    copyFailed: "无法写入剪贴板，请手动复制",
     confirm: "确认",
     back: "返回",
     more: "更多",

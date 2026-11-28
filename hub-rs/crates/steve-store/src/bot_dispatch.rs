@@ -891,6 +891,7 @@ pub struct WorkspaceBotFacts {
     pub teams: Vec<Team>,
     pub visible_nodes: std::collections::BTreeSet<String>,
     pub projects: std::collections::HashMap<String, String>,
+    pub default_projects_by_bot: std::collections::HashMap<String, String>,
     pub bots: Vec<crate::Bot>,
     pub bindings_by_bot: std::collections::HashMap<String, Vec<String>>,
     pub active_items_by_bot: std::collections::HashMap<String, usize>,
@@ -931,6 +932,19 @@ pub fn workspace_bot_facts(
             )?;
             let rows = stmt.query_map([ws], crate::Bot::from_row)?;
             rows.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        let default_projects_by_bot: std::collections::HashMap<String, String> = {
+            let mut stmt = c.prepare(
+                "SELECT bot_id, default_project
+                   FROM bot_workspaces
+                  WHERE workspace_id = ?1
+                    AND default_project IS NOT NULL
+                    AND default_project <> ''",
+            )?;
+            let rows = stmt.query_map([ws], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<rusqlite::Result<_>>()?
         };
         let raw_bindings: std::collections::HashMap<String, Vec<String>> = {
             let mut stmt =
@@ -1039,6 +1053,7 @@ pub fn workspace_bot_facts(
             teams,
             visible_nodes,
             projects,
+            default_projects_by_bot,
             bots,
             bindings_by_bot,
             active_items_by_bot,

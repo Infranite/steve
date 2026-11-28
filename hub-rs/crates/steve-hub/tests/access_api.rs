@@ -1669,3 +1669,109 @@ async fn me_shell_and_decisions_use_linked_person_identity() {
         .expect("resolved decision present");
     assert_eq!(found["resolved_by"].as_str(), Some(user_id.as_str()));
 }
+
+#[tokio::test]
+async fn item_creation_endpoints_succeed_with_goal_prefix_when_router_fails() {
+    let e = start().await;
+    let st = e.store();
+    let owner = st.access().owner().unwrap().expect("owner");
+    let (_, token) = st
+        .access()
+        .token_create(&owner.id, "Route fallback client", None)
+        .unwrap();
+    let (_, auth) = e
+        .call(
+            "POST",
+            "/auth/token",
+            None,
+            Some(
+                json!({"user": owner.name, "token": token, "client": {"kind": "web", "name": "t"}}),
+            ),
+        )
+        .await;
+    let cred = auth["credential"].as_str().expect("credential").to_string();
+
+    // 1. POST /api/items without title/project succeeds when router adapter is unavailable.
+    let goal_api = "这是一段超过二十四个字的手动创建事项目标内容需要截取开头作为标题";
+    let (status, api_item) = e
+        .call(
+            "POST",
+            "/api/items",
+            Some(&cred),
+            Some(json!({"goal": goal_api, "mode": "propose"})),
+        )
+        .await;
+    assert_eq!(status, 200, "{api_item}");
+    assert_eq!(
+        api_item["title"].as_str(),
+        Some(goal_api.chars().take(24).collect::<String>().as_str())
+    );
+    assert!(api_item["project_id"].is_null(), "{api_item}");
+
+    // 2. Outside MCP steve_item_create without title succeeds when router fails.
+    let goal_mcp = "这是一个来自外部MCP工具的超过二十四个字的创建事项请求内容";
+    let mcp_res = e
+        .http
+        .post(format!("{}/mcp", e.base))
+        .bearer_auth(&token)
+        .header("accept", "application/json, text/event-stream")
+        .json(&json!({
+            "jsonrpc": "2.0",
+            "id": 101,
+            "method": "tools/call",
+            "params": {
+                "name": "steve_item_create",
+                "arguments": {"goal": goal_mcp}
+            }
+        }))
+        .send()
+        .await
+        .unwrap()
+        .json::<Value>()
+        .await
+        .unwrap();
+    assert!(mcp_res["result"]["isError"].is_null(), "{mcp_res}");
+    let mcp_text = mcp_res["result"]["content"][0]["text"]
+        .as_str()
+        .expect("mcp text");
+    let expected_mcp_title: String = goal_mcp.chars().take(24).collect();
+    assert!(mcp_text.contains(&expected_mcp_title), "{mcp_text}");
+    let mcp_item = st
+        .items()
+        .all("default")
+        .unwrap()
+        .into_iter()
+        .find(|i| i.title == expected_mcp_title)
+        .expect("mcp item created");
+    assert_eq!(mcp_item.project_id, None);
+
+    // 3. A2A message/send creates a task/item when router fails.
+    let goal_a2a = "这是一个通过A2A协议发送的超过二十四个字的新建事项测试消息";
+    let (a2a_status, a2a_res) = e
+        .call(
+            "POST",
+            "/a2a",
+            Some(&token),
+            Some(json!({
+                "jsonrpc": "2.0",
+                "id": 102,
+                "method": "message/send",
+                "params": {
+                    "message": {
+                        "role": "user",
+                        "parts": [{"kind": "text", "text": goal_a2a}]
+                    }
+                }
+            })),
+        )
+        .await;
+    assert_eq!(a2a_status, 200, "{a2a_res}");
+    assert!(a2a_res.get("error").is_none(), "{a2a_res}");
+    let task_id = a2a_res["result"]["id"].as_str().expect("a2a task id");
+    let a2a_item = st.items().get(task_id).unwrap().expect("a2a item");
+    assert_eq!(
+        a2a_item.title,
+        goal_a2a.chars().take(24).collect::<String>()
+    );
+    assert_eq!(a2a_item.project_id, None);
+}

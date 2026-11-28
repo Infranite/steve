@@ -118,7 +118,7 @@ async fn main_channel_turns_report_outcomes_without_using_the_hosts_voice() {
         .say_in(
             WS,
             Conv::main(),
-            "看下磁盘",
+            "聊聊磁盘",
             &json!({"chan": {"message": "cm_web", "web": true}}),
         )
         .unwrap();
@@ -851,4 +851,41 @@ async fn stopping_during_research_preparation_keeps_the_result_without_sending_a
             .is_some_and(|rcpt| rcpt.outcome == "stopped")
     })
     .await;
+}
+
+#[tokio::test]
+async fn guest_route_and_researcher_failures_omit_owner_config_details() {
+    let k = Kit::new();
+    let host = Arc::new(Host::default());
+    k.core.set_conv_host(host);
+    k.gw.set(|_, _| Err(msg("router down")));
+
+    let m1 = turn(&k, "帮忙看看这个", guest(true, false));
+    let ms = settle(&k, SPACE, 2).await;
+    assert_eq!(ms[1].meta["error"], json!(true));
+    assert_eq!(ms[1].meta["error_code"], json!("route_failed"));
+    assert_eq!(ms[1].text, steve_i18n::t!("core.thread.route_failed_guest"));
+    assert!(!ms[1].text.contains("路由模型配置"), "{}", ms[1].text);
+    assert_ne!(m1, ms[1].id);
+
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(json!({"kind": "research", "confidence": 0.9}).to_string())
+        } else {
+            Err(msg("unexpected"))
+        }
+    });
+    turn(
+        &k,
+        "帮我梳理并分析这个系统现在是怎么运作的",
+        guest(true, false),
+    );
+    let ms = settle(&k, SPACE, 4).await;
+    assert_eq!(ms[3].meta["error"], json!(true));
+    assert_eq!(ms[3].meta["error_code"], json!("researcher_unavailable"));
+    assert_eq!(
+        ms[3].text,
+        steve_i18n::t!("core.thread.researcher_unavailable_guest")
+    );
+    assert!(!ms[3].text.contains("本机 Node"), "{}", ms[3].text);
 }

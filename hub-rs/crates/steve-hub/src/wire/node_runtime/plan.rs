@@ -191,6 +191,7 @@ impl NodeRuntime {
                 session,
                 "user",
                 message_event(&m.text, &m.via, &m.files),
+                self.clock.now(),
             )?;
             for f in &m.files {
                 match file_part(tx, f)? {
@@ -217,7 +218,7 @@ impl NodeRuntime {
         let mark = self.staged_mark();
         let mut plan_failed = false;
         match tx.scope(|w| self.plan_in(w, session).inspect_err(|_| plan_failed = true)) {
-            Err(e) if plan_failed && !matches!(e, StoreError::Storage(_)) => {
+            Err(e) if plan_failed && !e.is_storage_failure() => {
                 self.unstage(mark);
                 tracing::error!("plan a turn of {session}: {e}");
                 Ok(Planned::Empty)
@@ -631,14 +632,15 @@ pub fn park(
     text: &str,
     via: &str,
     files: &[FileRef],
+    at: i64,
 ) -> Result<(), StoreError> {
     store.write(|w| {
-        queue_in(w, session, text, via, files, now())?;
+        queue_in(w, session, text, via, files, at)?;
         if !node_sessions::has_current_park_notice(w, session)? {
             w.events().add(
                 session, "system",
                 json!({ "text": steve_i18n::stored(|| steve_i18n::t!("hub.session.node_parked")), "parked": true }),
-                None, now(),
+                None, at,
             )?;
         }
         Ok(())
@@ -663,7 +665,7 @@ pub(crate) fn queue_in(
         "queued",
         message_event(text, via, files),
         None,
-        now(),
+        created,
     )?;
     node_sessions::changed_event(w, session)
 }
@@ -681,6 +683,7 @@ pub(crate) fn deliver_mid_turn(
     node_session: &str,
     turn: &str,
     attempt: &str,
+    at: i64,
 ) -> Result<Vec<String>, StoreError> {
     store.write(|tx| {
         let session =
@@ -689,11 +692,11 @@ pub(crate) fn deliver_mid_turn(
             return Ok(vec![]);
         };
         let session = session.as_str();
-        let xs = node_write::deliver_into_turn_in(tx, session, turn, now())?;
+        let xs = node_write::deliver_into_turn_in(tx, session, turn, at)?;
         for m in &xs {
             let mut ev = message_event(&m.text, &m.via, &[]);
             ev["mid_turn"] = json!(true);
-            event_in(tx, session, "user", ev)?;
+            event_in(tx, session, "user", ev, at)?;
         }
         if !xs.is_empty() {
             node_sessions::changed_event(tx, session)?;

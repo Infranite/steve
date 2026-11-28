@@ -116,9 +116,9 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
   const inChat = a === "" || a === "c"
   useEffect(() => {
     if (deliveryId) return
-    if (inChat) void loadChat().catch(() => {})
-    else if (a === "items" && !b) void loadItems().catch(() => {})
-    else if (a === "sessions" && b) void loadSessionView().catch(() => {})
+    if (inChat) void loadChat().catch((e) => console.warn("loadChat failed", e))
+    else if (a === "items" && !b) void loadItems().catch((e) => console.warn("loadItems failed", e))
+    else if (a === "sessions" && b) void loadSessionView().catch((e) => console.warn("loadSessionView failed", e))
   }, [a, b, inChat, deliveryId])
   const workspace = useShellSelector(() => st.workspace)
   const ready = useShellSelector(() => st.ready)
@@ -203,7 +203,7 @@ export default function App({ deliveryId }: { deliveryId?: string }) {
     const read = () => {
       if (pending || document.hidden) return
       pending = true
-      void readHubInfo().catch(() => {}).finally(() => { pending = false })
+      void readHubInfo().catch((e) => console.warn("readHubInfo failed", e)).finally(() => { pending = false })
     }
     read()
     window.addEventListener("focus", read)

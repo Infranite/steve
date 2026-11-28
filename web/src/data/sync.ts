@@ -167,7 +167,7 @@ async function loadSettled(before?: string) {
 }
 
 export function useSettledDecisions(enabled = true) {
-  useEffect(() => { if (enabled && !history()) void loadSettled().catch(() => {}) }, [enabled, scope])
+  useEffect(() => { if (enabled && !history()) void loadSettled().catch((e) => console.warn("loadSettled failed", { scope, error: e })) }, [enabled, scope])
 }
 
 export const loadMoreSettled = () => {

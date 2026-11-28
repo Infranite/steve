@@ -183,17 +183,35 @@ impl NodeSecrets {
         let runtime = Arc::downgrade(runtime);
         let op = op.to_string();
         tokio::spawn(async move {
+            const WATCH_PUSH_POLL_INTERVAL: Duration = Duration::from_millis(100);
+            // Bound consecutive transient lock failures (~5 s at 100 ms polling) so transient SQLite
+            // contention never drops an active push grant early while a wedged store still retires it.
+            const MAX_TRANSIENT_LEDGER_ERRORS: u32 = 50;
+            let mut transient_errors = 0u32;
             loop {
                 let Some(secrets) = secrets.upgrade() else {
                     return;
                 };
                 let done = match runtime.upgrade() {
                     Some(runtime) => match runtime.ledger(&op) {
-                        Ok(Some(entry)) => entry.is_settled(),
+                        Ok(Some(entry)) => {
+                            transient_errors = 0;
+                            entry.is_settled()
+                        }
                         Ok(None) => true,
-                        Err(e) => {
+                        Err(e)
+                            if super::node_runtime::is_transient_ledger_error(&e)
+                                && transient_errors < MAX_TRANSIENT_LEDGER_ERRORS =>
+                        {
+                            transient_errors += 1;
                             tracing::warn!("push {op}: {e}");
                             false
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "push {op}: ending watch_push after ledger read error: {e}"
+                            );
+                            true
                         }
                     },
                     None => true,
@@ -208,7 +226,7 @@ impl NodeSecrets {
                     return;
                 }
                 drop(secrets);
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(WATCH_PUSH_POLL_INTERVAL).await;
             }
         });
     }
@@ -469,7 +487,13 @@ impl UseNodes for VaultNodes {
                 Ok(Some(l)) if l.is_settled() => break ran(&l, u.timeout),
                 Ok(Some(_)) => {}
                 Ok(None) => break failed(UNKNOWN.into()),
-                Err(e) => tracing::warn!("vault use {op}: {e}"),
+                Err(e) if super::node_runtime::is_transient_ledger_error(&e) => {
+                    tracing::warn!("vault use {op}: {e}");
+                }
+                Err(e) => {
+                    tracing::error!("vault use {op}: permanent ledger read error: {e}");
+                    break failed(e.to_string());
+                }
             }
             if Instant::now() >= until {
                 break failed(UNKNOWN.into());

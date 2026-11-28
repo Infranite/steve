@@ -331,11 +331,12 @@ async fn create_task(
         Ok(r) => r,
         Err(e) => return rpc_err(id, -32603, e.message),
     };
-    let title = if r.title.trim().is_empty() {
-        text.chars().take(24).collect()
-    } else {
-        r.title.clone()
-    };
+    let title = r
+        .as_ref()
+        .map(|r| r.title.trim())
+        .filter(|t| !t.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| text.chars().take(24).collect());
     let made = st
         .domain
         .create_item(CreateItem {
@@ -347,8 +348,8 @@ async fn create_task(
             node: None,
             required_specialties: vec![],
             deps: vec![],
-            project: Some(r.project.clone()),
-            tag_ids: r.tag_ids.clone(),
+            project: Some(r.as_ref().and_then(|r| r.project.clone())),
+            tag_ids: r.map(|r| r.tag_ids).unwrap_or_default(),
             source: [format!("A2A · {}", who.token), "a2a".into()],
             mode: "start".into(),
             actor: who.user.id.clone(),

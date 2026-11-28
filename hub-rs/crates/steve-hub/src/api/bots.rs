@@ -605,7 +605,7 @@ pub async fn patch_one(
         {
             check_default_project(r, &c.ws, dp)?;
         }
-        let b = r.bot_patch_checked(&id, &p, &c.me, &harnesses)?;
+        let b = r.bot_patch_checked(&c.ws, &id, &p, &c.me, &harnesses)?;
         let allowed_ws = user_workspace_ids(r, &c.me)?;
         ok(Value::Object(selection_out(
             bot_out(r, b, &c.ws, &allowed_ws)?,
@@ -680,10 +680,11 @@ pub async fn duplicate(
             "fallback_surfaces".into(),
             json!(r.bot_fallback_surfaces(&id)?),
         );
-        if let Some(Value::String(dp)) = b.get("default_project")
-            && !dp.is_empty()
-            && check_default_project(r, &c.ws, dp).is_err()
+        if let Some(dp) = r.bot_default_project(&id, &c.ws)?
+            && check_default_project(r, &c.ws, &dp).is_ok()
         {
+            b.insert("default_project".into(), json!(dp));
+        } else {
             b.insert("default_project".into(), Value::Null);
         }
         create_bot_in(r, &c.ws, &c.me, &b, &harnesses)

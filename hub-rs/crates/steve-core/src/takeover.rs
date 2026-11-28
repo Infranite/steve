@@ -20,11 +20,10 @@ pub(crate) const WHOLE_CHARS: usize = 6000;
 #[derive(Debug, Clone)]
 pub(crate) enum Stop {
     /// A turn ended without a delivery, a question or a pending card: `why` is the card's text,
-    /// `last` the agent's last words (their tail), `whole` what it said in the turn that ended (up to
-    /// [`WHOLE_CHARS`]), `answered_you` the turn answered what you asked it from the conversation.
+    /// `whole` what it said in the turn that ended (up to [`WHOLE_CHARS`]), `answered_you` the
+    /// turn answered what you asked it from the conversation.
     Stopped {
         why: String,
-        last: String,
         whole: String,
         answered_you: bool,
     },
@@ -50,21 +49,16 @@ impl Tx<'_> {
         stop: Stop,
     ) -> Result<Option<String>> {
         let i = self.item(item_id)?;
-        /* it stopped on purpose — a question, or an answer to what you asked it from the conversation —
-         * so it is yours, not continued. A report, a plan or something to confirm left in plain text is
-         * reminded first: the agent may have lost Steve's tools after a compaction or in a long context
-         * (decided by the user on 2026-11-09), and it decides then whether to deliver or ask */
-        if let Stop::Stopped {
-            last, answered_you, ..
-        } = &stop
-            && (crate::agent_questions::looks_like_question(last).is_some() || *answered_you)
-        {
-            return Ok(Some(stop.why().into()));
-        }
-        /* and it waits for something only you can do (sign in, scan a code, confirm on a device),
-         * said anywhere in its final reply however long: continuing it would only have it take the
-         * step as done. Whatever way it stopped. */
-        if crate::agent_questions::own_action(&self.db().final_reply(sid)?).is_some() {
+        /* A turn that answered what you asked from the conversation ended on purpose, so it stays
+         * with you without spending a continue. Anything else without steve_deliver or steve_ask
+         * is reminded/continued under the deterministic takeover contract. */
+        if matches!(
+            stop,
+            Stop::Stopped {
+                answered_you: true,
+                ..
+            }
+        ) {
             return Ok(Some(stop.why().into()));
         }
         let why = stop.why().to_string();
@@ -82,7 +76,7 @@ impl Tx<'_> {
     ) -> Result<Option<String>> {
         let i = self.item(item_id)?;
         let text = format!(
-            "（Steve）上一回合出错中断了：{}。先核对现状再动手：已经完成的推送、合并、打 tag、发布不要重做；然后接着做，做完用 steve_deliver 交付，需要用户决定时用 steve_ask。",
+            "（Steve）上一回合出错中断了：{}。先核对现状再动手：已经完成的推送、合并、打 tag、发布不要重做；如果正在等只有用户能做的事（如登录、扫码、输验证码、本机确认）或需要用户决定，用 steve_ask 提问并停下等待，不要当成用户已完成、不要自行继续；否则接着做，做完用 steve_deliver 交付。",
             js_head(error, 300)
         );
         self.takeover_continue(&i, sid, why, &text)
@@ -98,7 +92,7 @@ impl Tx<'_> {
         why: &str,
     ) -> Result<Option<String>> {
         let i = self.item(item_id)?;
-        let text = "（Steve）上一回合被打断了：运行它的 Node 重启了。先核对现状再动手：已经完成的推送、合并、打 tag、发布不要重做；然后接着做，做完用 steve_deliver 交付，需要用户决定时用 steve_ask。";
+        let text = "（Steve）上一回合被打断了：运行它的 Node 重启了。先核对现状再动手：已经完成的推送、合并、打 tag、发布不要重做；如果正在等只有用户能做的事（如登录、扫码、输验证码、本机确认）或需要用户决定，用 steve_ask 提问并停下等待，不要当成用户已完成、不要自行继续；否则接着做，做完用 steve_deliver 交付。";
         self.takeover_continue(&i, sid, why, text)
     }
 
@@ -392,7 +386,7 @@ fn continue_text(stop: &Stop, i: &Item) -> String {
     s.push_str(
         "如果上下文压缩过，提醒你：Steve 的工具 steve_update、steve_ask、steve_deliver 仍然可用。",
     );
-    s.push_str("如果工作已经完成，现在就用 steve_deliver 交付，可以直接用你刚才的汇报做摘要，列出实际跑过的检查；如果有需要用户决定的事，用 steve_ask 提问并给出 recommended；否则接着做完。");
+    s.push_str("如果工作已经完成，现在就用 steve_deliver 交付，可以直接用你刚才的汇报做摘要，列出实际跑过的检查；如果正在等只有用户能做的事（如登录、扫码、输验证码、本机确认），或者有需要用户决定的事，请用 steve_ask 提问（有选项时给出 recommended）并停下等待，不要当成用户已经完成、不要自行继续；只有在你还能自己推进时才接着做完。");
     if let Stop::Stopped { whole, .. } = stop
         && stopped_to_report(whole)
     {

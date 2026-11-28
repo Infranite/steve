@@ -1991,8 +1991,9 @@ async fn a_parked_session_queues_and_goes_once_the_node_is_back() {
     let store = h.store.clone();
     assert!(steve_hub::wire::node_runtime::bound(&store, S));
     assert!(!steve_hub::wire::node_runtime::bound(&store, "other"));
-    steve_hub::wire::node_runtime::park(&store, S, "while off", "user", &[]).unwrap();
-    steve_hub::wire::node_runtime::park(&store, S, "and more", "user", &[]).unwrap();
+    let now = steve_store::now();
+    steve_hub::wire::node_runtime::park(&store, S, "while off", "user", &[], now).unwrap();
+    steve_hub::wire::node_runtime::park(&store, S, "and more", "user", &[], now).unwrap();
     assert_eq!(
         steve_store::testkit::hub::node_process::event_count_by_session_system(store.path(), S)
             .unwrap(),

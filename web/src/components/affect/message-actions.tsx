@@ -3,6 +3,7 @@
 
 import { Fragment, useEffect, useId, useRef, useState, type KeyboardEvent, type ReactNode, type Ref } from "react";
 import { t, useT } from "@/i18n";
+import { copyText } from "@/lib/clipboard";
 import { reducedMotion } from "@/lib/motion";
 
 /*
@@ -226,11 +227,13 @@ export function MessageActions({
     const t = window.setTimeout(() => setCopied(0), 1600);
     return () => window.clearTimeout(t);
   }, [copied]);
-  const copy = () => {
-    try {
-      if (text !== undefined) navigator.clipboard?.writeText(text).catch(() => {});
-    } catch {
-      // No clipboard here (insecure page, old browser) – the check still confirms the press
+  const copy = async () => {
+    if (text === undefined) return;
+    const res = await copyText(text);
+    if (!res.ok) {
+      console.warn("MessageActions copy failed", res.error);
+      announce(t("common:action.copyFailed"));
+      return;
     }
     onCopy?.(text);
     setCopied(Date.now());

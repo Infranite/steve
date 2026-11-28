@@ -149,6 +149,20 @@ fn cerr(e: CoreError) -> BackendError {
             status: 503,
             message,
         },
+        CoreError::Gateway(steve_core::gateway::GatewayError::LocalNodeUpdating)
+        | CoreError::Route(steve_core::gateway::RouteError::ModelCall(
+            steve_core::gateway::GatewayError::LocalNodeUpdating,
+        )) => BackendError {
+            status: 503,
+            message: steve_i18n::t!("hub.node.local_updating"),
+        },
+        CoreError::Route(e) => {
+            tracing::error!("route failed: {e}");
+            BackendError {
+                status: 503,
+                message: steve_i18n::t!("hub.route.failed"),
+            }
+        }
         e => BackendError::msg(e.to_string()),
     }
 }
@@ -752,9 +766,16 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             })
             .collect();
         let Some(n) = n else {
-            return super::node_runtime::park(&self.store, session_id, text, via, &files)
-                .map(|()| steve_core::Prompted::Queued)
-                .map_err(|e| CoreError::Msg(e.to_string()));
+            return super::node_runtime::park(
+                &self.store,
+                session_id,
+                text,
+                via,
+                &files,
+                steve_store::now(),
+            )
+            .map(|()| steve_core::Prompted::Queued)
+            .map_err(|e| CoreError::Msg(e.to_string()));
         };
         match n.prompt(session_id, text, via, &files) {
             Ok(super::node_runtime::Planned::Created) => Ok(steve_core::Prompted::Sent),
@@ -1307,16 +1328,31 @@ impl CoreDomain {
         let r = blocking(move || c.reclaim_workspaces()).await?;
         serde_json::to_value(r).map_err(|e| BackendError::msg(e.to_string()))
     }
-    pub async fn route(&self, ws: &str, text: &str) -> BResult<Route> {
+    pub async fn route(&self, ws: &str, text: &str) -> BResult<Option<Route>> {
         self.route_for_team(ws, text, None).await
     }
-    pub async fn route_for_team(&self, ws: &str, text: &str, team: Option<&str>) -> BResult<Route> {
-        let r = self
+    pub async fn route_for_team(
+        &self,
+        ws: &str,
+        text: &str,
+        team: Option<&str>,
+    ) -> BResult<Option<Route>> {
+        let r = match self
             .core
             .route_for_team(ws, text, &[], false, false, team)
             .await
-            .map_err(cerr)?;
-        Ok(Route {
+        {
+            Ok(r) => r,
+            Err(CoreError::Route(e)) => {
+                tracing::warn!(
+                    ws,
+                    "item naming route failed; continuing without router metadata: {e}"
+                );
+                return Ok(None);
+            }
+            Err(e) => return Err(cerr(e)),
+        };
+        Ok(Some(Route {
             kind: r.kind,
             title: r.title,
             project: r.project,
@@ -1331,7 +1367,7 @@ impl CoreDomain {
                 })
                 .collect(),
             reply: r.reply,
-        })
+        }))
     }
     pub async fn item_action(&self, id: &str, action: &str, actor: &str) -> BResult<Obj> {
         let a = ItemAction::parse(action)
@@ -2573,6 +2609,64 @@ mod routed_tests {
             assert_eq!(got_en.status, status);
             assert_eq!(got_en.message, en);
         }
+    }
+
+    #[tokio::test]
+    async fn local_node_updating_gateway_and_route_errors_map_to_503_in_zh_and_en() {
+        let cases = [
+            steve_core::CoreError::Gateway(steve_core::gateway::GatewayError::LocalNodeUpdating),
+            steve_core::CoreError::Route(steve_core::gateway::RouteError::ModelCall(
+                steve_core::gateway::GatewayError::LocalNodeUpdating,
+            )),
+        ];
+        for err in cases {
+            let zh = super::cerr(err);
+            assert_eq!(zh.status, 503);
+            assert!(zh.message.contains("本机 Node 正在更新"), "{zh:?}");
+        }
+        let en = steve_i18n::scope(steve_i18n::EN, async {
+            super::cerr(steve_core::CoreError::Route(
+                steve_core::gateway::RouteError::ModelCall(
+                    steve_core::gateway::GatewayError::LocalNodeUpdating,
+                ),
+            ))
+        })
+        .await;
+        assert_eq!(en.status, 503);
+        assert!(en.message.contains("local Node is updating"), "{en:?}");
+    }
+
+    #[tokio::test]
+    async fn route_errors_map_to_503_without_leaking_model_output() {
+        let cases = [
+            steve_core::CoreError::Route(steve_core::gateway::RouteError::ModelCall(
+                steve_core::gateway::GatewayError::Other("gateway timeout".into()),
+            )),
+            steve_core::CoreError::Route(steve_core::gateway::RouteError::UnusableOutput(
+                "RAW_MODEL_OUTPUT_LEAK_MARKER".into(),
+            )),
+        ];
+        for err in cases {
+            let zh = super::cerr(err);
+            assert_eq!(zh.status, 503);
+            assert_eq!(zh.message, steve_i18n::t!("hub.route.failed"));
+            assert!(!zh.message.contains("RAW_MODEL_OUTPUT_LEAK_MARKER"));
+        }
+        let en = steve_i18n::scope(steve_i18n::EN, async {
+            super::cerr(steve_core::CoreError::Route(
+                steve_core::gateway::RouteError::UnusableOutput(
+                    "RAW_MODEL_OUTPUT_LEAK_MARKER".into(),
+                ),
+            ))
+        })
+        .await;
+        assert_eq!(en.status, 503);
+        assert!(!en.message.contains("RAW_MODEL_OUTPUT_LEAK_MARKER"));
+        assert!(
+            en.message
+                .contains("Message routing is temporarily unavailable"),
+            "{en:?}"
+        );
     }
 
     /// N3: `RoutedRuntime::cwd_usable` never blocks on a Node RPC inside Core's lock; it reads
