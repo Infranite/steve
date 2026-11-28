@@ -1329,6 +1329,42 @@ async fn what_a_research_job_cannot_have_is_refused_before_it_is_accepted() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unacked_event_quota_refuses_research_job_with_retry_later() {
+    let t = T::new();
+    let mut cfg = t.scripted_config(2);
+    cfg.storage.quota = 512 * 1024;
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), Some(Arc::new(Files::default())));
+    n.enable_research(t.research());
+
+    {
+        let db = rusqlite::Connection::open(t.root.join("node/node.sqlite3")).unwrap();
+        db.execute(
+            "INSERT INTO events(stream, seq, event) VALUES ('quota_stream', 1, CAST(zeroblob(600000) AS TEXT))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let e = n
+        .start_job(now_cmd(
+            "op_r_quota",
+            scripted("a_1", "m", "q\n@msg m1\n@say ok"),
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.retry, e.safe_detail.as_str()),
+        (
+            Code::Exhausted,
+            Retry::Later { after_ms: None },
+            "the hub has not taken this node's events: no new work until it does"
+        )
+    );
+    n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shutdown_stops_a_running_job_and_says_so() {
     let t = T::new();
     let n = t.node();

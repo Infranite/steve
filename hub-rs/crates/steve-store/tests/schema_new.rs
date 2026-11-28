@@ -2121,3 +2121,196 @@ fn migration_148_creates_dispatch_jobs_and_cleans_legacy_scoring_reasons() {
     assert_eq!(waits[0].constraints.required_specialties, vec!["rust"]);
     assert!(!waits[0].constraints.project_explicit);
 }
+
+#[test]
+fn ordinary_rpc_error_migration_converts_legacy_retry_shapes() {
+    use steve_node_api::{Code, Completion, Error, NodeReason, Observed, Outcome, Receipt, Retry};
+
+    let before_122 = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("CREATE TEMP TABLE ordinary_rpc_errors"))
+        .unwrap();
+    let (_dir, path) = at_version(before_122);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO sessions(id,workspace_id,harness,cwd,status,created,updated)
+             VALUES ('s122','default','mock','/fixture','running',1,1);
+           INSERT INTO runtime_sessions(session_id,node_id,workspace_ref,node_session_id,config_revision,phase,updated)
+             VALUES ('s122','n1','{}','s122','r1','active',1);
+           INSERT INTO runtime_turns(turn_id,session_id,state,created,updated)
+             VALUES ('t122','s122','active',1,1);
+           INSERT INTO runtime_attempts(attempt_id,turn_id,ordinal,node_id,operation_id,execution,spec,digest,state,receipt,completion,created,updated)
+             VALUES
+               ('a_same','t122',0,'n1','op_a1','{}','{}','d1','finished',
+                '{"operation":"op_a1","state":{"state":"finished","outcome":"failed","error":{"code":"busy","retry":"same_operation","operation":"op_a1","state":"unknown","safe_detail":"busy attempt"}}}',
+                '{"outcome":"failed","stop_reason":"error","error":{"code":"denied","retry":"after_reconcile","safe_detail":"denied completion"}}',
+                1,1),
+               ('a_down','t122',1,'n1','op_a2','{}','{}','d2','finished',
+                '{"operation":"op_a2","state":{"state":"finished","outcome":"failed","error":{"code":"downgrade","retry":"never","operation":"op_a2","state":"unknown","safe_detail":"old peer"}}}',
+                '{"outcome":"failed","stop_reason":"error","error":{"code":"expired","retry":"never","safe_detail":"expired completion"}}',
+                2,2);
+           INSERT INTO runtime_jobs(job_id,kind,purpose,workspace_id,node_id,state,created,updated)
+             VALUES ('j122','think','test','default','n1','open',1,1);
+           INSERT INTO runtime_job_attempts(attempt_id,job_id,ordinal,model,node_id,operation_id,execution,spec,digest,state,receipt,completion,created,updated)
+             VALUES ('ja_1','j122',0,'m1','n1','op_ja1','{}','{}','dj1','finished',
+                '{"operation":"op_ja1","state":{"state":"finished","outcome":"failed","error":{"code":"expired","retry":"never","safe_detail":"job expired"}}}',
+                '{"outcome":"failed","stop_reason":"error","error":{"code":"offline","retry":"after_reconcile","operation":"op_ja1","state":"unknown","safe_detail":"job offline"}}',
+                1,1);
+           INSERT INTO node_commands(operation_id,node_id,method,request,digest,target_attempt,state,receipt,maybe_sent,lease_generation,created,updated)
+             VALUES
+               ('op_cmd_off','n1','start_turn','{"body":{"turn":"t1"}}','dc1','a_same','rejected',
+                '{"success":false,"payload":{"code":"offline","retry":"same_operation","safe_detail":"offline"}}',0,1,1,1),
+               ('op_cmd_unk','n1','open_session','{"body":{"session":"s122"}}','dc2',NULL,'rejected',
+                '{"success":false,"payload":{"code":"busy","retry":"after_reconcile","safe_detail":"busy"},"last_error":{"code":"outcome_unknown","retry":"same_operation","operation":"op_cmd_unk","state":"unknown","safe_detail":"lost reply"}}',1,1,2,2),
+               ('op_cmd_fin','n1','start_turn','{"body":{"turn":"t2"}}','dc3','a_down','finished',
+                '{"success":true,"payload":{"operation":"op_a2","state":{"state":"finished","outcome":"failed","error":{"code":"downgrade","retry":"after_reconcile","operation":"op_a2","state":"unknown","safe_detail":"downgrade"}}}}',1,1,3,3);"#,
+    )
+    .unwrap();
+    db::migrate(&c).unwrap();
+    db::migrate(&c).unwrap();
+
+    // Verify realtime stop query filter compatibility (retry.kind == 'text').
+    let retry_kind_type: String = c
+        .query_row(
+            "SELECT json_type(receipt,'$.payload.retry.kind') FROM node_commands WHERE operation_id='op_cmd_off'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(retry_kind_type, "text");
+
+    let payload_off: Error = serde_json::from_str(
+        &c.query_row::<String, _, _>(
+            "SELECT json_extract(receipt,'$.payload') FROM node_commands WHERE operation_id='op_cmd_off'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(payload_off.code, Code::Unavailable);
+    assert_eq!(payload_off.retry, Retry::Later { after_ms: None });
+
+    let payload_busy: Error = serde_json::from_str(
+        &c.query_row::<String, _, _>(
+            "SELECT json_extract(receipt,'$.payload') FROM node_commands WHERE operation_id='op_cmd_unk'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(payload_busy.code, Code::Busy);
+    assert_eq!(payload_busy.retry, Retry::Never);
+
+    let last_unk: Error = serde_json::from_str(
+        &c.query_row::<String, _, _>(
+            "SELECT json_extract(receipt,'$.last_error') FROM node_commands WHERE operation_id='op_cmd_unk'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(last_unk.code, Code::OutcomeUnknown);
+    assert_eq!(last_unk.retry, Retry::Never);
+    assert_eq!(last_unk.params.0["operation"], "op_cmd_unk".into());
+    assert_eq!(last_unk.params.0["state"], "unknown".into());
+
+    let cmd_fin_receipt: Receipt = serde_json::from_str(
+        &c.query_row::<String, _, _>(
+            "SELECT json_extract(receipt,'$.payload') FROM node_commands WHERE operation_id='op_cmd_fin'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    match cmd_fin_receipt.state {
+        Observed::Finished {
+            outcome: Outcome::Failed,
+            error: Some(err),
+            ..
+        } => {
+            assert_eq!(err.code, Code::Invalid);
+            assert_eq!(err.retry, Retry::Never);
+            assert_eq!(err.reason, Some(NodeReason::Downgrade.into()));
+            assert_eq!(err.params.0["operation"], "op_a2".into());
+            assert_eq!(err.params.0["state"], "unknown".into());
+        }
+        other => panic!("unexpected cmd_fin_receipt: {other:?}"),
+    }
+
+    let att_receipt: Receipt = serde_json::from_str(
+        &c.query_row::<String, _, _>(
+            "SELECT receipt FROM runtime_attempts WHERE attempt_id='a_same'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        att_receipt.state,
+        Observed::Finished {
+            error: Some(ref err),
+            ..
+        } if err.code == Code::Busy
+            && err.retry == Retry::Never
+            && err.params.0.get("operation") == Some(&"op_a1".into())
+    ));
+
+    let att_comp: Completion = serde_json::from_str(
+        &c.query_row::<String, _, _>(
+            "SELECT completion FROM runtime_attempts WHERE attempt_id='a_same'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(att_comp.error.unwrap().code, Code::Forbidden);
+
+    let att_comp2: Completion = serde_json::from_str(
+        &c.query_row::<String, _, _>(
+            "SELECT completion FROM runtime_attempts WHERE attempt_id='a_down'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(att_comp2.error.unwrap().code, Code::Stale);
+
+    let job_receipt: Receipt = serde_json::from_str(
+        &c.query_row::<String, _, _>(
+            "SELECT receipt FROM runtime_job_attempts WHERE attempt_id='ja_1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        job_receipt.state,
+        Observed::Finished {
+            error: Some(ref err),
+            ..
+        } if err.code == Code::Stale && err.retry == Retry::Never
+    ));
+
+    let job_comp: Completion = serde_json::from_str(
+        &c.query_row::<String, _, _>(
+            "SELECT completion FROM runtime_job_attempts WHERE attempt_id='ja_1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let job_err = job_comp.error.unwrap();
+    assert_eq!(job_err.code, Code::Unavailable);
+    assert_eq!(job_err.retry, Retry::Never);
+    assert_eq!(job_err.params.0["operation"], "op_ja1".into());
+    assert_eq!(job_err.params.0["state"], "unknown".into());
+}

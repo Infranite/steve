@@ -2007,10 +2007,11 @@ impl LocalNode {
                 "cancel" | "abandon" | "recover" | "release_session" | "resolve_permission"
             );
             if !control && self.0.retiring.load(Ordering::SeqCst) {
-                return Err(Error::new(
-                    Code::Busy,
-                    "the node is being removed from its machine",
-                ));
+                // Node is draining for permanent removal; reject new work instead of retrying into the drain.
+                return Err(
+                    Error::new(Code::Busy, "the node is being removed from its machine")
+                        .retry(Retry::Never),
+                );
             }
             if maintenance.is_some() && !control {
                 // Different HTTP requests during the same setup observe its one operation.
@@ -2180,10 +2181,12 @@ impl LocalNode {
             .iter()
             .any(|(_, o)| matches!(o.receipt.state, Observed::Unknown { .. }))
         {
+            // Unknown attempts never settle on their own; caller must explicitly abandon them first.
             return Err(Error::new(
                 Code::Busy,
                 "an attempt of this session is unknown: abandon it first",
-            ));
+            )
+            .retry(Retry::Never));
         }
         if !open.is_empty() {
             return Err(Error::later(Code::Busy, "an attempt is running"));
@@ -2695,10 +2698,12 @@ impl SessionExecutor for LocalNode {
             if t.proc_of(&o.session)?
                 .is_some_and(|p| p.incarnation < self.0.incarnation)
             {
+                // Pre-restart harness requires explicit abandon/reconciliation before reopening the session.
                 return Err(Error::new(
                     Code::Busy,
                     "a harness of this session from before the restart still runs: abandon it",
-                ));
+                )
+                .retry(Retry::Never));
             }
             // a resume handle the Hub kept, else the one this Node remembers
             let acp_id = o
@@ -3093,13 +3098,17 @@ impl ExecutionControl for LocalNode {
                 };
                 let key = format!("abandon:{target}");
                 if !stopped.gone() {
+                    // Stop attempts already failed to confirm process exit; caller must intervene rather than blindly retry.
                     return me
                         .complete(
                             &op,
-                            failed(Error::new(
-                                Code::Busy,
-                                "its processes would not stop (or are not this node's to stop)",
-                            )),
+                            failed(
+                                Error::new(
+                                    Code::Busy,
+                                    "its processes would not stop (or are not this node's to stop)",
+                                )
+                                .retry(Retry::Never),
+                            ),
                             |t| t.unreserve(&key),
                         )
                         .await;
@@ -3725,10 +3734,12 @@ impl WorkspaceExecutor for LocalNode {
                 return Err(Error::new(Code::Conflict, "changed since"));
             }
             if t.open_execs_in(&w)? > 0 {
+                // Open execs include unknown operations that require explicit recovery before tidy can proceed.
                 return Err(Error::new(
                     Code::Busy,
                     "a command runs in it or is unknown: recover it first",
-                ));
+                )
+                .retry(Retry::Never));
             }
             for s in t.sessions_in(&w)? {
                 Self::idle(t, &s)?;
@@ -3764,10 +3775,14 @@ impl WorkspaceExecutor for LocalNode {
                 });
                 if !rx.await.unwrap_or(procs::Stopped::Uncertain).gone() {
                     let res = resource.clone();
+                    // Harness process refused to stop during tidy; requires explicit intervention/abandon, not blind retry.
                     return me
                         .complete(
                             &op,
-                            failed(Error::new(Code::Busy, "a harness in it would not stop")),
+                            failed(
+                                Error::new(Code::Busy, "a harness in it would not stop")
+                                    .retry(Retry::Never),
+                            ),
                             |t| t.unreserve(&res),
                         )
                         .await;

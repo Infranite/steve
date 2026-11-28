@@ -299,7 +299,10 @@ impl NodeRuntime {
             return self.node.operation(id).await;
         }
         if l.generation > MAX_SENDS_PER_REVISION {
-            return Err(Error::new(Code::Exhausted, "command send budget exhausted"));
+            // Send budget for this revision is permanently spent; do not schedule another retry.
+            return Err(
+                Error::new(Code::Exhausted, "command send budget exhausted").retry(Retry::Never)
+            );
         }
         if l.request["accept_before"]
             .as_i64()

@@ -1,0 +1,13 @@
+{
+  "code": "unavailable",
+  "retry": {
+    "kind": "later",
+    "after_ms": 2000
+  },
+  "reason": "node.session_not_open",
+  "params": {
+    "operation": "op_compat_1",
+    "state": "unknown"
+  },
+  "safe_detail": "node unavailable"
+}

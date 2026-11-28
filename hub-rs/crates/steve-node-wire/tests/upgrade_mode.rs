@@ -581,6 +581,7 @@ async fn a_lost_or_unreadable_switch_answer_is_local_uncertainty_not_a_wire_erro
             (Code::OutcomeUnknown, Retry::Never)
         );
         assert_eq!(error.params.0["operation"], operation.to_string().into());
+        assert_eq!(error.params.0["state"], "unknown".into());
         assert_eq!(connection.frames_written(), 1, "never resend a switch");
         connection.close(None, 1000, "test");
         assert_eq!(

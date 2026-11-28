@@ -171,6 +171,10 @@ impl From<HarnessUpdatesError> for ApiError {
                     _ => steve_types::Code::Conflict,
                 };
                 let mut contract = steve_types::Error::new(code, e.safe_detail);
+                if code == steve_types::Code::Unavailable && e.retry == steve_types::Retry::Never {
+                    // Preserve an explicit non-retryable refusal from the Node.
+                    contract.retry = steve_types::Retry::Never;
+                }
                 contract.reason = e.reason;
                 contract.params = e.params;
                 ApiError::Contract(contract)

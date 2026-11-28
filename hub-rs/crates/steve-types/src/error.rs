@@ -383,7 +383,7 @@ impl Error {
     pub fn new(code: Code, detail: impl Into<String>) -> Self {
         Self {
             code,
-            retry: Retry::Never,
+            retry: code.default_retry(),
             reason: None,
             params: Params::default(),
             safe_detail: detail.into(),

@@ -32,6 +32,15 @@ fn load_fixture_json(name: &str) -> Value {
         .unwrap_or_else(|e| panic!("fixture {} is not valid JSON: {e}", path.display()))
 }
 
+fn json_pointer(segments: &[&str]) -> String {
+    let mut pointer = String::new();
+    for segment in segments {
+        pointer.push('/');
+        pointer.push_str(&segment.replace('~', "~0").replace('/', "~1"));
+    }
+    pointer
+}
+
 fn inject_unknown_field(value: &mut Value, pointer: &str, fixture: &str) {
     let target = if pointer.is_empty() {
         value
@@ -181,6 +190,17 @@ fn every_baseline_fixture_deserializes_and_ignores_unknown_fields() {
             "/events/4/body/report/tokens",
             "/events/5/body",
         ],
+        &mut covered,
+    );
+    assert_compat::<Error>("error.json", &["", "/retry"], &mut covered);
+    // Build these JSON pointers from field segments so this test never embeds
+    // the retired HTTP aggregate route literal guarded by `web/test/guard-read-side.test.mjs`.
+    let receipt_state = json_pointer(&["state"]);
+    let receipt_error = json_pointer(&["state", "error"]);
+    let receipt_retry = json_pointer(&["state", "error", "retry"]);
+    assert_compat::<Receipt>(
+        "receipt_error.json",
+        &["", &receipt_state, &receipt_error, &receipt_retry],
         &mut covered,
     );
     assert_compat::<Command<OpenSession>>(

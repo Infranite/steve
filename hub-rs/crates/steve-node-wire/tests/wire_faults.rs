@@ -119,6 +119,7 @@ async fn uncertain_command_answers_keep_the_original_operation_and_effect() {
             (Code::OutcomeUnknown, Retry::Later { after_ms: None })
         );
         assert_eq!(e.params.0["operation"], "op_t1".into());
+        assert_eq!(e.params.0["state"], "unknown".into());
         assert_eq!(starts(&fake), 1, "transport made one attempt");
 
         let w2 = wire(fake.clone(), 2);
@@ -741,6 +742,7 @@ async fn an_oversized_answer_names_its_call() {
     let node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Nothing), opts("n"));
     let e = node.call("tool.call", json!({}), None).await.unwrap_err();
     assert_eq!(e.code, Code::Exhausted);
+    assert_eq!(e.retry, Retry::Never);
     assert!(
         e.safe_detail
             .starts_with("the answer to tool.call request ")
@@ -754,4 +756,30 @@ async fn an_oversized_answer_names_its_call() {
         .await
         .unwrap_err();
     assert!(e.safe_detail.contains("tool.inspect"), "{}", e.safe_detail);
+}
+
+/// Server replying with `Retry::Now` on an ordinary wire call is clamped to `Retry::Never`.
+struct ImmediateRetry;
+#[async_trait]
+impl Handler for ImmediateRetry {
+    async fn handle(&self, _: &str, _: Value) -> ApiResult<Value> {
+        Err(Error::new(Code::Busy, "try right away")
+            .retry(Retry::Now)
+            .with_param("operation", "op_now"))
+    }
+}
+
+#[tokio::test]
+async fn peer_retry_now_is_clamped_to_never() {
+    let (h, n) = pair();
+    let _hub = Conn::spawn(h.sink, h.stream, 1, Arc::new(ImmediateRetry), opts("h"));
+    let node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Nothing), opts("n"));
+    let e = node
+        .call("tool.inspect", json!({}), None)
+        .await
+        .unwrap_err();
+    assert_eq!(e.code, Code::Busy);
+    assert_eq!(e.retry, Retry::Never);
+    assert_eq!(e.params.0["operation"], "op_now".into());
+    assert_eq!(e.safe_detail, "try right away");
 }

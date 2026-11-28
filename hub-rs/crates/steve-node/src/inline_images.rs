@@ -600,7 +600,8 @@ impl Drop for PendingUpload {
 fn retryable(error: &Error) -> bool {
     // Every blob method here is idempotent. An unknown/lost reply is safe to resume with the
     // same begin key; validation, permission and protocol errors cannot be repaired by resending.
-    matches!(error.retry, Retry::Later { .. }) || error.code == Code::Internal
+    matches!(error.retry, Retry::Later { .. })
+        || matches!(error.code, Code::Internal | Code::OutcomeUnknown)
 }
 async fn abandon(files: Arc<dyn HubFiles>, begin: BeginUpload, mut id: Option<TransferId>) {
     for _ in 0..2 {
@@ -766,6 +767,7 @@ mod tests {
         #[default]
         None,
         BeginReplyLost,
+        BeginOutcomeUnknownOnce,
         ChunkHangs,
         FinishHangs,
         FinishOfflineOnce,
@@ -790,6 +792,12 @@ mod tests {
             if self.fault == Fault::BeginReplyLost && first {
                 self.entered.notify_one();
                 std::future::pending::<()>().await;
+            }
+            if self.fault == Fault::BeginOutcomeUnknownOnce && first {
+                return Err(Error::outcome_unknown(
+                    b.key,
+                    "lost begin reply before transfer receipt",
+                ));
             }
             Ok(Transfer {
                 id: TransferId::new("tr").unwrap(),
@@ -950,6 +958,24 @@ mod tests {
                 );
             }
         }
+    }
+    #[tokio::test]
+    async fn lost_begin_outcome_unknown_retries_with_same_key() {
+        let files = Arc::new(Files {
+            fault: Fault::BeginOutcomeUnknownOnce,
+            ..Files::default()
+        });
+        let url = upload(files.clone(), &exec(), b"\x89PNG\r\n\x1a\npayload")
+            .await
+            .expect("idempotent begin retry succeeds after outcome_unknown");
+        assert_eq!(url, "/api/files/fil_kept?ws=space%20one");
+        assert_eq!(files.reads.load(Ordering::SeqCst), 2);
+        assert_eq!(files.finishes.load(Ordering::SeqCst), 1);
+        assert_eq!(files.aborts.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            files.bytes.lock().unwrap().as_slice(),
+            b"\x89PNG\r\n\x1a\npayload"
+        );
     }
     #[tokio::test]
     async fn gfm_urls_preserve_original_text_and_never_call_hub_files() {

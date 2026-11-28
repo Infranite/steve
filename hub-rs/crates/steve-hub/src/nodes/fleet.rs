@@ -52,7 +52,7 @@ pub struct NodeFleet {
     cost_caps: Mutex<crate::wire::node_runtime::CostCaps>,
 }
 
-/// Events of a Node no coordinator runs for yet: refused `offline`, so they stay in its journal.
+/// Events of a Node no coordinator runs for yet: refused `unavailable`, so they stay in its journal.
 struct NoRuntime;
 
 #[async_trait]
