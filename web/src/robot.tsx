@@ -1,11 +1,12 @@
-/* Bot faces — Agent Robot Avatar (agent-robot-avatar, MIT). Each bot sets its own colour, skin and head shape.
- * Small faces are static: one hidden live instance renders each look once, its shadow DOM is snapshotted, and every avatar
- * on the page is a plain shadow root with that snapshot — no animation loop, no pointer tracking.
- * `live` faces (the chat hero, the sign-in page) are the real component: they follow the pointer and react to the cue bus. */
+/* Bot faces:
+ * - Steve (`k === "steve"`) renders his finalized charcoal mascot (`@/steve-mascot`): synchronous cached SVG
+ *   at static sizes, demand-driven live animation with pointer tracking and cue-bus reactions when `live`.
+ * - Ordinary Bots keep Agent Robot Avatar (agent-robot-avatar, MIT), each with its own colour, skin and head shape. */
 import { useEffect, useRef } from "react"
 import { cn } from "cn"
 import { st, defaultColor } from "@/store"
 import { onCue, type HeroCue } from "@/bus"
+import { SteveMascot } from "@/steve-mascot"
 
 export { AVATAR_COLORS } from "@/store"
 export type Look = { color: string; skin?: string | null; round?: number }
@@ -90,6 +91,7 @@ export const lookOf = (k: string): Look => {
   return b ? { color: b.color, skin: b.skin, round: b.round } : { color: defaultColor(k), round: 60 }
 }
 export function Robot({ k, size = 24, live, className, color, skin, round }: { k: string; size?: number; live?: boolean; className?: string; color?: string; skin?: string | null; round?: number; shape?: string; seed?: string; name?: string }) {
+  if (k === "steve") return <SteveMascot size={size} live={live} className={className} />
   const base = lookOf(k)
   const look = { color: color ?? base.color, skin: skin !== undefined ? skin : base.skin, round: round ?? base.round }
   return live ? <LiveFace look={look} size={size} className={className} /> : <Face look={look} size={size} className={className} />

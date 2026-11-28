@@ -1,6 +1,7 @@
 /* Single avatar component across the entire app:
  * - Person -> uploaded picture or initials + stable color (affectUI Avatar)
- * - Bot -> agent-robot-avatar (Robot)
+ * - Steve -> finalized charcoal mascot (Robot -> SteveMascot)
+ * - Other Bots -> agent-robot-avatar (Robot)
  * - System -> crisp system badge
  * - Org / Team -> rounded square glyph on stable color (affectUI Avatar)
  * Hovering shows display name and actor type (Person / Bot / System / Org / Team). */

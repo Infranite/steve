@@ -381,7 +381,9 @@ export function BotView({ k }: { k: string }) {
             <>
               <AskSteve key={k} ctx={{ kind: "bot", id: k }} placeholder={t("manage:form.ask", { name: displayName })} />
               <Section label={t("manage:form.identity")}><Card className="flex flex-col gap-5 p-5">
-                <F label={t("manage:form.avatar")} hint={t("manage:form.avatarHint")}><AvatarPicker look={{ color: fm.color, round: fm.round, skin: fm.skin }} onChange={(p) => set(p)} /></F>
+                {b.main
+                  ? <F label={t("manage:form.avatar")}><div className="flex items-center gap-4" data-steve-avatar-preview><Robot k={k} size={72} /></div></F>
+                  : <F label={t("manage:form.avatar")} hint={t("manage:form.avatarHint")}><AvatarPicker look={{ color: fm.color, round: fm.round, skin: fm.skin }} onChange={(p) => set(p)} /></F>}
                 <F label={t("manage:form.name")} htmlFor="bot-name"><TextField id="bot-name" value={fm.n} onChange={(e) => set({ n: e.target.value })} data-bot-name /></F>
                 <F label={t("manage:form.role")} htmlFor="bot-role" hint={t("manage:form.roleHint")}><TextField id="bot-role" value={fm.role} onChange={(e) => set({ role: e.target.value })} data-bot-role /></F>
                 <F label={t("manage:form.specialties")} htmlFor="bot-specialties" hint={t("manage:form.specialtiesHint")}><TextArea id="bot-specialties" minRows={2} maxRows={6} value={fm.specialties} onChange={(e) => set({ specialties: e.target.value })} /></F>
