@@ -11,6 +11,8 @@ Thanks for helping. Build and run Steve locally as described in the [README](REA
 3. Commit the change using Conventional Commits (`type(scope): imperative summary`, plus an `Upgrade:` trailer when operators must act — see "Changes and releases" below), push the branch and open a pull request into `main` with a matching Conventional Commit title, an optional `## Release note` section in the PR description, and `Closes #<issue>`.
 4. CI runs on the pull request, including the PR title format check. When it passed, the pull request is merged (merge commit). If `main` moved meanwhile and the pull request conflicts, rebase it onto the new `main` and push again.
 
+   A pull request opened by an author listed in the repository variable `AUTO_MERGE_AUTHORS` (a JSON array of GitHub logins) merges by itself: the `Auto-merge` workflow (`.github/workflows/auto-merge.yml`) turns on GitHub's auto-merge when the pull request is opened, reopened or marked ready for review, and GitHub merges it once both required checks pass. Pull requests from forks and drafts never qualify. The workflow needs the repository secret `AUTO_MERGE_TOKEN`, a fine-grained token for this repository with Contents and Pull requests read/write. It cannot use the workflow's own `GITHUB_TOKEN`: a merge made with that token does not start the push run on `main` that a release needs.
+
 The full test suite runs in CI, not on your machine: locally, run the checks of what you changed. A pull request into `main` runs the Linux jobs (and the Apple apps' build only when it touches them, the web client or the CI workflow); the push to `main` runs both Linux and macOS, and only a commit whose own full push run passed is released.
 
 ## Development checks
