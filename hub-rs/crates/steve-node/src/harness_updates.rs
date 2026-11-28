@@ -34,7 +34,9 @@ const VERSION_PROBE_MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const BREW_INFO_TIMEOUT: Duration = Duration::from_secs(60);
 /// Bound for one external package-manager or CLI self-update command.
 const EXTERNAL_UPGRADE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
-/// Fallback poll cadence alongside `inner.wake` while a queued upgrade waits for active sessions.
+/// How often a queued upgrade checks, with a read, whether its harness has gone idle. A short
+/// poll keeps the start prompt; it does not wait on `inner.wake`, which every journal write
+/// notifies, so its own checks could otherwise wake it again at once.
 const IDLE_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Clone)]
@@ -948,30 +950,38 @@ async fn wait_for_idle_boundary(
         let acquired = {
             let mut maintenance = inner.adapter_maintenance.lock().unwrap();
             if maintenance.is_none() && !inner.node_upgrade_pending() {
-                let attempt: Result<Option<Option<managed::PrefixLock>>, Error> = inner.j.tx(|t| {
-                    if adapter_setup::no_orphan_installer(t).is_err() {
-                        return Ok(None);
-                    }
-                    if harness_work_active(t, &plan.harness, needs_prefix)? {
-                        return Ok(None);
-                    }
-                    let prefix_lock = if needs_prefix {
-                        match managed::prefix_lock(&inner.cfg.acp.steve_home, true) {
-                            Ok(lock) => Some(lock),
-                            Err(_) => return Ok(None),
+                // Read first: only an idle harness is worth a write transaction.
+                let busy = inner
+                    .j
+                    .read(|t| harness_work_active(t, &plan.harness, needs_prefix));
+                let attempt: Result<Option<Option<managed::PrefixLock>>, Error> = match busy {
+                    Ok(true) => Ok(None),
+                    Err(e) => Err(e),
+                    Ok(false) => inner.j.tx(|t| {
+                        if adapter_setup::no_orphan_installer(t).is_err() {
+                            return Ok(None);
                         }
-                    } else {
-                        None
-                    };
-                    if let Err(e) = recheck_plan_sync(inner, plan) {
-                        return Err(e);
-                    }
-                    if needs_prefix {
-                        t.set_installation(&plan.harness, op)?;
-                    }
-                    t.set_state(op, &Observed::Running)?;
-                    Ok(Some(prefix_lock))
-                });
+                        if harness_work_active(t, &plan.harness, needs_prefix)? {
+                            return Ok(None);
+                        }
+                        let prefix_lock = if needs_prefix {
+                            match managed::prefix_lock(&inner.cfg.acp.steve_home, true) {
+                                Ok(lock) => Some(lock),
+                                Err(_) => return Ok(None),
+                            }
+                        } else {
+                            None
+                        };
+                        if let Err(e) = recheck_plan_sync(inner, plan) {
+                            return Err(e);
+                        }
+                        if needs_prefix {
+                            t.set_installation(&plan.harness, op)?;
+                        }
+                        t.set_state(op, &Observed::Running)?;
+                        Ok(Some(prefix_lock))
+                    }),
+                };
                 match attempt {
                     Ok(Some(lock)) => {
                         *maintenance = Some(plan.harness.clone());
@@ -991,10 +1001,7 @@ async fn wait_for_idle_boundary(
         if let Some(res) = acquired {
             return res;
         }
-        tokio::select! {
-            _ = inner.wake.notified() => {},
-            _ = tokio::time::sleep(IDLE_POLL_INTERVAL) => {},
-        }
+        tokio::time::sleep(IDLE_POLL_INTERVAL).await;
     }
 }
 
