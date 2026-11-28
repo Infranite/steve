@@ -177,16 +177,7 @@ async fn harness_reports_require_login_and_an_inert_copy_stays_offline() {
 #[tokio::test(flavor = "multi_thread")]
 async fn device_config_requires_owner_revision_and_returns_committed_receipt() {
     let e = start(true).await;
-    for _ in 0..100 {
-        let (_, r) = e.get("/api/devices", Some(&e.owner_cookie), None).await;
-        if r["devices"][0]["connected"] == true {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    let (status, list) = e.get("/api/devices", Some(&e.owner_cookie), None).await;
-    assert_eq!(status, 200);
-    let d = &list["devices"][0];
+    let d = ready(&e).await;
     assert_eq!(d["id"], "hub");
     assert_eq!(d["node_id"], "local");
     assert_eq!(d["can_configure"], true);
@@ -263,10 +254,12 @@ async fn device_config_requires_owner_revision_and_returns_committed_receipt() {
 #[tokio::test(flavor = "multi_thread")]
 async fn device_role_or_name_never_establishes_local_binding_on_a_diagnostic_hub() {
     let e = start(false).await;
-    let (_, list) = e.get("/api/devices", Some(&e.owner_cookie), None).await;
-    let d = &list["devices"][0];
+    let d = wait_hub_device(&e, "hub device registration in /api/devices", |_| true).await;
+    assert_eq!(d["id"], "hub");
     assert!(d["node_id"].is_null());
+    assert!(d["connected"].is_null());
     assert_eq!(d["can_configure"], false);
+    assert_eq!(d["config_reason"], "unmapped");
     assert_eq!(
         patch(&e, &e.owner_cookie, json!({"revision":0,"max_sessions":3}))
             .await
@@ -275,15 +268,41 @@ async fn device_role_or_name_never_establishes_local_binding_on_a_diagnostic_hub
     );
 }
 
-async fn ready(e: &Env) -> Value {
-    for _ in 0..200 {
-        let (_, list) = e.get("/api/devices", Some(&e.owner_cookie), None).await;
-        if list["devices"][0]["connected"] == true {
-            return list["devices"][0].clone();
+async fn wait_hub_device(e: &Env, what: &str, matches: impl Fn(&Value) -> bool) -> Value {
+    let observed = Arc::new(std::sync::Mutex::new(None));
+    let matched = Arc::new(std::sync::Mutex::new(None));
+    let observed_diag = observed.clone();
+    let diagnostic = steve_runtime::testkit::on_timeout(|| async move {
+        let last = observed_diag.lock().unwrap().clone();
+        format!("{what}; last={last:?}")
+    });
+    steve_runtime::testkit::eventually(diagnostic, || async {
+        let (status, list) = e.get("/api/devices", Some(&e.owner_cookie), None).await;
+        *observed.lock().unwrap() = Some((status, list.clone()));
+        if status != 200 {
+            return false;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    panic!("local node did not connect");
+        let found = list["devices"]
+            .as_array()
+            .and_then(|arr| arr.iter().find(|d| d["id"] == "hub" && matches(d)))
+            .cloned();
+        if let Some(d) = found {
+            *matched.lock().unwrap() = Some(d);
+            true
+        } else {
+            false
+        }
+    })
+    .await;
+    let device = matched.lock().unwrap().clone().expect("matched hub device");
+    device
+}
+
+async fn ready(e: &Env) -> Value {
+    wait_hub_device(e, "local node connection in /api/devices", |d| {
+        d["connected"] == true
+    })
+    .await
 }
 
 #[tokio::test(flavor = "multi_thread")]
