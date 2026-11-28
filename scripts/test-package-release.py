@@ -5,6 +5,8 @@ import io
 import json
 from pathlib import Path
 import shutil
+import subprocess
+import sys
 import tarfile
 import tempfile
 from types import SimpleNamespace
@@ -233,6 +235,90 @@ class BundleTests(unittest.TestCase):
         self.cli.symlink_to(self.binary)
         with self.assertRaisesRegex(ValueError, "symlink"):
             release.package(self.args)
+
+    def _package_native_stub(self):
+        self.args.installer = True
+        header = b"\xcf\xfa\xed\xfe\x0c\x00\x00\x01" + b"\0" * 24
+        for binary in (self.binary, self.node, self.cli):
+            binary.write_bytes(header)
+        identity = json.dumps(dict(version=self.args.version, commit=self.args.commit,
+                                   schema=self.args.schema, target=self.args.target)).encode()
+        with patch.object(release.subprocess, "check_output", return_value=identity):
+            release.package(self.args)
+        return identity
+
+    def test_verify_checks_unpacked_runtime_and_installer_without_mutating_out(self):
+        identity = self._package_native_stub()
+        stub_script = Path(self.tmp.name) / "fake-identity.py"
+        record = Path(self.tmp.name) / "called.json"
+        stub_script.write_text(
+            "import json, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "web = pathlib.Path(args[args.index('--web') + 1])\n"
+            "root = pathlib.Path(args[0]).parents[1]\n"
+            "for rel in ('bin/steve-hub', 'bin/steve-node', 'bin/restic', 'web/dist/index.html', 'web/dist/release.json'):\n"
+            "    assert (root / rel).is_file(), rel\n"
+            "assert (web / 'index.html').is_file()\n"
+            f"pathlib.Path({str(record)!r}).write_text(json.dumps(args))\n"
+        )
+        before = sorted(p.name for p in self.out.iterdir())
+        verify_args = SimpleNamespace(
+            version=self.args.version,
+            commit=self.args.commit,
+            target=self.args.target,
+            out=str(self.out),
+            installer=True,
+            identity_script=str(stub_script),
+        )
+        seen_cmds = []
+
+        def fake_check_output(cmd, timeout=15):
+            seen_cmds.append(cmd)
+            return identity
+
+        with patch.object(release.subprocess, "check_output", side_effect=fake_check_output):
+            release.verify(verify_args)
+
+        self.assertEqual(sorted(p.name for p in self.out.iterdir()), before)
+        called = json.loads(record.read_text())
+        self.assertIn("--web", called)
+        self.assertIn(self.args.version, called)
+        self.assertIn(self.args.commit, called)
+        self.assertIn(self.args.target, called)
+        self.assertEqual([Path(c[0]).name for c in seen_cmds], ["steve-node", "steve-hub", "steve"])
+
+    def test_verify_rejects_corrupt_archive_wrong_identity_and_failed_boot(self):
+        identity = self._package_native_stub()
+        stub_script = Path(self.tmp.name) / "ok-identity.py"
+        stub_script.write_text("import sys; sys.exit(0)\n")
+        base_args = dict(
+            version=self.args.version,
+            commit=self.args.commit,
+            target=self.args.target,
+            out=str(self.out),
+            installer=True,
+            identity_script=str(stub_script),
+        )
+        with patch.object(release.subprocess, "check_output", return_value=identity):
+            with self.assertRaisesRegex(ValueError, "does not match release identity"):
+                release.verify(SimpleNamespace(**dict(base_args, commit="b" * 40)))
+
+            fail_script = Path(self.tmp.name) / "fail-identity.py"
+            fail_script.write_text("import sys; sys.exit(2)\n")
+            with self.assertRaises(subprocess.CalledProcessError):
+                release.verify(SimpleNamespace(**dict(base_args, identity_script=str(fail_script))))
+
+            installer_tar = self.out / f"steve-{self.args.version}-{self.args.target}-installer.tar.gz"
+            saved_installer = installer_tar.read_bytes()
+            installer_tar.write_bytes(b"corrupt")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                release.verify(SimpleNamespace(**base_args))
+            installer_tar.write_bytes(saved_installer)
+
+            runtime_tar = self.out / f"steve-{self.args.version}-{self.args.target}.tar.gz"
+            runtime_tar.write_bytes(b"corrupt")
+            with self.assertRaisesRegex(ValueError, "does not match"):
+                release.verify(SimpleNamespace(**base_args))
 
 
 if __name__ == "__main__":
