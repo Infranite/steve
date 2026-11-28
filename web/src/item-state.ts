@@ -12,6 +12,7 @@ export type StateKind =
   | "queued"        // your message waits for a session to take it
   | "closing"       // the cycle is waiting to close
   | "idle"          // open, nothing running, nothing asked
+export type StateSublabel = "you" | "waitingAgent"
 export type Tone = "run" | "wait" | "pause" | "done" | "fail" | "neutral"
 export type DisplayStatus = "prop" | "run" | "wait" | "pause" | "done" | "drop" | "block" | "fail"
 export type ItemState = { kind: StateKind; tone: Tone; /** whose move: you, Steve, the agents, or nobody (closed) */ move: "you" | "steve" | "agents" | "none"; detail?: string }
@@ -25,6 +26,7 @@ const TONE: Record<StateKind, Tone> = {
 }
 const YOURS: StateKind[] = ["proposed", "asking", "paused"]
 const CLOSED: StateKind[] = ["done", "dropped", "failed"]
+const CLOSED_SET: ReadonlySet<StateKind> = new Set(CLOSED)
 
 /* the list's status of an item is its one state in lifecycle terms, so a row, its group and the item page agree */
 const AS_ST: Record<StateKind, DisplayStatus> = {
@@ -32,8 +34,24 @@ const AS_ST: Record<StateKind, DisplayStatus> = {
   paused: "pause", blocked: "block", working: "run", queued: "run", closing: "run", idle: "run",
 }
 
+/* optional sublabel beside the item page's state headline: shown only when it adds accurate, non-redundant guidance */
+const SUBLABEL: Record<StateKind, StateSublabel | null> = {
+  done: null,
+  dropped: null,
+  failed: null,
+  proposed: null,
+  asking: null,
+  dispatching: null,
+  paused: "you",
+  blocked: null,
+  working: null,
+  queued: "waitingAgent",
+  closing: null,
+  idle: null,
+}
+
 const make = (kind: StateKind, detail?: string): ItemState =>
-  ({ kind, tone: TONE[kind], move: CLOSED.includes(kind) ? "none" : YOURS.includes(kind) ? "you" : "agents", detail: detail || undefined })
+  ({ kind, tone: TONE[kind], move: CLOSED_SET.has(kind) ? "none" : YOURS.includes(kind) ? "you" : "agents", detail: detail || undefined })
 
 /** `running`: one of the item's sessions is in a turn now */
 export function itemState(i: StateItem, running: boolean): ItemState {
@@ -53,4 +71,12 @@ export function itemState(i: StateItem, running: boolean): ItemState {
 
 export function itemDisplayStatusOf(s: ItemState): DisplayStatus {
   return s.kind === "closing" && s.move === "you" ? "wait" : AS_ST[s.kind]
+}
+
+export function isClosedItemState(s: Pick<ItemState, "kind">): boolean {
+  return CLOSED_SET.has(s.kind)
+}
+
+export function itemStateSublabel(s: Pick<ItemState, "kind">): StateSublabel | null {
+  return SUBLABEL[s.kind]
 }
