@@ -6,7 +6,7 @@ import { useItemState, decisionView, useOpenDecisions, useViewKinds } from "@/da
 import { decideCards, useItemDetail, useNotices, useSessionQueue, useShellStore } from "@/store"
 import { getItem, getItems, getSession, itemDisplayStatus } from "@/store"
 import { VirtualList } from "@/components/virtual-list"
-import { itemState, type ItemState } from "@/item-state"
+import { isClosedItemState, itemState, itemStateSublabel, type ItemState } from "@/item-state"
 import { clip } from "@/thread/topics"
 import { BlockedPlacement, BotProposalCard, DispatchDetails, PlacementWhy, NO_TEAM, formatDispatchTimeline, useBotTeams } from "@/bot-dispatch"
 import { SetSelect } from "@/settings-controls"
@@ -496,8 +496,9 @@ export function ItemView({ id }: { id: string }) {
   )
   const state = rootState!
   /* the now card with nothing under its headline (finished, say): one centred line in a smaller card */
-  const compact = !i.waits.length && state.move === "none"
+  const compact = !i.waits.length && isClosedItemState(state)
   const centered = compact && !state.detail && state.kind !== "idle" && !i.rel && !i.dependencyWait
+  const sublabel = itemStateSublabel(state)
   const goal = <>
           {/* 1 — goal reads as the description of the title */}
           <section data-goal className="-mt-3">
@@ -600,7 +601,7 @@ export function ItemView({ id }: { id: string }) {
               <div className="min-w-[min(100%,14rem)] flex-1 basis-0">
                 <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
                   <h2 className={cn("type-headline", state.kind === "working" && "shimmer shimmer-once")} data-state-title>{t(`views:itemState.${state.kind}`)}</h2>
-                  {state.move !== "none" && state.kind !== "closing" && state.kind !== "dispatching" && <span className="type-footnote text-muted-foreground">{t(`views:itemState.${state.move}`)}</span>}
+                  {sublabel && <span className="type-footnote text-muted-foreground" data-state-sublabel={sublabel}>{t(`views:itemState.${sublabel}`)}</span>}
                 </div>
                 {state.detail && !(i.waits.length > 0 && state.detail === i.waits[0].q) && <p className="mt-1 line-clamp-3 break-words type-callout text-muted-foreground">{clip(state.detail, 360)}</p>}
                 {state.kind === "idle" && <p className="mt-1 type-callout text-muted-foreground">{t("views:itemState.idleHint")}</p>}
