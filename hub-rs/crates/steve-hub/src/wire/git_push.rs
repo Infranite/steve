@@ -129,6 +129,26 @@ fn moved_meanwhile(l: &LedgerEntry) -> bool {
         })
 }
 
+fn poll_settled(
+    res: Result<Option<LedgerEntry>, steve_store::StoreError>,
+    op: &str,
+) -> std::ops::ControlFlow<Result<Option<LedgerEntry>, steve_store::StoreError>> {
+    match res {
+        Ok(Some(l)) if l.is_settled() => std::ops::ControlFlow::Break(Ok(Some(l))),
+        Ok(Some(_)) => std::ops::ControlFlow::Continue(()),
+        Ok(None) => std::ops::ControlFlow::Break(Ok(None)),
+        // Transient storage failures retry; permanent decode/contract errors fail immediately.
+        Err(e) if super::node_runtime::is_transient_ledger_error(&e) => {
+            tracing::warn!("push {op}: {e}");
+            std::ops::ControlFlow::Continue(())
+        }
+        Err(e) => {
+            tracing::error!("push {op}: permanent ledger read error: {e}");
+            std::ops::ControlFlow::Break(Err(e))
+        }
+    }
+}
+
 impl GitPush {
     /// The local roots made current: a directory made a moment ago may not be among them yet.
     async fn refresh(&self) -> Result<(), PushError> {
@@ -206,31 +226,10 @@ impl GitPush {
         runtime: &NodeRuntime,
         op: &str,
     ) -> Result<Option<LedgerEntry>, steve_store::StoreError> {
-        let mut last_err: Option<steve_store::StoreError> = None;
         runtime
-            .wait_ledger_until(op, self.answer_wait, |res| match res {
-                Ok(Some(l)) if l.is_settled() => std::ops::ControlFlow::Break(Ok(Some(l))),
-                Ok(Some(_)) => {
-                    last_err = None;
-                    std::ops::ControlFlow::Continue(())
-                }
-                Ok(None) => std::ops::ControlFlow::Break(Ok(None)),
-                // Transient storage failures retry; permanent decode/contract errors fail immediately.
-                Err(e) if super::node_runtime::is_transient_ledger_error(&e) => {
-                    tracing::warn!("push {op}: {e}");
-                    last_err = Some(e);
-                    std::ops::ControlFlow::Continue(())
-                }
-                Err(e) => {
-                    tracing::error!("push {op}: permanent ledger read error: {e}");
-                    std::ops::ControlFlow::Break(Err(e))
-                }
-            })
+            .wait_ledger_until(op, self.answer_wait, |res| poll_settled(res, op))
             .await
-            .unwrap_or_else(|| match last_err {
-                Some(e) => Err(e),
-                None => Ok(None),
-            })
+            .unwrap_or(Ok(None))
     }
 
     /// A push the ledger lost: stopped (asked once) and given a moment to be, never sent again.
@@ -372,20 +371,38 @@ impl GitPush {
                 self.secrets.retire_push(op);
                 Ok(l)
             }
-            Ok(None) => match placed.runtime.ledger(op) {
-                Ok(None) => {
-                    self.secrets.retire_push(op);
-                    Err(PushError::Lost)
-                }
-                Ok(Some(_)) => {
-                    self.secrets.watch_push(&placed.runtime, op);
-                    Err(PushError::Running)
-                }
-                Err(e) => {
-                    self.secrets.retire_push(op);
-                    Err(node_error(e))
-                }
-            },
+            Ok(None) => self.after_timeout(&placed.runtime, op, placed.runtime.ledger(op)),
+            Err(e) => {
+                self.secrets.retire_push(op);
+                Err(node_error(e))
+            }
+        }
+    }
+
+    fn after_timeout(
+        &self,
+        runtime: &Arc<NodeRuntime>,
+        op: &str,
+        current: Result<Option<LedgerEntry>, steve_store::StoreError>,
+    ) -> Result<LedgerEntry, PushError> {
+        match current {
+            Ok(Some(l)) if l.is_settled() => {
+                self.secrets.retire_push(op);
+                Ok(l)
+            }
+            Ok(Some(_)) => {
+                self.secrets.watch_push(runtime, op);
+                Err(PushError::Running)
+            }
+            Err(e) if super::node_runtime::is_transient_ledger_error(&e) => {
+                tracing::warn!("push {op}: {e}");
+                self.secrets.watch_push(runtime, op);
+                Err(PushError::Running)
+            }
+            Ok(None) => {
+                self.secrets.retire_push(op);
+                Err(PushError::Lost)
+            }
             Err(e) => {
                 self.secrets.retire_push(op);
                 Err(node_error(e))
@@ -1143,5 +1160,87 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(*seen.lock().unwrap(), 1, "pushed once");
         assert_eq!(t.pushes(), 1);
+    }
+
+    #[tokio::test]
+    async fn transient_ledger_error_at_deadline_keeps_running_and_preserves_secret() {
+        let tmp = tempfile::tempdir().unwrap();
+        let t = hub_at_started(tmp.path(), false);
+        let op = op_of("dec_transient_deadline", 0);
+        t.git.secrets.give(
+            &op,
+            NodeId::new("local").unwrap(),
+            vec![SECRET_ID.into()],
+            Arc::new(HeaderValue::of(TOKEN)),
+        );
+        // Transient error during polling keeps polling (so timeout falls through to Running),
+        // whereas permanent error terminates immediately.
+        assert!(matches!(
+            poll_settled(
+                Err(steve_store::StoreError::Busy("database is locked".into())),
+                &op
+            ),
+            std::ops::ControlFlow::Continue(())
+        ));
+        assert!(matches!(
+            poll_settled(Err(steve_store::StoreError::Storage("corrupt".into())), &op),
+            std::ops::ControlFlow::Break(Err(_))
+        ));
+
+        // Transient error on the post-deadline ledger read must stay Running and NOT retire the secret.
+        t.runtime
+            .submit(
+                &op,
+                "push:dec_transient_deadline",
+                "git_apply",
+                serde_json::json!({}),
+            )
+            .unwrap();
+        assert_eq!(
+            t.git
+                .after_timeout(
+                    &t.runtime,
+                    &op,
+                    Err(steve_store::StoreError::Busy("database is locked".into())),
+                )
+                .unwrap_err(),
+            PushError::Running
+        );
+        let taken = t
+            .git
+            .secrets
+            .for_node(NodeId::new("local").unwrap())
+            .take(OperationId::new(&op).unwrap(), SECRET_ID.into())
+            .await
+            .unwrap();
+        assert_eq!(taken.expose(), HeaderValue::of(TOKEN).0.as_slice());
+
+        // Permanent error retires the secret and surfaces node error.
+        let op_perm = op_of("dec_perm_deadline", 0);
+        t.git.secrets.give(
+            &op_perm,
+            NodeId::new("local").unwrap(),
+            vec![SECRET_ID.into()],
+            Arc::new(HeaderValue::of(TOKEN)),
+        );
+        assert!(matches!(
+            t.git
+                .after_timeout(
+                    &t.runtime,
+                    &op_perm,
+                    Err(steve_store::StoreError::Storage("corrupt".into())),
+                )
+                .unwrap_err(),
+            PushError::Node(_)
+        ));
+        let err = t
+            .git
+            .secrets
+            .for_node(NodeId::new("local").unwrap())
+            .take(OperationId::new(&op_perm).unwrap(), SECRET_ID.into())
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, Code::Stale);
+        assert_eq!(err.safe_detail, "the operation ended");
     }
 }

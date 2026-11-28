@@ -191,8 +191,12 @@ pub enum StoreError {
     /// change on a closed item); the message is user-facing.
     #[error("{0}")]
     Conflict(String),
-    /// The database itself failed (I/O, a full disk, corruption, a lock held elsewhere), on the
-    /// storage contract ([`Store::write`]): the same write can succeed later.
+    /// A transient database contention/lock failure (busy, locked, interrupted): retrying the
+    /// same operation promptly can succeed.
+    #[error("{0}")]
+    Busy(String),
+    /// The database itself failed (I/O, a full disk, corruption, read-only), on the
+    /// storage contract ([`Store::write`]).
     #[error("{0}")]
     Storage(String),
     /// The database refused this write (a constraint, a type, a statement it cannot run), on the
@@ -201,34 +205,49 @@ pub enum StoreError {
     Rejected(String),
 }
 
+/// SQLite result codes of transient database contention/interruption that can clear on retry.
+pub(crate) fn transient_storage_failure(code: rusqlite::ErrorCode) -> bool {
+    use rusqlite::ErrorCode::*;
+    matches!(code, DatabaseBusy | DatabaseLocked | OperationInterrupted)
+}
+
 /// SQLite result codes of the database failing rather than of the statement: the one list for
 /// [`StoreError::is_storage_failure`] and the contract's SQLite backend.
 pub(crate) fn storage_failure(code: rusqlite::ErrorCode) -> bool {
     use rusqlite::ErrorCode::*;
-    matches!(
-        code,
-        DatabaseBusy
-            | DatabaseLocked
-            | OutOfMemory
-            | ReadOnly
-            | OperationInterrupted
-            | SystemIoFailure
-            | DatabaseCorrupt
-            | DiskFull
-            | CannotOpen
-            | FileLockingProtocolFailed
-            | NotADatabase
-    )
+    transient_storage_failure(code)
+        || matches!(
+            code,
+            OutOfMemory
+                | ReadOnly
+                | SystemIoFailure
+                | DatabaseCorrupt
+                | DiskFull
+                | CannotOpen
+                | FileLockingProtocolFailed
+                | NotADatabase
+        )
 }
 
 impl StoreError {
-    /// The database itself failed (I/O, a full disk, corruption, a lock held elsewhere), not
-    /// the write being attempted: retrying the same write later can succeed.
-    /// Everything else is a failure of this write ([`StoreError::Rejected`] on the contract).
+    /// The database itself failed (busy lock, I/O, a full disk, corruption), not the write being
+    /// attempted. Everything else is a failure of this write ([`StoreError::Rejected`] on the
+    /// contract).
     pub fn is_storage_failure(&self) -> bool {
         match self {
-            Self::Pool(_) | Self::Storage(_) => true,
+            Self::Pool(_) | Self::Busy(_) | Self::Storage(_) => true,
             Self::Sqlite(e) => e.sqlite_error_code().is_some_and(storage_failure),
+            _ => false,
+        }
+    }
+
+    /// Whether this error is a transient storage contention/pool failure that can clear on a
+    /// prompt retry, excluding permanent/environmental errors such as `DatabaseCorrupt`,
+    /// `DiskFull`, and `ReadOnly`.
+    pub fn is_transient_storage_failure(&self) -> bool {
+        match self {
+            Self::Pool(_) | Self::Busy(_) => true,
+            Self::Sqlite(e) => e.sqlite_error_code().is_some_and(transient_storage_failure),
             _ => false,
         }
     }
@@ -1853,3 +1872,66 @@ pub use contract::node_jobs;
 pub use contract::node_write;
 pub use contract::state_batches;
 pub use contract::{tool_admission, tool_journal};
+
+#[cfg(test)]
+mod error_tests {
+    use super::StoreError;
+    use rusqlite::ErrorCode;
+
+    fn raw_sqlite_err(code: ErrorCode) -> rusqlite::Error {
+        rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error {
+                code,
+                extended_code: 0,
+            },
+            None,
+        )
+    }
+
+    fn sqlite_err(code: ErrorCode) -> StoreError {
+        crate::contract::sqlite::err(raw_sqlite_err(code))
+    }
+
+    #[test]
+    fn transient_storage_failure_excludes_corrupt_disk_full_and_readonly() {
+        for code in [
+            ErrorCode::DatabaseBusy,
+            ErrorCode::DatabaseLocked,
+            ErrorCode::OperationInterrupted,
+        ] {
+            let err = sqlite_err(code);
+            assert!(matches!(err, StoreError::Busy(_)), "{code:?}: {err:?}");
+            assert!(err.is_storage_failure(), "{code:?}");
+            assert!(err.is_transient_storage_failure(), "{code:?}");
+            let direct = StoreError::Sqlite(raw_sqlite_err(code));
+            assert!(direct.is_storage_failure(), "{code:?}");
+            assert!(direct.is_transient_storage_failure(), "{code:?}");
+        }
+
+        for code in [
+            ErrorCode::DatabaseCorrupt,
+            ErrorCode::DiskFull,
+            ErrorCode::ReadOnly,
+            ErrorCode::NotADatabase,
+            ErrorCode::CannotOpen,
+            ErrorCode::SystemIoFailure,
+            ErrorCode::OutOfMemory,
+            ErrorCode::FileLockingProtocolFailed,
+        ] {
+            let err = sqlite_err(code);
+            assert!(matches!(err, StoreError::Storage(_)), "{code:?}: {err:?}");
+            assert!(err.is_storage_failure(), "{code:?}");
+            assert!(!err.is_transient_storage_failure(), "{code:?}");
+            let direct = StoreError::Sqlite(raw_sqlite_err(code));
+            assert!(direct.is_storage_failure(), "{code:?}");
+            assert!(!direct.is_transient_storage_failure(), "{code:?}");
+        }
+
+        assert!(StoreError::Busy("busy".into()).is_transient_storage_failure());
+        assert!(!StoreError::Storage("corrupt".into()).is_transient_storage_failure());
+        assert!(!StoreError::Rejected("constraint".into()).is_transient_storage_failure());
+        let json_err =
+            StoreError::Json(serde_json::from_str::<serde_json::Value>("{").unwrap_err());
+        assert!(!json_err.is_transient_storage_failure());
+    }
+}

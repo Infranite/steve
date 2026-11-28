@@ -861,7 +861,6 @@ impl Core {
                             route_model: None,
                             route_confidence: None,
                             route_signals: &[],
-                            route_fallback: false,
                             route_ms: 0,
                             route_outcome: None,
                             item_id: None,

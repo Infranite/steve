@@ -276,31 +276,30 @@ impl CmdNode for FlowCmd {
                 }
             }
         }
-        let mut last_err: Option<StoreError> = None;
         runtime
-            .wait_ledger_until(&op, req.timeout + ANSWER_GRACE, |res| match res {
-                Ok(Some(l)) if l.is_settled() => std::ops::ControlFlow::Break(ran(&l)),
-                Ok(Some(_)) => {
-                    last_err = None;
-                    std::ops::ControlFlow::Continue(())
-                }
-                Ok(None) => std::ops::ControlFlow::Break(CmdRan::Unknown),
-                // Transient storage errors retry until deadline; permanent errors fail explicitly.
-                Err(e) if super::node_runtime::is_transient_ledger_error(&e) => {
-                    tracing::warn!("flow cmd {op}: {e}");
-                    last_err = Some(e);
-                    std::ops::ControlFlow::Continue(())
-                }
-                Err(e) => {
-                    tracing::error!("flow cmd {op}: permanent ledger read error: {e}");
-                    std::ops::ControlFlow::Break(CmdRan::NotRun(e.to_string()))
-                }
-            })
+            .wait_ledger_until(&op, req.timeout + ANSWER_GRACE, |res| poll_ledger(res, &op))
             .await
-            .unwrap_or_else(|| match last_err {
-                Some(e) => CmdRan::NotRun(e.to_string()),
-                None => CmdRan::Unknown,
-            })
+            .unwrap_or(CmdRan::Unknown)
+    }
+}
+
+fn poll_ledger(
+    res: Result<Option<super::node_runtime::LedgerEntry>, StoreError>,
+    op: &str,
+) -> std::ops::ControlFlow<CmdRan> {
+    match res {
+        Ok(Some(l)) if l.is_settled() => std::ops::ControlFlow::Break(ran(&l)),
+        Ok(Some(_)) => std::ops::ControlFlow::Continue(()),
+        Ok(None) => std::ops::ControlFlow::Break(CmdRan::Unknown),
+        // Transient storage errors retry until deadline; a deadline still leaves outcome unknown.
+        Err(e) if super::node_runtime::is_transient_ledger_error(&e) => {
+            tracing::warn!("flow cmd {op}: {e}");
+            std::ops::ControlFlow::Continue(())
+        }
+        Err(e) => {
+            tracing::error!("flow cmd {op}: permanent ledger read error: {e}");
+            std::ops::ControlFlow::Break(CmdRan::NotRun(e.to_string()))
+        }
     }
 }
 
@@ -730,5 +729,17 @@ mod tests {
         // nothing open in the workspace any more: tidy is allowed
         let view = t.node.workspace(w.clone()).await.unwrap();
         t.node.tidy_workspace(tidy(view.revision)).await.unwrap();
+    }
+
+    #[test]
+    fn transient_ledger_error_keeps_polling_while_permanent_stops() {
+        assert!(matches!(
+            poll_ledger(Err(StoreError::Busy("database is locked".into())), "op_1"),
+            std::ops::ControlFlow::Continue(())
+        ));
+        assert_eq!(
+            poll_ledger(Err(StoreError::Storage("corrupt".into())), "op_1"),
+            std::ops::ControlFlow::Break(CmdRan::NotRun("corrupt".into()))
+        );
     }
 }

@@ -6,10 +6,10 @@ use super::offer::{Handled, ThreadItem, not_found};
 use super::{Conv, lock, meta_of, route_step};
 use crate::Core;
 use crate::error::{CoreError, Result};
-use crate::gateway::{self, Said};
+use crate::gateway::{self, Route, Said};
 use crate::orchestrator::ItemAction;
 use crate::repo::{FileRef, Item, Message};
-use crate::util::now;
+use crate::util::{js_head, now};
 use serde_json::{Value, json};
 use steve_store::{NewRevisionTask, ReceiptDispatch, thread};
 
@@ -357,18 +357,43 @@ impl Core {
             });
         }
         let history = self.history_before(ws, origin)?;
-        let r = self.route(ws, &om.text, &history, true).await?;
+        let r = match self.route(ws, &om.text, &history, true).await {
+            Ok(r) => Some(r),
+            Err(CoreError::Route(e)) => {
+                tracing::warn!(
+                    ws,
+                    origin,
+                    "reroute to_item naming route failed; using message prefix: {e}"
+                );
+                None
+            }
+            Err(e) => return Err(e),
+        };
+        let title = r
+            .as_ref()
+            .map(|r| r.title.trim())
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| js_head(&om.text, 24).to_string());
+        let goal = r
+            .as_ref()
+            .map(|r| r.goal.trim())
+            .filter(|g| !g.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| om.text.clone());
+        let project = r.as_ref().and_then(|r| r.project.clone());
+        let tags = r.map(|r| r.tag_ids).unwrap_or_default();
         let _one = lock(&self.0.thread.acting);
         let (item, already, disp_id) = self.thread_item_once(ThreadItem {
             ws,
             origin,
-            title: r.title.clone(),
-            goal: r.goal.clone(),
+            title,
+            goal,
             bot: self.named_bot(ws, &om.text)?.map(|b| b.id),
             placement_reason: None,
             placement_why: None,
-            project: r.project.clone(),
-            tags: r.tag_ids.clone(),
+            project,
+            tags,
             files: files_of(&om, "files"),
             from_question: super::decide::pure_question(&om.text),
             answer: None,
@@ -500,7 +525,15 @@ impl Core {
         });
         let t0 = now();
         let r = match self.route(ws, &q, &history, true).await {
-            Ok(r) => r,
+            Ok(r) => Some(r),
+            Err(CoreError::Route(e)) => {
+                tracing::warn!(
+                    ws,
+                    msg = msg_id,
+                    "promote naming route failed; using message prefix: {e}"
+                );
+                None
+            }
             Err(e) => {
                 let _ = self
                     .store()
@@ -510,11 +543,20 @@ impl Core {
             }
         };
         let t1 = now();
-        let goal = if r.goal.trim().is_empty() {
-            q.clone()
-        } else {
-            r.goal.trim().to_string()
-        };
+        let title = r
+            .as_ref()
+            .map(|r| r.title.trim())
+            .filter(|t| !t.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| js_head(&q, 24).to_string());
+        let goal = r
+            .as_ref()
+            .map(|r| r.goal.trim())
+            .filter(|g| !g.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| q.clone());
+        let project = r.as_ref().and_then(|r| r.project.clone());
+        let tag_ids = r.as_ref().map(|r| r.tag_ids.clone()).unwrap_or_default();
         let _one = lock(&self.0.thread.acting);
         let opening = match self.opening_for(ws, &origin, &goal, Some(&m)) {
             Ok(o) => Some(o),
@@ -539,11 +581,11 @@ impl Core {
         let item = match self.tx().create_chat_item(crate::CreateItem {
             ws: ws.into(),
             goal,
-            title: r.title.clone(),
+            title: title.clone(),
             bot,
-            project: Some(r.project.clone()),
+            project: Some(project.clone()),
             source: Some(("对话".into(), "chat".into())),
-            tag_ids: r.tag_ids.clone(),
+            tag_ids: tag_ids.clone(),
             opening,
             files: files_of(&m, "chatFiles"),
             propose: false,
@@ -585,10 +627,19 @@ impl Core {
                 now(),
             )
         })?;
-        let mut route = route_step(&r, None, t1 - t0);
+        let fallback_route;
+        let route_for_step = match r.as_ref() {
+            Some(r) => r,
+            None => {
+                fallback_route =
+                    Route::deterministic("item", &q, None, "路由模型不可用，按目标开头起名");
+                &fallback_route
+            }
+        };
+        let mut route = route_step(route_for_step, None, t1 - t0);
         route["kind"] = json!("item");
         route["newTags"] = json!([]);
-        let steps = json!({"route": route, "tools": [{"name": "create_item", "args": {"title": r.title, "project": r.project, "tags": r.tag_ids}, "result": {"item": item.id, "bot": item.bot_id, "project": item.project_id}, "status": "ok", "ms": now() - t1}], "ms": now() - t0});
+        let steps = json!({"route": route, "tools": [{"name": "create_item", "args": {"title": title, "project": project, "tags": tag_ids}, "result": {"item": item.id, "bot": item.bot_id, "project": item.project_id}, "status": "ok", "ms": now() - t1}], "ms": now() - t0});
         self.announce(
             ws,
             &item,

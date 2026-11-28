@@ -217,3 +217,55 @@ async fn only_workspace_effects_with_a_subject_go_through_the_ledger() {
     );
     assert!(rt.ledger("op_y1").unwrap().is_none());
 }
+
+#[tokio::test]
+async fn exhausted_node_keeps_pending_ledger_readable_and_executes_once() {
+    let h = hub().await;
+    let clock = Arc::new(steve_runtime::FakeClock::new(steve_store::now()));
+    let rt = NodeRuntime::with_clock(
+        h.store.clone(),
+        h.node.clone(),
+        Arc::new(Quiet),
+        clock.clone(),
+    );
+    h.node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+    h.node.refuse(
+        "exec",
+        Some(Error::later(Code::Exhausted, "no command capacity")),
+    );
+    h.node.answer_exec(ExecResult {
+        exit_code: Some(0),
+        stdout: "ok\n".into(),
+        stderr: String::new(),
+        truncated: false,
+    });
+    rt.start();
+
+    assert!(
+        rt.submit("op_cap", "flow_run:r_cap", "exec", spec("echo once"))
+            .unwrap()
+    );
+    eventually_sync("exhausted capacity recorded on pending command", || {
+        node_checks::command_receipt_by_operation(&h.store, "op_cap")
+            .unwrap()
+            .is_some_and(|raw| raw.contains("\"exhausted\":1") && raw.contains("\"last_error\""))
+    })
+    .await;
+
+    let pending = rt
+        .ledger("op_cap")
+        .unwrap()
+        .expect("pending entry readable while exhausted");
+    assert_eq!(pending.state, "pending");
+    assert!(pending.receipt.is_none());
+    assert!(pending.refusal.is_none());
+    assert_eq!(h.execs(), 0);
+
+    h.node.refuse("exec", None);
+    let retry_at = node_checks::command_retry_at_by_method(&h.store, "exec").unwrap();
+    clock.advance_to(retry_at);
+    let done = settled(&rt, "op_cap").await;
+    assert_eq!(done.state, "finished");
+    assert_eq!(exec_result(&done).unwrap().stdout, "ok\n");
+    assert_eq!(h.execs(), 1);
+}

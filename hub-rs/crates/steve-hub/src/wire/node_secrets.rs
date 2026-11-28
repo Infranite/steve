@@ -183,6 +183,9 @@ impl NodeSecrets {
         let runtime = Arc::downgrade(runtime);
         let op = op.to_string();
         tokio::spawn(async move {
+            const WATCH_PUSH_POLL_INTERVAL: Duration = Duration::from_millis(100);
+            // Bound consecutive transient lock failures (~5 s at 100 ms polling) so transient SQLite
+            // contention never drops an active push grant early while a wedged store still retires it.
             const MAX_TRANSIENT_LEDGER_ERRORS: u32 = 50;
             let mut transient_errors = 0u32;
             loop {
@@ -223,7 +226,7 @@ impl NodeSecrets {
                     return;
                 }
                 drop(secrets);
-                tokio::time::sleep(Duration::from_millis(100)).await;
+                tokio::time::sleep(WATCH_PUSH_POLL_INTERVAL).await;
             }
         });
     }
@@ -479,15 +482,13 @@ impl UseNodes for VaultNodes {
             }
         }
         let until = Instant::now() + u.timeout + ANSWER_GRACE;
-        let mut last_err: Option<StoreError>;
         let out = loop {
             match runtime.ledger(&op) {
                 Ok(Some(l)) if l.is_settled() => break ran(&l, u.timeout),
-                Ok(Some(_)) => last_err = None,
+                Ok(Some(_)) => {}
                 Ok(None) => break failed(UNKNOWN.into()),
                 Err(e) if super::node_runtime::is_transient_ledger_error(&e) => {
                     tracing::warn!("vault use {op}: {e}");
-                    last_err = Some(e);
                 }
                 Err(e) => {
                     tracing::error!("vault use {op}: permanent ledger read error: {e}");
@@ -495,7 +496,7 @@ impl UseNodes for VaultNodes {
                 }
             }
             if Instant::now() >= until {
-                break failed(last_err.map_or_else(|| UNKNOWN.into(), |e| e.to_string()));
+                break failed(UNKNOWN.into());
             }
             tokio::time::sleep(Duration::from_millis(100)).await;
         };

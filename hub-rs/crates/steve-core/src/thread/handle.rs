@@ -30,6 +30,10 @@ pub(super) static PROGRESS: LazyLock<Regex> = LazyLock::new(|| {
 
 const REROUTE_WINDOW: i64 = 10 * 60 * 1000;
 
+/// Maximum retries when the thread router returns unusable (malformed/invalid) output.
+/// One retry recovers occasional bad JSON without hiding persistent failures or stalling turns.
+const ROUTE_UNUSABLE_OUTPUT_MAX_RETRIES: u32 = 1;
+
 /// Publishes `steve.thinking = false` when the task exits (even on early return or error).
 struct ThinkingGuard<'a> {
     core: &'a Core,
@@ -259,7 +263,6 @@ impl Core {
                     route_model: route.model.as_deref(),
                     route_confidence: route.confidence,
                     route_signals: &route.signals,
-                    route_fallback: false,
                     route_ms: route.ms,
                     route_outcome,
                     item_id,
@@ -334,6 +337,7 @@ impl Core {
         lease: &str,
         steps: &Mutex<Steps>,
         t0: i64,
+        guest: bool,
         err: &crate::CoreError,
     ) -> Result<()> {
         let local_updating = matches!(
@@ -363,7 +367,13 @@ impl Core {
             );
             (
                 "route_failed",
-                "（消息判断失败，请稍后重试或检查当前路由模型配置）".to_string(),
+                steve_i18n::stored(|| {
+                    if guest {
+                        steve_i18n::t!("core.thread.route_failed_guest")
+                    } else {
+                        steve_i18n::t!("core.thread.route_failed")
+                    }
+                }),
                 detail,
             )
         };
@@ -685,7 +695,6 @@ impl Core {
                         route_model: None,
                         route_confidence: Some(1.0),
                         route_signals: &[],
-                        route_fallback: false,
                         route_ms: 0,
                         route_outcome: Some("offer_taken"),
                         item_id: h.item.as_ref().map(|i| i.id.as_str()),
@@ -802,7 +811,7 @@ impl Core {
             None
         };
 
-        // 8. Ambiguous message -> single router model call raced against stop.
+        // 8. Ambiguous message -> bounded router model call raced against stop.
         enum RouteAttempt {
             Routed(Result<Route>),
             Stopped,
@@ -817,23 +826,54 @@ impl Core {
                     self.phase(ws, "route");
                 }
                 let routed = super::routed_text(text, &files);
-                let attempt = tokio::select! {
-                    res = self.route_in(ws, &routed, &history, false, guest) => RouteAttempt::Routed(res),
-                    _ = stop.stopped() => RouteAttempt::Stopped,
-                };
-                lock(&self.0.thread.running_phase).remove(&(ws.to_string(), space.to_string()));
-                if stop.is_stopped() {
-                    return self.commit_stopped(task, lease, steps, t0, &RouteInfo::default());
-                }
-                let r = match attempt {
-                    RouteAttempt::Stopped => {
+                let mut unusable_retries = 0u32;
+                let r = loop {
+                    let attempt = tokio::select! {
+                        res = self.route_in(ws, &routed, &history, false, guest) => RouteAttempt::Routed(res),
+                        _ = stop.stopped() => RouteAttempt::Stopped,
+                    };
+                    if stop.is_stopped() {
+                        lock(&self.0.thread.running_phase)
+                            .remove(&(ws.to_string(), space.to_string()));
                         return self.commit_stopped(task, lease, steps, t0, &RouteInfo::default());
                     }
-                    RouteAttempt::Routed(Ok(r)) => r,
-                    RouteAttempt::Routed(Err(e)) => {
-                        return self.commit_route_failed(task, lease, steps, t0, &e);
+                    match attempt {
+                        RouteAttempt::Stopped => {
+                            lock(&self.0.thread.running_phase)
+                                .remove(&(ws.to_string(), space.to_string()));
+                            return self.commit_stopped(
+                                task,
+                                lease,
+                                steps,
+                                t0,
+                                &RouteInfo::default(),
+                            );
+                        }
+                        RouteAttempt::Routed(Ok(r)) => break r,
+                        RouteAttempt::Routed(Err(crate::CoreError::Route(
+                            crate::gateway::RouteError::UnusableOutput(ref raw),
+                        ))) if unusable_retries < ROUTE_UNUSABLE_OUTPUT_MAX_RETRIES => {
+                            unusable_retries += 1;
+                            tracing::warn!(
+                                run = %task.id,
+                                ws = %task.workspace_id,
+                                attempt = unusable_retries,
+                                "thread router returned unusable output ({raw}); retrying"
+                            );
+                            metrics::counter!(
+                                "steve_router_retries_total",
+                                "reason" => "unusable_output"
+                            )
+                            .increment(1);
+                        }
+                        RouteAttempt::Routed(Err(e)) => {
+                            lock(&self.0.thread.running_phase)
+                                .remove(&(ws.to_string(), space.to_string()));
+                            return self.commit_route_failed(task, lease, steps, t0, guest, &e);
+                        }
                     }
                 };
+                lock(&self.0.thread.running_phase).remove(&(ws.to_string(), space.to_string()));
                 (r, now() - r0, None)
             }
         };

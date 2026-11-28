@@ -2908,7 +2908,6 @@ async fn run_restart(report: &mut Report) {
                         route_model: None,
                         route_confidence: None,
                         route_signals: &[],
-                        route_fallback: false,
                         route_ms: 1,
                         route_outcome: None,
                         item_id: None,

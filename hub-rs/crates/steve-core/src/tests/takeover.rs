@@ -536,4 +536,19 @@ fn different_refusals_are_continued_with_the_latest_reason() {
     assert!(p.contains(&format!("原因：{scope}")), "{p}");
 }
 
+#[test]
+fn continue_prompt_tells_agent_to_use_steve_ask_for_user_only_actions() {
+    let k = kit(2);
+    let (item, sid) = started(&k);
+    stop(&k, &sid, "请先在终端扫码登录微信，完成后告诉我。");
+    assert!(k.open_fails(&item).is_empty());
+    assert_eq!(steve_lines(&k, &item).len(), 1);
+    let p = k.rt.prompts_of(&sid).pop().unwrap();
+    assert!(p.contains("steve_ask"), "{p}");
+    assert!(
+        p.contains("只有用户能做的事") && p.contains("不要当成用户已经完成、不要自行继续"),
+        "{p}"
+    );
+}
+
 /* ── your Finish when nothing can take Steve's follow-up (#347) ── */

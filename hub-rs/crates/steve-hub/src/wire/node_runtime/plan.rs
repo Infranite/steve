@@ -218,7 +218,7 @@ impl NodeRuntime {
         let mark = self.staged_mark();
         let mut plan_failed = false;
         match tx.scope(|w| self.plan_in(w, session).inspect_err(|_| plan_failed = true)) {
-            Err(e) if plan_failed && !matches!(e, StoreError::Storage(_)) => {
+            Err(e) if plan_failed && !e.is_storage_failure() => {
                 self.unstage(mark);
                 tracing::error!("plan a turn of {session}: {e}");
                 Ok(Planned::Empty)

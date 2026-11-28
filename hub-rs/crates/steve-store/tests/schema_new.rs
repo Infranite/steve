@@ -2383,12 +2383,8 @@ fn migration_150_moves_default_project_to_bot_workspaces() {
         Some("prj_2")
     );
     assert_eq!(
-        store
-            .bots()
-            .default_project("b_orphan", "default")
-            .unwrap()
-            .as_deref(),
-        Some("prj_missing")
+        store.bots().default_project("b_orphan", "default").unwrap(),
+        None
     );
     assert_eq!(
         store.bots().default_project("b_orphan", "w2").unwrap(),

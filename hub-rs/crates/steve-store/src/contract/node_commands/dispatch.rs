@@ -78,8 +78,11 @@ pub fn record_exhausted(w: &mut W<'_>, op: &str, error: &Error) -> Result<i64> {
         )?
         .flatten();
     let count = before.unwrap_or(0) + 1;
-    let value = dialect.json_set_field(receipt(), "success", Expr::val("false"));
-    let value = dialect.json_set_field(value, "payload", Expr::val(serde_json::to_string(error)?));
+    let value = dialect.json_set_field(
+        receipt(),
+        "last_error",
+        Expr::val(serde_json::to_string(error)?),
+    );
     let value = dialect.json_set_field(value, "exhausted", Expr::val(count.to_string()));
     w.exec(
         Query::update()

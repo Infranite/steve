@@ -2094,3 +2094,150 @@ async fn offer_explicit_bot_override_and_failed_override_recovery() {
     assert_eq!(saved.meta["offer"]["reason"], "explicit");
     assert!(saved.meta["offer"].get("rejected").is_none());
 }
+
+#[tokio::test]
+async fn reroute_to_item_and_promote_succeed_when_router_fails() {
+    let k = Kit::new();
+    let prj = k
+        .db()
+        .store()
+        .projects()
+        .create(
+            WS,
+            &steve_store::NewProject {
+                name: "p".into(),
+                description: String::new(),
+                device_id: "hub".into(),
+                path: "/tmp/p".into(),
+                kind: "dir".into(),
+                worktree: false,
+                default_bot: None,
+                release: None,
+            },
+        )
+        .unwrap();
+    k.db()
+        .store()
+        .bots()
+        .patch_in(
+            WS,
+            "steve",
+            &steve_store::BotPatch {
+                default_project: Some(Some(prj.id.clone())),
+                ..Default::default()
+            },
+            "me",
+        )
+        .unwrap();
+
+    // 1. User message routed to answer, then router starts failing; reroute(Item) still creates an item.
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(json!({"kind": "answer", "confidence": 0.9}).to_string())
+        } else {
+            Ok(json!({"thought": "", "answer": "先聊两句"}).to_string())
+        }
+    });
+    let q = "这是一个超过二十四个字的普通话题我们先在这里简单聊两句";
+    let origin = k.core.say(WS, q, &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    assert_eq!(items(&k), 0);
+
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Err(msg("Command timed out after 60000 ms"))
+        } else {
+            Err(msg("unexpected"))
+        }
+    });
+    let rerouted = k
+        .core
+        .reroute(WS, &origin, RerouteTo::Item, None)
+        .await
+        .unwrap();
+    assert!(!rerouted.already);
+    let made = rerouted.item.unwrap();
+    assert_eq!(made.title, crate::util::js_head(q, 24));
+    assert_eq!(made.project_id, None);
+    assert_eq!(k.db().goal(&made.id).unwrap(), q);
+
+    // 2. Promoting an assistant chat reply when router returns unusable output also creates an item.
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok(json!({"kind": "answer", "confidence": 0.9}).to_string())
+        } else {
+            Ok(json!({"thought": "", "answer": "可以这样改。"}).to_string())
+        }
+    });
+    let q2 = "帮我梳理另一个同样超过二十四个字的聊天转事项请求";
+    k.core.say(WS, q2, &[]).unwrap();
+    let ms2 = settle(&k, ms.len() + 3).await;
+    let chat_reply = ms2.last().unwrap().id.clone();
+
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Ok("not valid json".into())
+        } else {
+            Err(msg("unexpected"))
+        }
+    });
+    let promoted = k.core.promote(WS, &chat_reply, None).await.unwrap();
+    assert_eq!(promoted.title, crate::util::js_head(q2, 24));
+    assert_eq!(promoted.project_id, None);
+    assert_eq!(k.db().goal(&promoted.id).unwrap(), q2);
+}
+
+#[tokio::test]
+async fn unusable_router_output_retries_once_then_succeeds_or_fails_explicitly() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    // 1. First router output is unusable, second succeeds -> turn recovers without failing.
+    let k = Kit::new();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let c = calls.clone();
+    k.gw.set(move |p, _| {
+        if p.starts_with("You are the router") {
+            let n = c.fetch_add(1, Ordering::SeqCst);
+            if n == 0 {
+                Ok("not json at all".into())
+            } else {
+                Ok(json!({"kind": "answer", "confidence": 0.9}).to_string())
+            }
+        } else {
+            Ok(json!({"thought": "", "answer": "重试后回答"}).to_string())
+        }
+    });
+    let mid = k.core.say(WS, "随便聊句什么", &[]).unwrap();
+    let ms = settle(&k, 2).await;
+    assert_eq!(calls.load(Ordering::SeqCst), 2);
+    assert_eq!(ms[1].text, "重试后回答");
+    assert_eq!(route_log(&k, &mid).outcome, "answered");
+
+    // 2. Persistent unusable output exhausts the single retry and commits localized failure.
+    let calls_fail = Arc::new(AtomicUsize::new(0));
+    let cf = calls_fail.clone();
+    k.gw.set(move |p, _| {
+        if p.starts_with("You are the router") {
+            cf.fetch_add(1, Ordering::SeqCst);
+            Ok("still invalid".into())
+        } else {
+            Ok(json!({"thought": "", "answer": "不应回答"}).to_string())
+        }
+    });
+    let mid2 = k.core.say(WS, "再来一句", &[]).unwrap();
+    eventually_sync(
+        "persistent unusable router output fails after bounded retry",
+        || route_opt(&k, &mid2).is_some_and(|l| l.reply_message_id.is_some()),
+    )
+    .await;
+    assert_eq!(calls_fail.load(Ordering::SeqCst), 2);
+    let l = route_log(&k, &mid2);
+    assert_eq!(l.outcome, "failed");
+    assert_eq!(l.error_code.as_deref(), Some("route_failed"));
+    let reply = k
+        .db()
+        .message(l.reply_message_id.as_deref().unwrap())
+        .unwrap()
+        .unwrap();
+    assert_eq!(reply.text, steve_i18n::t!("core.thread.route_failed"));
+}

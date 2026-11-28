@@ -1,24 +1,12 @@
-//! Provider capacity errors and the recovery hints adapters forward in their diagnostics.
-//! No provider name or local clock zone is needed to interpret an absolute recovery time.
+//! Provider capacity errors and terminal diagnostics adapters forward in their replies.
 
 use std::sync::LazyLock;
 
-use chrono::DateTime;
 use regex::Regex;
 
 static CAPACITY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(?i)\b(?:503|529)\b|no eligible upstream account|service unavailable|overloaded")
         .unwrap()
-});
-static RECOVERY: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(concat!(
-        r"(?i)expected to be available at\s*<?",
-        r"(\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2}))",
-    ))
-    .unwrap()
-});
-static RETRY_AFTER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?i)\bretry[- ]after["']?\s*[:=]\s*["']?([^\r\n"'<>;]+)"#).unwrap()
 });
 
 /// This is narrower than the general gateway retry: authentication and 429 quota failures keep
@@ -67,78 +55,9 @@ pub fn capacity_error_tail(text: &str) -> Option<&str> {
     None
 }
 
-/// The latest valid advertised instant, in milliseconds. RFC 3339 has an explicit offset;
-/// Retry-After accepts both delta-seconds and HTTP-date, including obsolete HTTP date formats.
-/// Invalid/overflowing hints are ignored, never interpreted as an immediate retry.
-pub fn capacity_recovery_at(error: &str, now: i64) -> Option<i64> {
-    let absolute = RECOVERY.captures_iter(error).filter_map(|c| {
-        DateTime::parse_from_rfc3339(&c[1])
-            .ok()
-            .map(|d| d.timestamp_millis())
-    });
-    let after = RETRY_AFTER.captures_iter(error).filter_map(|c| {
-        let value = c[1].trim().trim_end_matches(['}', ',', '.']);
-        if value.bytes().all(|b| b.is_ascii_digit()) {
-            let seconds = value.parse::<i64>().ok()?;
-            now.checked_add(seconds.checked_mul(1000)?)
-        } else {
-            let date = httpdate::parse_http_date(value).ok()?;
-            i64::try_from(date.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis()).ok()
-        }
-    });
-    absolute.chain(after).max()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const NOW: i64 = 1_794_988_800_000; // 2026-11-18T08:00:00Z
-
-    #[test]
-    fn recovery_hints_include_offsets_seconds_and_all_http_dates() {
-        for hint in [
-            "expected to be available at 2026-11-18T08:02:00Z",
-            "expected to be available at <2026-11-18T16:02:00+08:00>",
-            "Retry-After: 120",
-            "Retry-After: Wed, 18 Nov 2026 08:02:00 GMT",
-            "Retry-After: Wednesday, 18-Nov-26 08:02:00 GMT",
-            "Retry-After: Wed Nov 18 08:02:00 2026",
-            r#"{"Retry-After":"120"}"#,
-        ] {
-            assert_eq!(
-                capacity_recovery_at(hint, NOW),
-                Some(NOW + 120_000),
-                "{hint}"
-            );
-        }
-        assert_eq!(
-            capacity_recovery_at(
-                "expected to be available at 2026-11-18T08:01:00Z; Retry-After: 120",
-                NOW
-            ),
-            Some(NOW + 120_000)
-        );
-    }
-
-    #[test]
-    fn invalid_past_and_extreme_hints_are_safe() {
-        for hint in [
-            "Retry-After: -1",
-            "Retry-After: NaN",
-            "Retry-After: 9223372036854775807",
-            "Retry-After: 999999999999999999999999999",
-            "expected to be available at 2026-99-99T08:02:00Z",
-            "request created 2026-11-18T08:02:00Z",
-        ] {
-            assert_eq!(capacity_recovery_at(hint, NOW), None, "{hint}");
-        }
-        assert_eq!(capacity_recovery_at("Retry-After: 0", NOW), Some(NOW));
-        assert_eq!(
-            capacity_recovery_at("expected to be available at 2026-11-18T07:59:00Z", NOW),
-            Some(NOW - 60_000)
-        );
-    }
 
     #[test]
     fn only_final_standalone_capacity_diagnostics_supply_evidence() {

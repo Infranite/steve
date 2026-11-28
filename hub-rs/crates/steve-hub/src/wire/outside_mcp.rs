@@ -289,12 +289,22 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
     let team = resolve_team(&x.store, &o.ws, args)?;
     let core = x.tools.core.clone();
     let bot = resolve_bot(&x.store, &o.ws, args).await?;
-    let routed = if title.is_none() {
-        Some(
-            core.route_for_team(&o.ws, &goal, &[], false, false, team.as_deref())
-                .await
-                .map_err(|e| e.to_string())?,
-        )
+    let needs_route = title.is_none();
+    let routed = if needs_route {
+        match core
+            .route_for_team(&o.ws, &goal, &[], false, false, team.as_deref())
+            .await
+        {
+            Ok(r) => Some(r),
+            Err(steve_core::CoreError::Route(e)) => {
+                tracing::warn!(
+                    ws = %o.ws,
+                    "outside MCP item naming route failed; using goal prefix: {e}"
+                );
+                None
+            }
+            Err(e) => return Err(e.to_string()),
+        }
     } else {
         None
     };
@@ -303,10 +313,14 @@ async fn create(x: &Extra, o: &Outside, args: &Value) -> Result<String, String> 
             routed
                 .as_ref()
                 .map(|r| r.title.clone())
-                .filter(|t| !t.is_empty())
+                .filter(|t| !t.trim().is_empty())
         })
         .unwrap_or_else(|| goal.chars().take(24).collect());
-    let project = routed.as_ref().map(|r| r.project.clone());
+    let project = if needs_route {
+        Some(routed.as_ref().and_then(|r| r.project.clone()))
+    } else {
+        None
+    };
     let tag_ids = routed
         .as_ref()
         .map(|r| r.tag_ids.clone())

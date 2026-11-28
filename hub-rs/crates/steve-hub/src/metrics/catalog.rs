@@ -713,6 +713,11 @@ pub(super) fn describe() {
         "Thread router calls that failed without producing a valid route. Label: reason (model_call, local_node_updating, unusable_output)."
     );
     describe_counter!(
+        "steve_router_retries_total",
+        Count,
+        "Thread router calls retried after unusable output. Label: reason (unusable_output)."
+    );
+    describe_counter!(
         "steve_node_research_probe_errors_total",
         Count,
         "Node capability probe failures surfaced when starting a research run."

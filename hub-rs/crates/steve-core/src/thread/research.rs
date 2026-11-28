@@ -791,14 +791,19 @@ impl Core {
                 meta["error"] = json!(true);
                 meta[SYSTEM] = json!(true);
                 meta["error_code"] = json!("researcher_unavailable");
-                let reply_text =
-                    "（研究无法执行：当前未挂载本机 Node 研究能力，请检查本机 Node 状态后重试）";
+                let reply_text = steve_i18n::stored(|| {
+                    if conv.guest() {
+                        steve_i18n::t!("core.thread.researcher_unavailable_guest")
+                    } else {
+                        steve_i18n::t!("core.thread.researcher_unavailable")
+                    }
+                });
                 let committed = self.commit_inline_reply(
                     task,
                     lease,
                     false,
                     "failed",
-                    reply_text,
+                    &reply_text,
                     meta.clone(),
                     &info,
                     None,
@@ -1556,7 +1561,6 @@ impl Core {
                     route_model: info.model.as_deref(),
                     route_confidence: info.confidence,
                     route_signals: &info.signals,
-                    route_fallback: false,
                     route_ms: info.ms,
                     route_outcome: None,
                     item_id: None,
