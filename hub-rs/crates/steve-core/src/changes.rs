@@ -413,16 +413,13 @@ fn bot_fields(
             enc: Some(Box::new(move |v| {
                 let s = jstr(v);
                 let trimmed = s.trim();
-                let next_acc = if trimmed.is_empty() || trimmed == "无" {
-                    None
-                } else {
-                    steve_types::BotAccessory::parse(trimmed).or_else(|| {
-                        steve_types::BotAccessory::ALL
-                            .iter()
-                            .copied()
-                            .find(|a| accessory_label(*a) == trimmed)
-                    })
-                };
+                /* "无", an empty value and anything unknown all clear the accessory */
+                let next_acc = steve_types::BotAccessory::parse(trimmed).or_else(|| {
+                    steve_types::BotAccessory::ALL
+                        .iter()
+                        .copied()
+                        .find(|a| accessory_label(*a) == trimmed)
+                });
                 let mut next = cur_avatar.clone();
                 next.accessory = next_acc;
                 json!(next)
