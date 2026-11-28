@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import http.server
 import importlib.util
 import io
 import json
@@ -13,6 +14,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import threading
 import unittest
 from unittest.mock import patch
 
@@ -218,6 +220,14 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
             self.end_headers()
             self.wfile.write(raw)
 
+        def _send_text(self, status: int, text: str) -> None:
+            raw = text.encode("utf-8")
+            self.send_response(status)
+            self.send_header("Content-Type", "text/plain; charset=utf-8")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
         def _body(self) -> dict:
             length = int(self.headers.get("Content-Length", "0"))
             raw = self.rfile.read(length) if length > 0 else b"{}"
@@ -278,17 +288,17 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
                     return
                 if path == "/api/approval-policy":
                     if not LEGACY_POLICY:
-                        self._send(404, {"error": "removed"})
+                        self._send_text(404, "404 page not found\n")
                         return
                     self._send(200, {"policy": db["approval_policy"], "editable": True})
                     return
                 if path == "/api/permission-policy":
                     if LEGACY_POLICY:
-                        self._send(404, {"error": "not found"})
+                        self._send_text(404, "404 page not found\n")
                         return
                     self._send(200, {"policy": db["permission_policy"], "editable": True})
                     return
-            self._send(404, {"error": f"unknown GET {path}"})
+            self._send_text(404, "404 page not found\n")
 
         def do_POST(self):
             path = urllib.parse.urlparse(self.path).path
@@ -1125,6 +1135,89 @@ class RehearseUpgradeTests(unittest.TestCase):
 
         self.assertIsInstance(snap_present["legacy_linux_service_stat"], list)
         self.assertEqual(len(snap_present["legacy_linux_service_stat"]), 3)
+
+    def test_legacy_non_json_404_and_invalid_200_json(self) -> None:
+        class LegacyHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path in ("/api/permission-policy", "/api/broken-json"):
+                    status = 404 if self.path == "/api/permission-policy" else 200
+                    raw = b"404 page not found\n"
+                    self.send_response(status)
+                    self.send_header("Content-Type", "text/plain; charset=utf-8")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
+                if self.path == "/api/approval-policy":
+                    raw = json.dumps({"policy": {"revision": 1, "mode": "ask_owner"}, "editable": True}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def do_PUT(self):
+                length = int(self.headers.get("Content-Length", "0"))
+                _ = self.rfile.read(length) if length > 0 else b"{}"
+                if self.path == "/api/approval-policy":
+                    raw = json.dumps({"policy": {"revision": 2, "mode": "harness_auto"}, "editable": True}).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(raw)))
+                    self.end_headers()
+                    self.wfile.write(raw)
+                    return
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), LegacyHandler)
+        server.daemon_threads = True
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        runner = None
+        try:
+            api_base = f"http://127.0.0.1:{server.server_address[1]}"
+            client = REH.HubClient(api_base, api_base)
+            status, payload = client.api_json("GET", "/api/permission-policy", expected_statuses=(200, 404))
+            self.assertEqual(status, 404)
+            self.assertEqual(payload, {"raw": "404 page not found\n"})
+
+            args = REH.parse_args(
+                ["--from", "0.13.0", "--candidate", "0.14.1", "--work-dir", str(self.root / "probe-work")]
+            )
+            with patch.object(REH, "detect_target", return_value=("macos", "aarch64-apple-darwin")):
+                runner = REH.RehearsalRunner(args)
+            runner.client = client
+            self.assertEqual(runner._probe_and_set_preupgrade_policy(), ("approval-policy", "harness_auto", "auto"))
+
+            with self.assertRaises(REH.RehearsalError) as ctx:
+                client.api_json("GET", "/api/broken-json", expected_statuses=(200,))
+            self.assertIn("invalid JSON", str(ctx.exception))
+        finally:
+            if runner is not None and runner.sandbox.exists():
+                shutil.rmtree(runner.sandbox, ignore_errors=True)
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=5)
+
+    def test_default_sandbox_path_fits_unix_socket_limit(self) -> None:
+        self.assertEqual(REH.validate_sandbox_paths(None), Path("/tmp").resolve())
+        args = REH.parse_args(["--from", "0.13.0", "--candidate", "0.14.1"])
+        with patch.object(REH, "detect_target", return_value=("macos", "aarch64-apple-darwin")):
+            runner = REH.RehearsalRunner(args)
+        try:
+            self.assertEqual(runner.sandbox.parent, Path("/tmp").resolve())
+            sock_path = runner.home / REH.NODE_FILE_ACCESS_SOCKET_REL
+            self.assertLessEqual(len(str(sock_path).encode("utf-8")), REH.UNIX_SOCKET_PATH_LIMIT)
+        finally:
+            if runner.sandbox.exists():
+                shutil.rmtree(runner.sandbox, ignore_errors=True)
 
 
 if __name__ == "__main__":

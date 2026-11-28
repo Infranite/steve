@@ -63,6 +63,8 @@ DIAGNOSTIC_LOG_TAIL_CHARS = 4000
 MACOS_CTL_KERN = 1
 MACOS_KERN_PROCARGS2 = 49
 PROC_PIDPATHINFO_MAXSIZE = 4096
+UNIX_SOCKET_PATH_LIMIT = 103
+NODE_FILE_ACCESS_SOCKET_REL = "data/node/services/node-file-access.sock"
 
 DEFAULT_SERVICE_LABEL = "io.github.infranite.steve.hub"
 REHEARSAL_LABEL_PREFIX = "io.github.infranite.steve-rehearsal-"
@@ -306,6 +308,9 @@ def validate_sandbox_paths(work_dir: Path | None) -> Path:
                 )
         resolved.mkdir(parents=True, exist_ok=True)
         return resolved
+    tmp_dir = Path("/tmp")
+    if os.name == "posix" and tmp_dir.is_dir() and os.access(tmp_dir, os.W_OK | os.X_OK):
+        return tmp_dir.resolve()
     return Path(tempfile.gettempdir()).resolve()
 
 
@@ -956,6 +961,8 @@ class HubClient:
         try:
             return status, json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            if status >= 400:
+                return status, {"raw": raw.decode("utf-8", errors="replace")}
             raise RehearsalError(f"{method} {path} returned invalid JSON: {exc}") from exc
 
     def try_healthz(self) -> dict[str, object] | None:
@@ -1056,9 +1063,17 @@ class RehearsalRunner:
         self.label = f"{REHEARSAL_LABEL_PREFIX}{self.run_id}"
         self.work_parent = validate_sandbox_paths(args.work_dir)
         self.sandbox = Path(
-            tempfile.mkdtemp(prefix=f"steve-rehearsal-{self.run_id}-", dir=str(self.work_parent))
+            tempfile.mkdtemp(prefix=f"sr-{self.run_id[:6]}-", dir=str(self.work_parent))
         ).resolve()
         self.home = self.sandbox / "home"
+        sock_path = self.home / NODE_FILE_ACCESS_SOCKET_REL
+        if len(str(sock_path).encode("utf-8")) > UNIX_SOCKET_PATH_LIMIT:
+            print(
+                f"[rehearsal] warning: local Node file-access socket path exceeds "
+                f"{UNIX_SOCKET_PATH_LIMIT} bytes ({sock_path}); consider a shorter --work-dir",
+                file=sys.stderr,
+                flush=True,
+            )
         self.vault_dir = self.sandbox / "vault-keys"
         self.harness_root = self.sandbox / "harness"
         self.bundles_dir = self.sandbox / "bundles"
