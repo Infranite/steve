@@ -582,6 +582,9 @@ fn brew_info_json_extracts_cask_and_formula_versions() {
     assert_eq!(parse_brew_latest_json(BrewKind::Cask, "{}"), None);
 }
 
+/// Journal commits other Node work may make while a queued upgrade waits (none are expected).
+const MAX_COMMITS_WHILE_QUEUED: u64 = 2;
+
 fn put_active_session(n: &LocalNode, sid: &str, harness: &str, active: bool) {
     let session = SessionId::new(sid).unwrap();
     let ws = WorkspaceRef {
@@ -798,6 +801,16 @@ sys.exit(1)
     assert_eq!(
         upgrades_while_busy, upgrades_before,
         "brew upgrade must not run while a session is active"
+    );
+    // Waiting must not keep writing to the journal: a write wakes the waiter, which used to
+    // write again at once and starve every session's events and stops.
+    let (_, _, commits_before) = n.0.j.meters();
+    tokio::time::sleep(IDLE_POLL_INTERVAL * 8).await;
+    let (_, _, commits_after) = n.0.j.meters();
+    assert!(
+        commits_after - commits_before <= MAX_COMMITS_WHILE_QUEUED,
+        "a queued upgrade wrote {} journal commits while waiting",
+        commits_after - commits_before
     );
 
     // End the session -> queued upgrade runs and verifies 2.1.315.
