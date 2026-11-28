@@ -111,6 +111,14 @@ jobs:
             --target "$TARGET" --binary release-binaries/steve-hub \
             --node release-binaries/steve-node --keyhelper release-binaries/steve-keyhelper \
             --web web/dist --out release-assets --installer --cli release-binaries/steve --restic-dir release-binaries
+      - name: Verify packaged release and installer bundles
+        env:
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python3 scripts/package-release.py verify --version "$version" --commit "$GITHUB_SHA" \
+            --target "$TARGET" --out release-assets --installer
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: bundle-${{ matrix.target }}
