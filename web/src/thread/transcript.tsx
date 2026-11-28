@@ -29,7 +29,7 @@ import { Notice, Segmented, Status, StatusDot, go, openSheet } from "@/ui"
 import { ActorAvatar } from "@/components/actor-avatar"
 
 import { getTranscript, loadOlderTranscript, useTranscript, useTranscriptSelector } from "@/data/transcript"
-import { isActiveSubtaskStatus, partitionWork, segmentsOf, subtaskOf, subtaskTimes, toolDurationMs, type AutoModeClassifierWarning, type Seg } from "@/data/transcript-model"
+import { isActiveSubtaskStatus, partitionWork, segmentsOf, subtaskOf, subtaskTimes, toolDurationMs, toolFileDiffs, type AutoModeClassifierWarning, type Seg } from "@/data/transcript-model"
 import { SubtaskList, type SubtaskEntry } from "@/components/subtask-list"
 import { recordTranscriptOpen } from "@/perf"
 import { VirtualList } from "@/components/virtual-list"
@@ -103,7 +103,15 @@ function workStats(evs: any[]) {
     if (e[8] === 1) n.fail++
     if (e[1] === "run") n.run++
     else if (e[1] === "read") n.read++
-    else if (e[1] === "edit") { n.edit++; if (e[3]) files.add(e[3]) }
+    else if (e[1] === "edit") {
+      n.edit++
+      const edited = toolFileDiffs(e)
+      if (edited.length) {
+        for (const [p] of edited) files.add(p)
+      } else if (!Array.isArray(e[18]) && e[3]) {
+        files.add(e[3])
+      }
+    }
     else if (e[1] === "search" || e[1] === "fetch") n.search++
     else n.other++
   }
@@ -139,7 +147,9 @@ function stepItem(e: any[], j: number, evs: any[], ts: number[], t1: number | un
   const merged = g ? (calls: number, distinct: number, running: boolean) => g === "tool" ? t("core:trail.group.tool", { name: v.verb, count: calls })
     : t(`core:trail.group.${g}${running ? "Live" : ""}` as "core:trail.group.read", { count: g === "read" || g === "edit" ? distinct : calls }) : undefined
   const plan: [string, boolean][] | undefined = e[12]?.length ? e[12] : undefined
-  const diff = e[1] === "edit" && e[6] != null ? <span className="shrink-0 type-footnote font-mono tabular-nums"><span className="text-success">+{e[6]}</span>{e[7] ? <span className="ml-1 text-destructive">−{e[7]}</span> : null}</span> : undefined
+  const diff = e[1] === "edit" && e[6] != null && ((e[6] ?? 0) > 0 || (e[7] ?? 0) > 0)
+    ? <span className="shrink-0 type-footnote font-mono tabular-nums">{e[6] ? <span className="text-success">+{e[6]}</span> : null}{e[7] ? <span className={e[6] ? "ml-1 text-destructive" : "text-destructive"}>−{e[7]}</span> : null}</span>
+    : undefined
   /* the call as a Tool Call Card: the tool's own name, what Steve has of its input (the command, file, query or brief)
    * and what came back, its time from adapter duration_ms or the update that settled it ([13]) */
   const out = String(e[4] ?? "").trim().replace(/^```[a-z]*\n?/, "").replace(/\n?```$/, "").trim(), t0 = ts[j] || undefined

@@ -56,8 +56,20 @@ export function turnsOf(ev: Ev[], ts: number[], running: boolean, head: (s: stri
 /** the files the session changed, from its edit calls that succeeded: path, lines added, lines removed; most changed first */
 export function filesOf(ev: Ev[]): [string, number, number][] {
   const files = new Map<string, [string, number, number]>()
-  for (const e of ev) if (e[0] === "tool" && e[1] === "edit" && e[6] != null && e[8] !== 1 && e[3]) {
-    const f = files.get(e[3]) ?? [e[3], 0, 0]; f[1] += Number(e[6]) || 0; f[2] += Number(e[7]) || 0; files.set(e[3], f)
+  const add = (path: string, added: number, removed: number) => {
+    if (!path || (added <= 0 && removed <= 0)) return
+    const f = files.get(path) ?? [path, 0, 0]
+    f[1] += added; f[2] += removed; files.set(path, f)
+  }
+  for (const e of ev) {
+    if (e[0] !== "tool" || e[1] !== "edit" || e[8] === 1) continue
+    if (Array.isArray(e[18])) {
+      for (const item of e[18] as [string, number, number][]) {
+        add(String(item[0] ?? ""), Number(item[1]) || 0, Number(item[2]) || 0)
+      }
+    } else if (e[6] != null && e[3]) {
+      add(String(e[3]), Number(e[6]) || 0, Number(e[7]) || 0)
+    }
   }
   return [...files.values()].sort((a, b) => b[1] + b[2] - (a[1] + a[2]))
 }

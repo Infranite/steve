@@ -8,6 +8,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use serde_json::Value;
 use steve_node_api::{
@@ -22,6 +23,15 @@ use crate::adapter::{AdapterContext, AdapterOutcome, HarnessAdapter, SubtaskStat
 pub const TEXT_MAX: usize = 4000;
 /// Lines of a diff preview.
 const DIFF_LINES: usize = 60;
+/// Maximum wall-clock budget for computing line-level Myers diffs for one file change.
+///
+/// Event normalization runs synchronously on the Node's ACP event loop. Normal source edits
+/// finish in a few milliseconds, whereas rewriting thousands of lines in a generated or lock
+/// file can push Myers toward `O(ND)` and stall normalization. Capping each file diff at 100ms
+/// keeps event throughput bounded while giving ordinary edits ample room to compute minimal
+/// diffs; when exceeded, `similar` returns a valid non-minimal diff and we emit a
+/// `diff_timeout` diagnostic.
+const DIFF_DEADLINE: Duration = Duration::from_millis(100);
 
 /// A command before the Node binds its working directory and permission policy.
 /// Never flatten argv into shell text: argument boundaries are part of the action.
@@ -53,7 +63,8 @@ pub struct ToolFact {
     pub url: Option<String>,
     /// Canonical digest of the complete edit input (or full content diffs), never its preview.
     pub change: Option<Digest>,
-    /// Bounded previews; Diff added/removed count full supplied new/old text lines, not an LCS.
+    /// Bounded previews; `Part::Diff` counts real line-level additions/removals over the
+    /// untruncated texts and previews changed lines bounded by `DIFF_LINES`/`TEXT_MAX`.
     pub result: Vec<Part>,
     pub error: Option<String>,
     pub raw: Value,
@@ -992,67 +1003,256 @@ fn path_of(input: &Value) -> Option<String> {
         .map(String::from)
 }
 
-fn lines(s: &str) -> u32 {
-    if s.is_empty() {
-        0
-    } else {
-        s.lines().count() as u32
+fn saturating_u32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+fn push_preview_lines<'a>(buf: &mut Vec<&'a str>, overflow: &mut bool, lines: &[&'a str]) {
+    let room = DIFF_LINES.saturating_sub(buf.len());
+    let take = room.min(lines.len());
+    buf.extend_from_slice(&lines[..take]);
+    if lines.len() > take {
+        *overflow = true;
     }
 }
 
-fn preview_lines(s: &str) -> String {
-    let mut out: Vec<&str> = s.lines().take(DIFF_LINES).collect();
-    if s.lines().count() > DIFF_LINES {
-        out.push("…");
+fn finalize_preview(lines: &[&str], line_overflow: bool) -> (String, bool) {
+    if lines.is_empty() {
+        return (String::new(), false);
     }
-    bound(&out.join("\n"), TEXT_MAX)
+    let mut text = lines.join("\n");
+    if line_overflow {
+        text.push_str("\n…");
+    }
+    let char_overflow = text.chars().count() > TEXT_MAX;
+    if char_overflow {
+        text = bound(&text, TEXT_MAX);
+    }
+    (text, line_overflow || char_overflow)
 }
 
-/// `added`/`removed` count the complete new/old supplied texts, not a minimal edit script.
-/// Previews may be cut; these counts refer to their untruncated source texts.
-fn diff(path: &str, root: &Path, old: Option<&str>, new: &str) -> Part {
-    Part::Diff {
-        path: shown(path, root),
-        old: old.filter(|o| !o.is_empty()).map(preview_lines),
-        new: preview_lines(new),
-        added: lines(new),
-        removed: old.map(lines).unwrap_or(0),
+struct DiffOutcome {
+    part: Part,
+    truncated: bool,
+    timed_out: bool,
+}
+
+struct DiffAccumulator<'a> {
+    added: u32,
+    removed: u32,
+    old_preview: Vec<&'a str>,
+    new_preview: Vec<&'a str>,
+    old_line_overflow: bool,
+    new_line_overflow: bool,
+    deadline: Option<Instant>,
+    timed_out: bool,
+}
+
+impl<'a> DiffAccumulator<'a> {
+    fn new() -> Self {
+        Self::with_deadline(Instant::now().checked_add(DIFF_DEADLINE))
+    }
+
+    fn with_deadline(deadline: Option<Instant>) -> Self {
+        Self {
+            added: 0,
+            removed: 0,
+            old_preview: Vec::new(),
+            new_preview: Vec::new(),
+            old_line_overflow: false,
+            new_line_overflow: false,
+            deadline,
+            timed_out: false,
+        }
+    }
+
+    fn record_removed(&mut self, lines: &[&'a str]) {
+        self.removed = self.removed.saturating_add(saturating_u32(lines.len()));
+        push_preview_lines(&mut self.old_preview, &mut self.old_line_overflow, lines);
+    }
+
+    fn record_added(&mut self, lines: &[&'a str]) {
+        self.added = self.added.saturating_add(saturating_u32(lines.len()));
+        push_preview_lines(&mut self.new_preview, &mut self.new_line_overflow, lines);
+    }
+
+    fn push_pair(&mut self, old: Option<&'a str>, new: &'a str) {
+        let old_lines: Vec<&str> = old.map(|o| o.lines().collect()).unwrap_or_default();
+        let new_lines: Vec<&str> = new.lines().collect();
+        if old_lines.is_empty() {
+            self.record_added(&new_lines);
+            return;
+        }
+        if new_lines.is_empty() {
+            self.record_removed(&old_lines);
+            return;
+        }
+        let prefix = old_lines
+            .iter()
+            .zip(new_lines.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let old_rem = &old_lines[prefix..];
+        let new_rem = &new_lines[prefix..];
+        let suffix = old_rem
+            .iter()
+            .rev()
+            .zip(new_rem.iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let old_mid = &old_rem[..old_rem.len() - suffix];
+        let new_mid = &new_rem[..new_rem.len() - suffix];
+        if old_mid.is_empty() && new_mid.is_empty() {
+            return;
+        }
+        if old_mid.is_empty() {
+            self.record_added(new_mid);
+            return;
+        }
+        if new_mid.is_empty() {
+            self.record_removed(old_mid);
+            return;
+        }
+        let ops = similar::capture_diff_slices_deadline(
+            similar::Algorithm::Myers,
+            old_mid,
+            new_mid,
+            self.deadline,
+        );
+        if self.deadline.is_some_and(|d| Instant::now() > d) {
+            self.timed_out = true;
+        }
+        for op in ops {
+            match op {
+                similar::DiffOp::Equal { .. } => {}
+                similar::DiffOp::Delete {
+                    old_index, old_len, ..
+                } => self.record_removed(&old_mid[old_index..old_index + old_len]),
+                similar::DiffOp::Insert {
+                    new_index, new_len, ..
+                } => self.record_added(&new_mid[new_index..new_index + new_len]),
+                similar::DiffOp::Replace {
+                    old_index,
+                    old_len,
+                    new_index,
+                    new_len,
+                } => {
+                    self.record_removed(&old_mid[old_index..old_index + old_len]);
+                    self.record_added(&new_mid[new_index..new_index + new_len]);
+                }
+            }
+        }
+    }
+
+    fn finish(self, path: &str, root: &Path) -> DiffOutcome {
+        let (old_text, old_trunc) = finalize_preview(&self.old_preview, self.old_line_overflow);
+        let (new_text, new_trunc) = finalize_preview(&self.new_preview, self.new_line_overflow);
+        DiffOutcome {
+            part: Part::Diff {
+                path: shown(path, root),
+                old: (!old_text.is_empty()).then_some(old_text),
+                new: new_text,
+                added: self.added,
+                removed: self.removed,
+            },
+            truncated: old_trunc || new_trunc,
+            timed_out: self.timed_out,
+        }
+    }
+}
+
+/// Computes line-level `added`/`removed` counts by trimming unchanged prefix/suffix lines on the
+/// full untruncated texts and diffing the changed middle with deadline-bounded Myers (`DIFF_DEADLINE`).
+/// On timeout `similar` still returns a valid (non-minimal) edit script, so counts and bounded
+/// previews are still emitted along with a `diff_timeout` diagnostic.
+/// New files (`old` omitted or empty) count all `new` lines with `removed = 0`, full deletions
+/// count all `old` lines with `added = 0`, and identical texts yield `0/0`.
+/// `Part::Diff` previews extract changed lines only, bounded by `DIFF_LINES` and `TEXT_MAX`.
+fn diff(path: &str, root: &Path, old: Option<&str>, new: &str) -> DiffOutcome {
+    diff_with_deadline(
+        path,
+        root,
+        old,
+        new,
+        Instant::now().checked_add(DIFF_DEADLINE),
+    )
+}
+
+fn diff_with_deadline(
+    path: &str,
+    root: &Path,
+    old: Option<&str>,
+    new: &str,
+    deadline: Option<Instant>,
+) -> DiffOutcome {
+    let mut acc = DiffAccumulator::with_deadline(deadline);
+    acc.push_pair(old, new);
+    acc.finish(path, root)
+}
+
+fn record_diff_diagnostics(
+    outcome: &DiffOutcome,
+    source: &'static str,
+    diagnostics: &mut Vec<Fact>,
+) {
+    if outcome.truncated {
+        diagnostics.push(diagnostic("truncated", &format!("{source} diff preview")));
+    }
+    if outcome.timed_out {
+        metrics::counter!(
+            "steve_acp_diff_timeout_total",
+            "source" => source,
+        )
+        .increment(1);
+        diagnostics.push(diagnostic(
+            "diff_timeout",
+            &format!("{source} diff timed out; line counts may be overestimated"),
+        ));
     }
 }
 
 /// An edit's change as Claude Code's tools put it in their input (`Edit`, `MultiEdit`, `Write`).
-fn input_diffs(input: &Value, root: &Path) -> Vec<Part> {
+fn input_diffs(input: &Value, root: &Path, diagnostics: &mut Vec<Fact>) -> Vec<Part> {
     let Some(path) = path_of(input) else {
         return vec![];
     };
     if let Some(edits) = input.get("edits").and_then(Value::as_array) {
-        let old: Vec<&str> = edits
-            .iter()
-            .filter_map(|e| e.get("old_string").and_then(Value::as_str))
-            .collect();
-        let new: Vec<&str> = edits
-            .iter()
-            .filter_map(|e| e.get("new_string").and_then(Value::as_str))
-            .collect();
-        return vec![diff(
-            &path,
-            root,
-            Some(&old.join("\n⋯\n")),
-            &new.join("\n⋯\n"),
-        )];
+        let mut acc = DiffAccumulator::new();
+        let mut any = false;
+        for e in edits {
+            let old_s = e.get("old_string").and_then(Value::as_str);
+            let new_s = e.get("new_string").and_then(Value::as_str);
+            if old_s.is_none() && new_s.is_none() {
+                continue;
+            }
+            any = true;
+            acc.push_pair(old_s, new_s.unwrap_or(""));
+        }
+        if !any {
+            return vec![];
+        }
+        let outcome = acc.finish(&path, root);
+        record_diff_diagnostics(&outcome, "input", diagnostics);
+        return vec![outcome.part];
     }
-    match (
+    let pair = match (
         input.get("old_string").and_then(Value::as_str),
         input.get("new_string").and_then(Value::as_str),
         input.get("content").and_then(Value::as_str),
     ) {
-        (old, Some(new), _) => vec![diff(&path, root, old, new)],
-        (None, None, Some(content)) => vec![diff(&path, root, None, content)],
-        _ => vec![],
-    }
+        (old, Some(new), _) => Some((old, new)),
+        (None, None, Some(content)) => Some((None, content)),
+        _ => None,
+    };
+    let Some((old, new)) = pair else {
+        return vec![];
+    };
+    let outcome = diff(&path, root, old, new);
+    record_diff_diagnostics(&outcome, "input", diagnostics);
+    vec![outcome.part]
 }
 
-/// The tool's output as the adapter reports it: text, and diffs with whole texts.
+/// The tool's output as the adapter reports it: text, and line-level diffs.
 fn content_parts(u: &Value, root: &Path, diagnostics: &mut Vec<Fact>) -> Vec<Part> {
     let Some(items) = u.get("content").and_then(Value::as_array) else {
         return vec![];
@@ -1074,12 +1274,16 @@ fn content_parts(u: &Value, root: &Path, diagnostics: &mut Vec<Fact>) -> Vec<Par
                     ));
                 }
             }
-            Some("diff") => out.push(diff(
-                c.get("path").and_then(Value::as_str).unwrap_or(""),
-                root,
-                c.get("oldText").and_then(Value::as_str),
-                c.get("newText").and_then(Value::as_str).unwrap_or(""),
-            )),
+            Some("diff") => {
+                let outcome = diff(
+                    c.get("path").and_then(Value::as_str).unwrap_or(""),
+                    root,
+                    c.get("oldText").and_then(Value::as_str),
+                    c.get("newText").and_then(Value::as_str).unwrap_or(""),
+                );
+                record_diff_diagnostics(&outcome, "tool", diagnostics);
+                out.push(outcome.part);
+            }
             // ACP terminal reference (`{type: "terminal", terminalId: ...}`): output streams via
             // `_meta.terminal_output_delta` / `_meta.terminal_output`, not inline content blocks.
             Some("terminal") => {}
@@ -1256,7 +1460,6 @@ fn tool_fact(
         .flatten()
         .filter(|c| c.get("type").and_then(Value::as_str) == Some("diff"))
         .collect();
-    diagnose_tool_diffs(&raw, input, &diffs, &mut diagnostics);
     if title.chars().count() > 200 {
         diagnostics.push(diagnostic("truncated", "tool title preview"));
     }
@@ -1422,7 +1625,7 @@ fn tool_result(
             text: text.to_string(),
         }]
     } else {
-        input_diffs(input, root)
+        input_diffs(input, root, diagnostics)
     }
 }
 
@@ -1455,42 +1658,6 @@ fn tool_error(raw: &Value, phase: ToolPhase, terminal_output: Option<&str>) -> O
     raw.pointer("/_meta/terminal_exit/exit_code")
         .and_then(Value::as_i64)
         .map(|code| format!("exit code {code}"))
-}
-
-fn diagnose_tool_diffs(raw: &Value, input: &Value, diffs: &[&Value], diagnostics: &mut Vec<Fact>) {
-    for d in diffs {
-        for key in ["oldText", "newText"] {
-            if d.get(key)
-                .and_then(Value::as_str)
-                .is_some_and(diff_truncated)
-            {
-                diagnostics.push(diagnostic("truncated", "tool diff preview"));
-            }
-        }
-    }
-    if !raw.get("content").is_some_and(Value::is_array) && raw.get("rawOutput").is_none() {
-        let truncated = if let Some(edits) = input.get("edits").and_then(Value::as_array) {
-            ["old_string", "new_string"].iter().any(|key| {
-                let texts: Vec<&str> = edits
-                    .iter()
-                    .filter_map(|e| e.get(*key).and_then(Value::as_str))
-                    .collect();
-                diff_truncated(&texts.join("\n⋯\n"))
-            })
-        } else {
-            ["old_string", "new_string", "content"]
-                .iter()
-                .filter_map(|key| input.get(*key).and_then(Value::as_str))
-                .any(diff_truncated)
-        };
-        if truncated {
-            diagnostics.push(diagnostic("truncated", "input diff preview"));
-        }
-    }
-}
-
-fn diff_truncated(s: &str) -> bool {
-    s.lines().count() > DIFF_LINES || s.chars().count() > TEXT_MAX
 }
 
 /// Used by tests and drivers that need a digest of something ACP-specific without exposing it.
@@ -1610,10 +1777,601 @@ mod tests {
         };
         assert_eq!(tool.target.as_deref(), Some("src/a.rs"));
         assert!(
-            matches!(&tool.result[0], Part::Diff { path, added: 3, removed: 2, .. } if path == "src/a.rs")
+            matches!(&tool.result[0], Part::Diff { path, old: None, new, added: 1, removed: 0 } if path == "src/a.rs" && new == "z")
         );
         // outside the workspace a path is shown as it is
         assert_eq!(shown("/etc/hosts", Path::new("/work/proj")), "/etc/hosts");
+    }
+
+    #[test]
+    fn large_file_single_line_edit_after_line_60_counts_and_previews_changed_line() {
+        let mut n = n();
+        let old_lines: Vec<String> = (1..=200).map(|i| format!("line {i}")).collect();
+        let mut new_lines = old_lines.clone();
+        new_lines[149] = "line 150 edited".into();
+        let fs = n.update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "big1",
+            "kind": "edit",
+            "status": "completed",
+            "content": [{
+                "type": "diff",
+                "path": "/work/proj/src/big.rs",
+                "oldText": old_lines.join("\n"),
+                "newText": new_lines.join("\n"),
+            }]
+        }));
+        assert!(!fs.iter().any(
+            |f| matches!(f, Fact::Event(EventBody::Diagnostic { code, .. }) if code == "truncated")
+        ));
+        let evs = events(fs);
+        let EventBody::ToolChanged { tool } = &evs[0] else {
+            panic!("{evs:?}");
+        };
+        assert_eq!(
+            tool.result,
+            vec![Part::Diff {
+                path: "src/big.rs".into(),
+                old: Some("line 150".into()),
+                new: "line 150 edited".into(),
+                added: 1,
+                removed: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn multi_hunk_diff_and_overflow_preview_bounds() {
+        let mut n = n();
+        let old_lines: Vec<String> = (1..=200).map(|i| format!("line {i}")).collect();
+        let mut new_lines = old_lines.clone();
+        new_lines[4] = "line 5 edited".into();
+        new_lines[119] = "line 120 edited".into();
+        new_lines.insert(180, "inserted after 180".into());
+        let fs = n.update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "mh1",
+            "kind": "edit",
+            "status": "completed",
+            "content": [{
+                "type": "diff",
+                "path": "/work/proj/src/mh.rs",
+                "oldText": old_lines.join("\n"),
+                "newText": new_lines.join("\n"),
+            }]
+        }));
+        assert!(!fs.iter().any(
+            |f| matches!(f, Fact::Event(EventBody::Diagnostic { code, .. }) if code == "truncated")
+        ));
+        let evs = events(fs);
+        let EventBody::ToolChanged { tool } = &evs[0] else {
+            panic!("{evs:?}");
+        };
+        assert_eq!(
+            tool.result,
+            vec![Part::Diff {
+                path: "src/mh.rs".into(),
+                old: Some("line 5\nline 120".into()),
+                new: "line 5 edited\nline 120 edited\ninserted after 180".into(),
+                added: 3,
+                removed: 2,
+            }]
+        );
+
+        let mut big_new: Vec<String> = (1..=150).map(|i| format!("line {i}")).collect();
+        let inserted: Vec<String> = (1..=75).map(|i| format!("added {i}")).collect();
+        big_new.splice(100..100, inserted.clone());
+        let old_150: Vec<String> = (1..=150).map(|i| format!("line {i}")).collect();
+        let fs = n.update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "mh2",
+            "kind": "edit",
+            "status": "completed",
+            "content": [{
+                "type": "diff",
+                "path": "/work/proj/src/big_insert.rs",
+                "oldText": old_150.join("\n"),
+                "newText": big_new.join("\n"),
+            }]
+        }));
+        assert!(fs.iter().any(|f| matches!(
+            f,
+            Fact::Event(EventBody::Diagnostic { code, safe_text, .. })
+                if code == "truncated" && safe_text == "tool diff preview"
+        )));
+        let evs = events(fs);
+        let EventBody::ToolChanged { tool } = &evs[0] else {
+            panic!("{evs:?}");
+        };
+        let mut expected_new = inserted[..DIFF_LINES].to_vec();
+        expected_new.push("…".into());
+        assert_eq!(
+            tool.result,
+            vec![Part::Diff {
+                path: "src/big_insert.rs".into(),
+                old: None,
+                new: expected_new.join("\n"),
+                added: 75,
+                removed: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn diff_handles_new_file_full_deletion_and_noop() {
+        let mut n = n();
+        let cases = [
+            (
+                "new_none",
+                json!({"type": "diff", "path": "/work/proj/new1.rs", "newText": "a\nb\nc"}),
+                Part::Diff {
+                    path: "new1.rs".into(),
+                    old: None,
+                    new: "a\nb\nc".into(),
+                    added: 3,
+                    removed: 0,
+                },
+            ),
+            (
+                "new_empty",
+                json!({"type": "diff", "path": "/work/proj/new2.rs", "oldText": "", "newText": "a\nb"}),
+                Part::Diff {
+                    path: "new2.rs".into(),
+                    old: None,
+                    new: "a\nb".into(),
+                    added: 2,
+                    removed: 0,
+                },
+            ),
+            (
+                "full_del",
+                json!({"type": "diff", "path": "/work/proj/del.rs", "oldText": "x\ny\nz", "newText": ""}),
+                Part::Diff {
+                    path: "del.rs".into(),
+                    old: Some("x\ny\nz".into()),
+                    new: "".into(),
+                    added: 0,
+                    removed: 3,
+                },
+            ),
+            (
+                "noop",
+                json!({"type": "diff", "path": "/work/proj/noop.rs", "oldText": "same\ntext", "newText": "same\ntext"}),
+                Part::Diff {
+                    path: "noop.rs".into(),
+                    old: None,
+                    new: "".into(),
+                    added: 0,
+                    removed: 0,
+                },
+            ),
+        ];
+        for (id, item, expected) in cases {
+            let evs = events(n.update(&json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": id,
+                "kind": "edit",
+                "status": "completed",
+                "content": [item],
+            })));
+            let EventBody::ToolChanged { tool } = &evs[0] else {
+                panic!("{evs:?}");
+            };
+            assert_eq!(tool.result, vec![expected], "case {id}");
+        }
+    }
+
+    #[test]
+    fn multiedit_sums_line_diffs_without_separator_pollution() {
+        let mut n = n();
+        let fs = n.update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "me1",
+            "kind": "edit",
+            "status": "pending",
+            "title": "MultiEdit src/lib.rs",
+            "rawInput": {
+                "file_path": "/work/proj/src/lib.rs",
+                "edits": [
+                    {"old_string": "a\nb", "new_string": "a\nb\nc"},
+                    {"old_string": "keep\nold", "new_string": "keep\nnew"},
+                    {"old_string": "unchanged", "new_string": "unchanged"},
+                ]
+            },
+            "_meta": {"claudeCode": {"toolName": "MultiEdit"}}
+        }));
+        assert!(!fs.iter().any(
+            |f| matches!(f, Fact::Event(EventBody::Diagnostic { code, .. }) if code == "truncated")
+        ));
+        let evs = events(fs);
+        let EventBody::ToolChanged { tool } = &evs[0] else {
+            panic!("{evs:?}");
+        };
+        assert_eq!(
+            tool.result,
+            vec![Part::Diff {
+                path: "src/lib.rs".into(),
+                old: Some("old".into()),
+                new: "c\nnew".into(),
+                added: 2,
+                removed: 1,
+            }]
+        );
+
+        let many: Vec<String> = (1..=65).map(|i| format!("ins {i}")).collect();
+        let fs_trunc = n.update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "me_trunc",
+            "kind": "edit",
+            "status": "pending",
+            "rawInput": {
+                "file_path": "/work/proj/src/big_me.rs",
+                "edits": [
+                    {"old_string": "base", "new_string": format!("base\n{}", many[..30].join("\n"))},
+                    {"old_string": "tail", "new_string": format!("tail\n{}", many[30..].join("\n"))},
+                ]
+            },
+            "_meta": {"claudeCode": {"toolName": "MultiEdit"}}
+        }));
+        assert!(fs_trunc.iter().any(|f| matches!(
+            f,
+            Fact::Event(EventBody::Diagnostic { code, safe_text, .. })
+                if code == "truncated" && safe_text == "input diff preview"
+        )));
+        let evs_trunc = events(fs_trunc);
+        let EventBody::ToolChanged { tool: trunc_tool } = &evs_trunc[0] else {
+            panic!("{evs_trunc:?}");
+        };
+        let mut expected_preview = many[..DIFF_LINES].to_vec();
+        expected_preview.push("…".into());
+        assert_eq!(
+            trunc_tool.result,
+            vec![Part::Diff {
+                path: "src/big_me.rs".into(),
+                old: None,
+                new: expected_preview.join("\n"),
+                added: 65,
+                removed: 0,
+            }]
+        );
+
+        let empty = events(n.update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "me_empty",
+            "kind": "edit",
+            "status": "pending",
+            "rawInput": {
+                "file_path": "/work/proj/src/empty.rs",
+                "edits": []
+            },
+            "_meta": {"claudeCode": {"toolName": "MultiEdit"}}
+        })));
+        let EventBody::ToolChanged { tool: empty_tool } = &empty[0] else {
+            panic!("{empty:?}");
+        };
+        assert!(empty_tool.result.is_empty());
+    }
+
+    #[test]
+    fn large_generated_file_diff_is_bounded_and_valid() {
+        let mut n = n();
+        let prefix: Vec<String> = (0..50).map(|i| format!("// prefix line {i}")).collect();
+        let suffix: Vec<String> = (0..50).map(|i| format!("// suffix line {i}")).collect();
+        let old_mid_len = 5_000usize;
+        let new_mid_len = 5_120usize;
+        let old_mid: Vec<String> = (0..old_mid_len)
+            .map(|i| {
+                if i % 4 == 0 {
+                    "pub struct GeneratedField {".to_string()
+                } else {
+                    format!("    pub old_field_{i}: u64,")
+                }
+            })
+            .collect();
+        let new_mid: Vec<String> = (0..new_mid_len)
+            .map(|i| {
+                if i % 5 == 0 {
+                    "pub struct GeneratedField {".to_string()
+                } else {
+                    format!("    pub new_field_{i}: u64,")
+                }
+            })
+            .collect();
+
+        let old_lines: Vec<String> = prefix
+            .iter()
+            .chain(old_mid.iter())
+            .chain(suffix.iter())
+            .cloned()
+            .collect();
+        let new_lines: Vec<String> = prefix
+            .iter()
+            .chain(new_mid.iter())
+            .chain(suffix.iter())
+            .cloned()
+            .collect();
+        let old_text = old_lines.join("\n");
+        let new_text = new_lines.join("\n");
+
+        let started = Instant::now();
+        let fs = n.update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "large_gen_tool",
+            "kind": "edit",
+            "status": "completed",
+            "content": [{
+                "type": "diff",
+                "path": "/work/proj/src/generated.rs",
+                "oldText": old_text,
+                "newText": new_text,
+            }]
+        }));
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "large generated diff took too long: {:?}",
+            started.elapsed()
+        );
+        assert!(fs.iter().any(|f| matches!(
+            f,
+            Fact::Event(EventBody::Diagnostic { code, safe_text, .. })
+                if code == "truncated" && safe_text == "tool diff preview"
+        )));
+        for f in &fs {
+            if let Fact::Event(EventBody::Diagnostic {
+                severity,
+                code,
+                safe_text,
+                ..
+            }) = f
+                && code == "diff_timeout"
+            {
+                assert_eq!(*severity, Severity::Info);
+                assert_eq!(
+                    safe_text,
+                    "tool diff timed out; line counts may be overestimated"
+                );
+            }
+        }
+        let evs = events(fs);
+        let EventBody::ToolChanged { tool } = &evs[0] else {
+            panic!("{evs:?}");
+        };
+        let [
+            Part::Diff {
+                path,
+                old: Some(old_preview),
+                new: new_preview,
+                added,
+                removed,
+            },
+        ] = tool.result.as_slice()
+        else {
+            panic!("{:?}", tool.result);
+        };
+        assert_eq!(path, "src/generated.rs");
+        assert!(*added > 0 && *removed > 0);
+        assert!((*removed as usize) <= old_mid_len);
+        assert!((*added as usize) <= new_mid_len);
+        assert_eq!(
+            (*added as isize) - (*removed as isize),
+            (new_lines.len() as isize) - (old_lines.len() as isize)
+        );
+        assert!(old_preview.lines().count() <= DIFF_LINES + 1);
+        assert!(new_preview.lines().count() <= DIFF_LINES + 1);
+        assert!(old_preview.chars().count() <= TEXT_MAX + 1);
+        assert!(new_preview.chars().count() <= TEXT_MAX + 1);
+        assert!(old_preview.ends_with('…'));
+        assert!(new_preview.ends_with('…'));
+
+        let started_input = Instant::now();
+        let fs_input = n.update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "large_gen_input",
+            "kind": "edit",
+            "status": "pending",
+            "rawInput": {
+                "file_path": "/work/proj/src/generated_input.rs",
+                "old_string": old_text,
+                "new_string": new_text,
+            },
+            "_meta": {"claudeCode": {"toolName": "Edit"}}
+        }));
+        assert!(
+            started_input.elapsed() < Duration::from_secs(5),
+            "large input diff took too long: {:?}",
+            started_input.elapsed()
+        );
+        assert!(fs_input.iter().any(|f| matches!(
+            f,
+            Fact::Event(EventBody::Diagnostic { code, safe_text, .. })
+                if code == "truncated" && safe_text == "input diff preview"
+        )));
+        for f in &fs_input {
+            if let Fact::Event(EventBody::Diagnostic {
+                severity,
+                code,
+                safe_text,
+                ..
+            }) = f
+                && code == "diff_timeout"
+            {
+                assert_eq!(*severity, Severity::Info);
+                assert_eq!(
+                    safe_text,
+                    "input diff timed out; line counts may be overestimated"
+                );
+            }
+        }
+        let evs_input = events(fs_input);
+        let EventBody::ToolChanged { tool: input_tool } = &evs_input[0] else {
+            panic!("{evs_input:?}");
+        };
+        let [
+            Part::Diff {
+                path: input_path,
+                old: Some(_),
+                added: input_added,
+                removed: input_removed,
+                ..
+            },
+        ] = input_tool.result.as_slice()
+        else {
+            panic!("{:?}", input_tool.result);
+        };
+        assert_eq!(input_path, "src/generated_input.rs");
+        assert_eq!(
+            (*input_added as isize) - (*input_removed as isize),
+            (new_lines.len() as isize) - (old_lines.len() as isize)
+        );
+    }
+
+    #[test]
+    fn diff_timeout_emits_diagnostic_and_keeps_valid_counts_and_bounded_preview() {
+        let expired = Instant::now()
+            .checked_sub(Duration::from_secs(1))
+            .unwrap_or_else(|| {
+                let t = Instant::now();
+                std::thread::sleep(Duration::from_millis(1));
+                t
+            });
+        let root = Path::new("/work/proj");
+
+        let prefix: Vec<String> = (0..50).map(|i| format!("prefix {i}")).collect();
+        let suffix: Vec<String> = (0..50).map(|i| format!("suffix {i}")).collect();
+        let mut old_mid: Vec<String> = (0..3_900).map(|i| format!("interior {i}")).collect();
+        let mut new_mid = old_mid.clone();
+        old_mid[0] = "old start".into();
+        new_mid[0] = "new start".into();
+        old_mid[3_899] = "old end".into();
+        new_mid[3_899] = "new end".into();
+        let old = prefix
+            .iter()
+            .chain(old_mid.iter())
+            .chain(suffix.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+        let new = prefix
+            .iter()
+            .chain(new_mid.iter())
+            .chain(suffix.iter())
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        let outcome = diff_with_deadline(
+            "/work/proj/src/gen.rs",
+            root,
+            Some(&old),
+            &new,
+            Some(expired),
+        );
+        assert!(outcome.timed_out);
+        assert!(outcome.truncated);
+        let mut diagnostics = Vec::new();
+        record_diff_diagnostics(&outcome, "tool", &mut diagnostics);
+        assert!(diagnostics.iter().any(|f| matches!(
+            f,
+            Fact::Event(EventBody::Diagnostic {
+                severity: Severity::Info,
+                code,
+                safe_text,
+                ..
+            }) if code == "truncated" && safe_text == "tool diff preview"
+        )));
+        assert!(diagnostics.iter().any(|f| matches!(
+            f,
+            Fact::Event(EventBody::Diagnostic {
+                severity: Severity::Info,
+                code,
+                safe_text,
+                ..
+            }) if code == "diff_timeout"
+                && safe_text == "tool diff timed out; line counts may be overestimated"
+        )));
+        let Part::Diff {
+            path,
+            old: Some(old_preview),
+            new: new_preview,
+            added,
+            removed,
+        } = outcome.part
+        else {
+            panic!("expected Part::Diff");
+        };
+        assert_eq!(path, "src/gen.rs");
+        assert_eq!(added, 3_900);
+        assert_eq!(removed, 3_900);
+        assert_eq!(old_preview.lines().count(), DIFF_LINES + 1);
+        assert_eq!(new_preview.lines().count(), DIFF_LINES + 1);
+        assert!(old_preview.ends_with("…"));
+        assert!(new_preview.ends_with("…"));
+
+        // MultiEdit accumulates counts across pairs and emits a single diff_timeout diagnostic.
+        let make_pair = |tag: &str| {
+            let mut a: Vec<String> = (0..100).map(|i| format!("{tag} line {i}")).collect();
+            let mut b = a.clone();
+            a[0] = format!("{tag} old head");
+            b[0] = format!("{tag} new head");
+            a[99] = format!("{tag} old tail");
+            b[99] = format!("{tag} new tail");
+            (a.join("\n"), b.join("\n"))
+        };
+        let (a1, b1) = make_pair("first");
+        let (a2, b2) = make_pair("second");
+        let mut acc = DiffAccumulator::with_deadline(Some(expired));
+        acc.push_pair(Some(&a1), &b1);
+        acc.push_pair(Some(&a2), &b2);
+        let me_outcome = acc.finish("/work/proj/src/multi_gen.rs", root);
+        assert!(me_outcome.timed_out);
+        assert!(me_outcome.truncated);
+        let mut me_diags = Vec::new();
+        record_diff_diagnostics(&me_outcome, "input", &mut me_diags);
+        assert_eq!(
+            me_diags
+                .iter()
+                .filter(|f| matches!(
+                    f,
+                    Fact::Event(EventBody::Diagnostic { code, .. }) if code == "diff_timeout"
+                ))
+                .count(),
+            1
+        );
+        assert!(me_diags.iter().any(|f| matches!(
+            f,
+            Fact::Event(EventBody::Diagnostic {
+                severity: Severity::Info,
+                code,
+                safe_text,
+                ..
+            }) if code == "diff_timeout"
+                && safe_text == "input diff timed out; line counts may be overestimated"
+        )));
+        assert!(matches!(
+            me_outcome.part,
+            Part::Diff {
+                added: 200,
+                removed: 200,
+                ..
+            }
+        ));
+
+        // Pure insert/delete/no-op fast paths never run Myers and must not falsely report timeout.
+        for (old_s, new_s, exp_add, exp_rem) in [
+            (None, "a\nb", 2, 0),
+            (Some("a\nb"), "", 0, 2),
+            (Some("same\nlines"), "same\nlines", 0, 0),
+            (Some("head\nmid\ntail"), "head\ntail", 0, 1),
+            (Some("head\ntail"), "head\nmid\ntail", 1, 0),
+        ] {
+            let fast =
+                diff_with_deadline("/work/proj/src/fast.rs", root, old_s, new_s, Some(expired));
+            assert!(!fast.timed_out);
+            assert!(matches!(
+                fast.part,
+                Part::Diff { added, removed, .. } if added == exp_add && removed == exp_rem
+            ));
+        }
     }
 
     #[test]
