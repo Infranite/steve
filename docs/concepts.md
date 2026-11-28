@@ -1,3 +1,12 @@
+<p>
+  <a href="../README.md">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/brand/steve-logo-horizontal-dark.svg">
+      <img src="assets/brand/steve-logo-horizontal-light.svg" alt="Steve" height="36">
+    </picture>
+  </a>
+</p>
+
 # Core Concepts
 
 This guide explains the domain model behind Steve: how conversations become tracked work, how decisions are consolidated, how harnesses are governed without rewriting their settings, and where boundaries sit.

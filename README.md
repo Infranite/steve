@@ -1,8 +1,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/banner-en-dark.svg">
-  <img src="docs/assets/art/banner-en.svg" alt="Steve — Say it once. It gets done." width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/steve-logo-horizontal-dark.svg">
+  <img src="docs/assets/brand/steve-logo-horizontal-light.svg" alt="Steve" height="76">
 </picture>
 
 <p><strong>Say it once. It gets done.</strong><br/>A self-hosted workspace that coordinates coding agents across worktrees, tools, and machines — with one inbox for every human decision.</p>

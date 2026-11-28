@@ -176,6 +176,8 @@ export default {
   },
   /* Settings · 关于: versions and upgrades (version.tsx) */
   version: {
+    tagline: "一句话交代，交付回来。",
+    taglineSub: "自托管的智能体协作工作台",
     fetching: "正在获取…",
     copyAria: "复制{{label}}",
     copiedValue: "已复制 {{value}}",

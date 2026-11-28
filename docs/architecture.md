@@ -1,3 +1,12 @@
+<p>
+  <a href="../README.md">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="assets/brand/steve-logo-horizontal-dark.svg">
+      <img src="assets/brand/steve-logo-horizontal-light.svg" alt="Steve" height="36">
+    </picture>
+  </a>
+</p>
+
 # Architecture
 
 Steve is a self-hosted workspace for running coding agents across one or more machines. It separates **decision-making and state** (Hub), **agent execution** (Node), and **presentation** (Web and native Apple clients) behind typed contracts.

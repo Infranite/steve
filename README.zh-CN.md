@@ -1,8 +1,8 @@
 <div align="center">
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/art/banner-zh-dark.svg">
-  <img src="docs/assets/art/banner-zh.svg" alt="Steve — 一句话交代，交付回来。" width="100%">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/brand/steve-logo-horizontal-dark.svg">
+  <img src="docs/assets/brand/steve-logo-horizontal-light.svg" alt="Steve" height="76">
 </picture>
 
 <p><strong>一句话交代，交付回来。</strong><br/>自托管的智能体协作工作台：跨工作树、工具与多台机器协调编码智能体，所有需要你拍板的事集中在一处。</p>

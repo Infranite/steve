@@ -178,6 +178,8 @@ export default {
     },
   },
   version: {
+    tagline: "Say it once. It gets done.",
+    taglineSub: "Self-hosted workspace for coding agents",
     fetching: "Fetching…",
     copyAria: "Copy {{label}}",
     copiedValue: "Copied {{value}}",
