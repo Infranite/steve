@@ -1,0 +1,37 @@
+name: Auto-merge
+# Turns on GitHub's auto-merge for a pull request opened by an allowed author, so it merges (merge
+# commit) by itself once the branch rules' required checks, `CI gate` and `PR description`, pass.
+# - Allowed authors are the repository variable AUTO_MERGE_AUTHORS, a JSON array of GitHub logins.
+#   Unset or empty, no pull request qualifies.
+# - Pull requests from forks never qualify, and a draft waits until it is marked ready for review.
+# - The repository secret AUTO_MERGE_TOKEN turns auto-merge on: a fine-grained token for this
+#   repository with Contents and Pull requests read/write. Not `GITHUB_TOKEN`: a merge made with it
+#   would not start the push run on `main` that `cut` needs before it releases a commit.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, ready_for_review]
+permissions: {}
+concurrency:
+  group: auto-merge-${{ github.event.pull_request.number }}
+  cancel-in-progress: false
+jobs:
+  enable:
+    name: Enable auto-merge
+    if: >-
+      !github.event.pull_request.draft &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(fromJSON(vars.AUTO_MERGE_AUTHORS || '[]'), github.event.pull_request.user.login)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    steps:
+      - name: Enable auto-merge (merge commit)
+        env:
+          GH_TOKEN: ${{ secrets.AUTO_MERGE_TOKEN }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::AUTO_MERGE_TOKEN is not set; auto-merge stays off for $PR_URL"
+            exit 1
+          fi
+          gh pr merge --auto --merge "$PR_URL"
