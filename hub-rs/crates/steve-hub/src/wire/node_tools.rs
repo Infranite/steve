@@ -375,7 +375,7 @@ impl NodeTools {
         self.service
             .get()
             .cloned()
-            .ok_or_else(|| Error::new(Code::Unavailable, "tool service not ready"))
+            .ok_or_else(|| Error::later(Code::Unavailable, "tool service not ready"))
     }
     async fn catalog_of(service: &dyn Service, caller: &Caller) -> ApiResult<Catalog> {
         let tools = match caller {
@@ -454,7 +454,7 @@ impl HubTools for NodeTools {
             return Ok(r);
         }
         let permit = self.permits.clone().try_acquire_owned().map_err(|_| {
-            Error::new(
+            Error::later(
                 Code::Exhausted,
                 "too many Steve tool calls running for this Node",
             )

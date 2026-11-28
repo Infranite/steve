@@ -18,7 +18,7 @@ pub struct Sink(pub std::sync::Weak<NodeRuntime>);
 impl EventSink for Sink {
     async fn commit(&self, batch: EventBatch) -> ApiResult<EventAck> {
         let Some(rt) = self.0.upgrade() else {
-            return Err(Error::new(Code::Unavailable, "the hub is gone"));
+            return Err(Error::later(Code::Unavailable, "the hub is gone"));
         };
         tokio::task::spawn_blocking(move || {
             rt.receive(&batch)

@@ -52,13 +52,13 @@ pub struct NodeFleet {
     cost_caps: Mutex<crate::wire::node_runtime::CostCaps>,
 }
 
-/// Events of a Node no coordinator runs for yet: refused `offline`, so they stay in its journal.
+/// Events of a Node no coordinator runs for yet: refused `unavailable`, so they stay in its journal.
 struct NoRuntime;
 
 #[async_trait]
 impl EventSink for NoRuntime {
     async fn commit(&self, _: EventBatch) -> ApiResult<EventAck> {
-        Err(Error::new(
+        Err(Error::later(
             Code::Unavailable,
             "no coordinator for this node yet",
         ))
@@ -340,7 +340,7 @@ impl NodeFleet {
                 }
                 // the Hub has not finished starting: refused for now, the Node calls again
                 None => {
-                    return Arc::new(NoTools(Error::new(
+                    return Arc::new(NoTools(Error::later(
                         Code::Unavailable,
                         "the Hub's tools are not ready yet",
                     )));

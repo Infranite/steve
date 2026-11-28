@@ -70,7 +70,7 @@ Communication between Hub and Node uses `steve-node-api` (`PROTOCOL = 17`, `EVEN
 - **Typed ports**:
   - Hub → Node: `SessionExecutor` (including per-subtask `cancel_subtask`), `JobExecutor` (`Think` / `Research`), `ExecutionControl` (`operation`, `cancel`, `abandon`, `recover`, `resolve_permission`, `snapshot`, `streams`, `replay`, `acknowledge`), `WorkspaceExecutor` (execution-scoped file/delivery reads), and `Discovery` (capability probes, capacity limits, vitals, harness install/updates, self-upgrade, removal).
   - Node → Hub: `EventSink`, `HubTools`, `HubFiles` (including inline reply image capture before worktree cleanup), and `HubSecrets` (one-shot short-lived secret fetch by operation ID; never journaled or logged).
-- **Non-retrying failure semantics**: The transport never retries blindly. A failure before transmission returns `offline`; a drop or timeout after transmission returns `outcome_unknown`, and the Hub reconciles against the Node's local execution journal once reconnected.
+- **Non-retrying failure semantics**: The transport never retries blindly. A failure before transmission returns `unavailable` (retry: `later`); a drop or timeout after transmission returns `outcome_unknown`, and the Hub reconciles against the Node's local execution journal once reconnected.
 - **Version-independent upgrades**: A permanent `upgrade_v1` control channel stays reachable even across protocol version mismatches so outdated Nodes can still be upgraded from the Hub.
 
 ## Storage contract and read-side projections

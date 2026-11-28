@@ -2476,10 +2476,85 @@ async fn journal_budget_stops_running_work_and_reserves_terminal_space() {
         .await,
         Err(Error {
             code: Code::Exhausted,
+            retry: Retry::Later { after_ms: None },
             ..
         })
     ));
     n.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unacked_event_quota_and_busy_workspace_refuse_with_retry_later() {
+    let t = T::new(&[]);
+    let mut cfg = t.config();
+    cfg.capacity.jobs = 1;
+    cfg.storage.quota = 512 * 1024;
+    let n = LocalNode::open(cfg).unwrap();
+    n.connect(t.sink.clone(), None);
+    ready(&n, "s_1").await;
+    all_acknowledged(&n).await;
+
+    // Seed unacked events exceeding storage.quota while cached live journal pages remain below limit.
+    {
+        let db = rusqlite::Connection::open(t.home.join("node.sqlite3")).unwrap();
+        db.execute(
+            "INSERT INTO events(stream, seq, event) VALUES ('quota_stream', 1, CAST(zeroblob(600000) AS TEXT))",
+            [],
+        )
+        .unwrap();
+    }
+
+    let e = n
+        .start_turn(now_cmd("op_t_quota", turn("s_1", "t_q", "a_q", "hello")))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.retry, e.safe_detail.as_str()),
+        (
+            Code::Exhausted,
+            Retry::Later { after_ms: None },
+            "the hub has not taken this node's events: no new work until it does"
+        )
+    );
+
+    let mut job_spec = steve_node_api::testkit::build::job("j_q", "ja_q", "hello");
+    job_spec.run.limits.deadline = Timestamp(i64::MAX / 2);
+    let e = n
+        .start_job(now_cmd("op_j_quota", job_spec))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.retry, e.safe_detail.as_str()),
+        (
+            Code::Exhausted,
+            Retry::Later { after_ms: None },
+            "the hub has not taken this node's events: no new work until it does"
+        )
+    );
+    n.shutdown().await;
+
+    // A workspace reservation refuses concurrent operations with Retry::Later so Hub retries.
+    let t2 = T::new(&[]);
+    let n2 = t2.node();
+    n2.prepare_workspace(now_cmd("op_prep", prepare_proj()))
+        .await
+        .unwrap();
+    assert!(ok(&finished(&n2, "op_prep").await));
+    let db = rusqlite::Connection::open(t2.home.join("node.sqlite3")).unwrap();
+    db.execute(
+        "INSERT INTO reservations(key, op) VALUES ('item:x', 'op_res')",
+        [],
+    )
+    .unwrap();
+    let e = n2
+        .open_session(now_cmd("op_open_busy", open_body("s_busy")))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (e.code, e.retry),
+        (Code::Busy, Retry::Later { after_ms: None })
+    );
+    n2.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2947,7 +3022,10 @@ fn spec_ops(db: &rusqlite::Connection) -> Vec<String> {
 }
 
 fn exhausted<T: std::fmt::Debug>(r: &ApiResult<T>) -> bool {
-    matches!(r, Err(e) if e.code == Code::Exhausted)
+    matches!(
+        r,
+        Err(e) if e.code == Code::Exhausted && e.retry == Retry::Later { after_ms: None }
+    )
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -297,8 +297,8 @@ async fn a_hub_without_secrets_answers_unsupported() {
 }
 
 /// A `secret.take` whose answer is lost after the Hub got it may have used the secret up: the
-/// command that needed it fails for good (`stale`, no retry) instead of telling the Hub to resend
-/// it into a second take. One never written is `offline` and may be resent as is.
+/// command that needed it fails for good (`outcome_unknown`, no retry) instead of telling the Hub
+/// to resend it into a second take. One never written is `unavailable` and may be resent as is.
 #[tokio::test]
 async fn a_lost_secret_take_is_never_retried_as_the_same_operation() {
     let fake = FakeNode::new("n1");
@@ -639,6 +639,7 @@ async fn an_answer_of_a_newer_kind_is_uncertain_not_unsupported() {
         e.params.0["operation"],
         OperationId::new("op_a").unwrap().to_string().into()
     );
+    assert_eq!(e.params.0["state"], "unknown".into());
     // a read ran nothing: invalid, and never unsupported either
     let e = remote
         .git_facts(GitQuery {

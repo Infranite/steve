@@ -583,6 +583,27 @@ async fn an_exhausted_node_backs_off_tells_the_session_once_and_runs_the_same_co
 }
 
 #[tokio::test]
+async fn an_exhausted_refusal_with_retry_never_rejects_immediately() {
+    let h = hub();
+    h.node.refuse(
+        "start_turn",
+        Some(Error::new(Code::Exhausted, "permanent exhausted fixture")),
+    );
+    h.bind();
+    h.rt.prompt(S, "hello", "user", &[]).unwrap();
+    eventually_sync("rejected", || {
+        node_checks::command_state_by_method(&h.store, "start_turn").is_ok_and(|s| s == "rejected")
+            && !h.ends().is_empty()
+    })
+    .await;
+    assert_eq!(h.commands("start_turn"), 1);
+    assert!(matches!(
+        h.ends().as_slice(),
+        [(_, reason, _)] if reason == "error"
+    ));
+}
+
+#[tokio::test]
 async fn steves_lead_goes_first_once_and_attachments_go_by_hash() {
     let h = hub();
     steve_store::testkit::hub::node_fixtures::seed_files(&h.store, &"a".repeat(64)).unwrap();

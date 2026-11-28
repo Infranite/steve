@@ -87,7 +87,7 @@ impl LocalNode {
         let jobs = self.0.cfg.capacity.jobs;
         let (r, fresh) = self.accept("start_job", &c, |t| {
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
-                return Err(Error::new(
+                return Err(Error::later(
                     Code::Exhausted,
                     "the hub has not taken this node's events: no new work until it does",
                 ));

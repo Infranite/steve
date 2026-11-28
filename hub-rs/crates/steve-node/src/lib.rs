@@ -2194,7 +2194,7 @@ impl LocalNode {
     /// The workspace is not being prepared or tidied by another operation.
     fn workspace_free(t: &Tx, resource: &str) -> ApiResult<()> {
         if t.reservation(resource)?.is_some() {
-            return Err(Error::new(
+            return Err(Error::later(
                 Code::Busy,
                 "the workspace is being prepared or tidied",
             ));
@@ -2807,7 +2807,7 @@ impl SessionExecutor for LocalNode {
             Self::check_limits(&tu.run.limits)?;
             Self::idle(t, &tu.session)?;
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
-                return Err(Error::new(
+                return Err(Error::later(
                     Code::Exhausted,
                     "the hub has not taken this node's events: no new work until it does",
                 ));
@@ -2949,7 +2949,7 @@ impl JobExecutor for LocalNode {
             self.check_harness_policy(&j.run.choice.harness, &j.run.policy)?;
             Self::check_limits(&j.run.limits)?;
             if t.unacked_bytes()? > self.0.cfg.storage.quota {
-                return Err(Error::new(
+                return Err(Error::later(
                     Code::Exhausted,
                     "the hub has not taken this node's events: no new work until it does",
                 ));
@@ -4405,7 +4405,8 @@ impl WorkspaceExecutor for LocalNode {
                 )
             }
             Some(o) if o.method == "scan" => {
-                Err(Error::new(Code::Busy, "still scanning").with_param("operation", s.to_string()))
+                Err(Error::later(Code::Busy, "still scanning")
+                    .with_param("operation", s.to_string()))
             }
             _ => {
                 Err(Error::new(Code::Invalid, "no such scan")

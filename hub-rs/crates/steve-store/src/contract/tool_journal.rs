@@ -73,9 +73,23 @@ impl Journal {
                    'code', CASE json_extract(result,'$.error.code')
                        WHEN 'offline' THEN 'unavailable' WHEN 'denied' THEN 'forbidden'
                        WHEN 'expired' THEN 'stale' WHEN 'downgrade' THEN 'invalid'
-                       ELSE json_extract(result,'$.error.code') END,
-                   'retry',json_object('kind','never'), 'reason',NULL, 'params',json_object(),
-                   'safe_detail',json_extract(result,'$.error.safe_detail')))
+                       WHEN 'busy' THEN 'busy' WHEN 'unsupported' THEN 'unsupported'
+                       WHEN 'stale' THEN 'stale' WHEN 'conflict' THEN 'conflict'
+                       WHEN 'exhausted' THEN 'exhausted' WHEN 'invalid' THEN 'invalid'
+                       WHEN 'outcome_unknown' THEN 'outcome_unknown' WHEN 'gap' THEN 'gap'
+                       WHEN 'unauthenticated' THEN 'unauthenticated' WHEN 'not_found' THEN 'not_found'
+                       WHEN 'too_large' THEN 'too_large' WHEN 'not_configured' THEN 'not_configured'
+                       WHEN 'rate_limited' THEN 'rate_limited' WHEN 'timeout' THEN 'timeout'
+                       WHEN 'incompatible' THEN 'incompatible' WHEN 'internal' THEN 'internal'
+                       ELSE 'internal' END,
+                   'retry',json_object('kind','never'),
+                   'reason',CASE json_extract(result,'$.error.code') WHEN 'downgrade' THEN 'node.downgrade' END,
+                   'params',json_patch(
+                       CASE WHEN json_extract(result,'$.error.operation') IS NULL THEN '{}' ELSE
+                           json_object('operation',json_extract(result,'$.error.operation')) END,
+                       CASE WHEN json_extract(result,'$.error.state') IS NULL THEN '{}' ELSE
+                           json_object('state',json_extract(result,'$.error.state')) END),
+                   'safe_detail',COALESCE(json_extract(result,'$.error.safe_detail'),'')))
                  WHERE json_extract(result,'$.status')='failed'
                    AND json_type(result,'$.error.retry')='text';",
             )
@@ -187,4 +201,155 @@ fn find(db: &Connection, key: &str, digest: Option<&Digest>) -> ApiResult<Option
         None => ToolResult::Unknown { operation },
     };
     Ok(Some(Recorded { name, result }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use steve_node_api::{NodeReason, Retry};
+
+    #[test]
+    fn v1_tool_journal_migrates_legacy_retry_shapes_and_recovers_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("host-tools.sqlite3");
+        {
+            let db = Connection::open(&path).unwrap();
+            db.execute_batch(
+                "CREATE TABLE calls (
+                    key TEXT PRIMARY KEY, digest TEXT NOT NULL, operation TEXT NOT NULL,
+                    node TEXT NOT NULL, session TEXT NOT NULL, workspace TEXT NOT NULL, name TEXT NOT NULL,
+                    catalog TEXT NOT NULL, deadline INTEGER NOT NULL, created INTEGER NOT NULL,
+                    updated INTEGER NOT NULL, state TEXT NOT NULL, result TEXT,
+                    cancel_requested INTEGER NOT NULL DEFAULT 0
+                 );
+                 PRAGMA user_version=1;",
+            )
+            .unwrap();
+            let digest = Digest::sha256(b"d").to_string();
+            let cases = [
+                (
+                    "k_offline",
+                    "op_offline",
+                    "done",
+                    Some(
+                        r#"{"status":"failed","error":{"code":"offline","retry":"same_operation","operation":"op_offline","state":"unknown","safe_detail":"node away"}}"#,
+                    ),
+                ),
+                (
+                    "k_downgrade",
+                    "op_down",
+                    "done",
+                    Some(
+                        r#"{"status":"failed","error":{"code":"downgrade","retry":"never","safe_detail":"older"}}"#,
+                    ),
+                ),
+                (
+                    "k_denied",
+                    "op_den",
+                    "done",
+                    Some(
+                        r#"{"status":"failed","error":{"code":"denied","retry":"after_reconcile","safe_detail":"forbidden"}}"#,
+                    ),
+                ),
+                (
+                    "k_expired",
+                    "op_exp",
+                    "done",
+                    Some(
+                        r#"{"status":"failed","error":{"code":"expired","retry":"never","safe_detail":"late"}}"#,
+                    ),
+                ),
+                (
+                    "k_unknown_code",
+                    "op_unk",
+                    "done",
+                    Some(
+                        r#"{"status":"failed","error":{"code":"mystery","retry":"same_operation","safe_detail":null}}"#,
+                    ),
+                ),
+                ("k_running", "op_run", "running", None),
+            ];
+            for (k, op, state, res) in cases {
+                db.execute(
+                    "INSERT INTO calls(key,digest,operation,node,session,workspace,name,catalog,deadline,created,updated,state,result)
+                     VALUES (?1,?2,?3,'n1','s1','default','tool','cat_1',999,1,1,?4,?5)",
+                    params![k, digest, op, state, res],
+                )
+                .unwrap();
+            }
+        }
+
+        let journal = Journal::open(dir.path()).unwrap();
+
+        let offline = journal.read("k_offline", None).unwrap().unwrap().result;
+        assert_eq!(
+            offline,
+            ToolResult::Failed {
+                error: Error::new(Code::Unavailable, "node away")
+                    .with_param("operation", "op_offline")
+                    .with_param("state", "unknown")
+            }
+        );
+
+        let downgrade = journal.read("k_downgrade", None).unwrap().unwrap().result;
+        assert_eq!(
+            downgrade,
+            ToolResult::Failed {
+                error: NodeReason::downgrade("older")
+            }
+        );
+
+        let denied = journal.read("k_denied", None).unwrap().unwrap().result;
+        assert_eq!(
+            denied,
+            ToolResult::Failed {
+                error: Error::new(Code::Forbidden, "forbidden")
+            }
+        );
+
+        let expired = journal.read("k_expired", None).unwrap().unwrap().result;
+        assert_eq!(
+            expired,
+            ToolResult::Failed {
+                error: Error::new(Code::Stale, "late")
+            }
+        );
+
+        let unknown_code = journal
+            .read("k_unknown_code", None)
+            .unwrap()
+            .unwrap()
+            .result;
+        match unknown_code {
+            ToolResult::Failed { error } => {
+                assert_eq!(error.code, Code::Internal);
+                assert_eq!(error.retry, Retry::Never);
+                assert_eq!(error.safe_detail, "");
+            }
+            other => panic!("expected Failed, got {other:?}"),
+        }
+
+        let running = journal.read("k_running", None).unwrap().unwrap().result;
+        assert_eq!(
+            running,
+            ToolResult::Unknown {
+                operation: OperationId::new("op_run").unwrap(),
+            }
+        );
+
+        drop(journal);
+        let db = Connection::open(&path).unwrap();
+        let version: i64 = db
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, 2);
+        drop(db);
+
+        // Reopening at v2 is idempotent and preserves migrated errors.
+        let journal2 = Journal::open(dir.path()).unwrap();
+        assert_eq!(
+            journal2.read("k_offline", None).unwrap().unwrap().result,
+            offline
+        );
+    }
 }

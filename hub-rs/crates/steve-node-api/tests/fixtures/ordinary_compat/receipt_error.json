@@ -1,0 +1,18 @@
+{
+  "operation": "op_compat_1",
+  "state": {
+    "state": "finished",
+    "outcome": "failed",
+    "error": {
+      "code": "invalid",
+      "retry": {
+        "kind": "never"
+      },
+      "reason": "node.downgrade",
+      "params": {
+        "operation": "op_compat_1"
+      },
+      "safe_detail": "target older than running node"
+    }
+  }
+}

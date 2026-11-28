@@ -183,6 +183,12 @@ fn every_baseline_fixture_deserializes_and_ignores_unknown_fields() {
         ],
         &mut covered,
     );
+    assert_compat::<Error>("error.json", &["", "/retry"], &mut covered);
+    assert_compat::<Receipt>(
+        "receipt_error.json",
+        &["", "/state", "/state/error", "/state/error/retry"],
+        &mut covered,
+    );
     assert_compat::<Command<OpenSession>>(
         "command_open_session.json",
         &["", "/body", "/body/choice", "/body/policy"],

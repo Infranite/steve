@@ -378,7 +378,9 @@ impl NodeRuntime {
                 let limit = self
                     .store
                     .read(|c| rt::session_limit(c, self.node_id.as_str()))
-                    .map_err(|e| Error::new(Code::Unavailable, format!("session capacity: {e}")))?;
+                    .map_err(|e| {
+                        Error::later(Code::Unavailable, format!("session capacity: {e}"))
+                    })?;
                 // Reapply before each start, not once per Hub boot: a separately running Node may
                 // have restarted/reconnected meanwhile. This is resource scheduling, not policy.
                 n.set_session_capacity(limit as u32).await?;
