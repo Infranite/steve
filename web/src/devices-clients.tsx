@@ -89,7 +89,7 @@ export function ClientsTab({ focus }: { focus?: string }) {
             <DRow icon={me ? (() => { const I = ICON[clientKind(me.kind, me.platform)]; return <I /> })() : <GlobeIcon />} data-client-current={me?.id ?? ""}
               title={<><span className="truncate">{me?.name ?? t("devices:clients.browserSession")}</span><Chip tone="info">{t("devices:clients.you")}</Chip></>}
               sub={<>{currentUser?.login && <span className="font-mono" data-login-handle>{t("devices:clients.loginAs", { login: currentUser.login })}</span>}{me ? facts(me, me.version ? <span>{me.version}</span> : null) : v.route ? <span>{t("devices:clients.via", { route: routeLabel(v.route) })}</span> : undefined}</>}>
-              <Button size="sm" variant="outline" onClick={async () => { await api.logout().catch(() => {}); location.reload() }} data-sign-out><LogOutIcon />{t("devices:clients.signOut")}</Button>
+              <Button size="sm" variant="outline" onClick={async () => { await api.logout().catch((e) => console.warn("logout before client reload failed", e)); location.reload() }} data-sign-out><LogOutIcon />{t("devices:clients.signOut")}</Button>
             </DRow>
           </div>
         </DCard>

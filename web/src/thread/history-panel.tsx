@@ -68,7 +68,7 @@ function HistoryBody() {
     const x = q.trim()
     if (!x) { setHits(null); setBusy(false); return }
     const ac = new AbortController(); setBusy(true)
-    const timer = setTimeout(() => searchThread(x, ac.signal).then((r) => { setHits(r.msgs); setLocal(r.local) }).catch(() => {}).finally(() => { if (!ac.signal.aborted) setBusy(false) }), 220)
+    const timer = setTimeout(() => searchThread(x, ac.signal).then((r) => { setHits(r.msgs); setLocal(r.local) }).catch((e) => { if (!ac.signal.aborted) console.warn("thread history search failed", e) }).finally(() => { if (!ac.signal.aborted) setBusy(false) }), 220)
     return () => { clearTimeout(timer); ac.abort() }
   }, [q])
   const ids = useThreadIds()

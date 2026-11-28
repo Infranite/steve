@@ -47,7 +47,7 @@ async function readResource(url: string, signal: AbortSignal, image: boolean): P
       if (total > MAX_BYTES) throw new Error(t("channels:resource.tooLarge"))
       parts.push(new Uint8Array(value))
     }
-  } finally { await reader.cancel().catch(() => {}) }
+  } finally { await reader.cancel().catch((e) => { if (!(e instanceof DOMException && e.name === "AbortError")) console.warn("resource stream cancel failed", e) }) }
   if (!total) throw new Error(t("channels:resource.empty"))
   return new Blob(parts, { type: image ? mime : "application/octet-stream" })
 }

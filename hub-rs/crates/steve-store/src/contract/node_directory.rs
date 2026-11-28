@@ -373,6 +373,17 @@ pub fn name(r: &mut impl Read, node: &str) -> Result<Option<String>> {
     )
 }
 
+pub fn host(r: &mut impl Read, node: &str) -> Result<Option<String>> {
+    Ok(r.one(
+        Query::select()
+            .column("host")
+            .from("nodes")
+            .and_where(Expr::col("node_id").eq(node)),
+        |row| row.get::<Option<String>>(0),
+    )?
+    .flatten())
+}
+
 pub fn nodes_with_sessions(r: &mut impl Read) -> Result<Vec<String>> {
     r.all(
         Query::select()

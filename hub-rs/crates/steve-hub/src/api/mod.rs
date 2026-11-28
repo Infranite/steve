@@ -899,6 +899,10 @@ pub(crate) fn bot_out(
         .filter(|w| allowed_ws.contains(w))
         .collect();
     b.insert("workspaces".into(), json!(visible));
+    b.insert(
+        "default_project".into(),
+        json!(r.bot_default_project(&id, ws)?),
+    );
     b.insert("memories".into(), json!(r.memories_count(&id, ws)?));
     b.insert("mcp_servers".into(), json!(r.bot_mcp_servers(&id)?));
     b.insert(
@@ -933,6 +937,11 @@ pub(crate) fn bots_out(
         let id = str_of(&b, "id");
         steve_store::seeded::show(&mut b, steve_store::seeded::BOT);
         b.insert("workspaces".into(), json!(bot_ws(&x, &id, allowed_ws)));
+        let dp = x
+            .default_projects
+            .get(&(id.clone(), ws.to_string()))
+            .cloned();
+        b.insert("default_project".into(), json!(dp));
         let mcp = x.mcp.get(&id).cloned().unwrap_or_default();
         b.insert("mcp_servers".into(), json!(mcp));
         let fallbacks = x.fallback_surfaces.get(&id).cloned().unwrap_or_default();

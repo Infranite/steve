@@ -621,7 +621,16 @@ async fn catch_up(
             return;
         }
         let done = match read_snapshot(&*remote, 100).await {
-            Ok(s) => catch_up_streams(&store, &*remote, &s.heads, None).await,
+            Ok(s) => {
+                catch_up_streams(
+                    &store,
+                    &*remote,
+                    &s.heads,
+                    None,
+                    &steve_runtime::SystemClock,
+                )
+                .await
+            }
             Err(e) => Err(e),
         };
         match done {

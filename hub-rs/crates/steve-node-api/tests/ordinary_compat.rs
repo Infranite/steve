@@ -244,3 +244,28 @@ fn strict_ordinary_commands_reject_unknown_fields() {
         "UpgradeHarness is strict (deny_unknown_fields) and changes require a PROTOCOL bump"
     );
 }
+
+#[test]
+fn host_info_confinement_is_additive_and_round_trips() {
+    let baseline: HostInfo = serde_json::from_value(load_fixture_json("host_info.json")).unwrap();
+    assert_eq!(baseline.confinement, None);
+
+    let confined = HostInfo {
+        confinement: Some(ConfinementStatus::Confined {
+            backend: "seatbelt".into(),
+        }),
+        ..baseline.clone()
+    };
+    let round: HostInfo = serde_json::from_value(serde_json::to_value(&confined).unwrap()).unwrap();
+    assert_eq!(round, confined);
+
+    let unconfined = HostInfo {
+        confinement: Some(ConfinementStatus::Unconfined {
+            reason: "disabled by policy".into(),
+        }),
+        ..baseline
+    };
+    let round_unconfined: HostInfo =
+        serde_json::from_value(serde_json::to_value(&unconfined).unwrap()).unwrap();
+    assert_eq!(round_unconfined, unconfined);
+}

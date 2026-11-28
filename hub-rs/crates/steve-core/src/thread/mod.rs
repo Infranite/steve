@@ -227,7 +227,7 @@ pub(crate) fn route_step(r: &Route, d: Option<&decide::Decision>, ms: i64) -> Va
         "guard": d.and_then(|d| d.guard),
         "title": r.title, "project": r.project, "tags": r.tag_ids,
         "newTags": r.new_tags.iter().map(|t| &t.name).collect::<Vec<_>>(),
-        "why": r.why, "model": r.model, "fallback": r.fallback, "ms": ms
+        "why": r.why, "model": r.model, "ms": ms
     })
 }
 
@@ -1142,7 +1142,7 @@ impl Core {
             ws,
             gateway::route(self.gw(), &c, text, history, promote),
         )
-        .await;
+        .await?;
         Ok(route)
     }
 

@@ -50,6 +50,7 @@ pub struct SummaryFacts {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BotExtras {
     pub workspaces: HashMap<String, Vec<String>>,
+    pub default_projects: HashMap<(String, String), String>,
     pub mcp: HashMap<String, Vec<Value>>,
     pub fallback_surfaces: HashMap<String, Vec<Value>>,
 }
@@ -144,6 +145,7 @@ impl StoreBackend {
             .collect::<BResult<_>>()?;
         Ok(BotExtras {
             workspaces: extras.workspaces,
+            default_projects: extras.default_projects,
             mcp,
             fallback_surfaces,
         })
@@ -301,6 +303,9 @@ impl StoreBackend {
     pub fn bot_in_workspace(&self, id: &str, ws: &str) -> BResult<bool> {
         self.0.bots().in_workspace(id, ws).map_err(err)
     }
+    pub fn bot_default_project(&self, id: &str, ws: &str) -> BResult<Option<String>> {
+        self.0.bots().default_project(id, ws).map_err(err)
+    }
     pub fn bot_set_workspaces(&self, id: &str, ws: &[String]) -> BResult<()> {
         self.0.bots().set_workspaces(id, ws).map_err(err)
     }
@@ -342,16 +347,17 @@ impl StoreBackend {
             .map_err(|e| BackendError::msg(e.to_string()))?;
         obj(bot)
     }
-    pub fn bot_patch(&self, id: &str, p: &Obj, author: &str) -> BResult<Obj> {
+    pub fn bot_patch(&self, ws: &str, id: &str, p: &Obj, author: &str) -> BResult<Obj> {
         self.0
             .bots()
-            .patch(id, &patch(p)?, author)
+            .patch_in(ws, id, &patch(p)?, author)
             .map_err(err)?
             .map(obj)
             .unwrap_or_else(|| Err(gone("bot")))
     }
     pub fn bot_patch_checked(
         &self,
+        ws: &str,
         id: &str,
         p: &Obj,
         author: &str,
@@ -359,14 +365,18 @@ impl StoreBackend {
     ) -> BResult<Obj> {
         self.0
             .write(|_| -> anyhow::Result<Obj> {
-                let b = self.bot_get(id)?.ok_or_else(|| gone("bot"))?;
+                let mut b = self.bot_get(id)?.ok_or_else(|| gone("bot"))?;
+                b.insert(
+                    "default_project".into(),
+                    serde_json::json!(self.bot_default_project(id, ws)?),
+                );
                 steve_core::models::validate_bot_patch(Some(&b), p, harnesses).map_err(
                     |message| BackendError {
                         status: 400,
                         message,
                     },
                 )?;
-                Ok(self.bot_patch(id, p, author)?)
+                Ok(self.bot_patch(ws, id, p, author)?)
             })
             .map_err(|e| match e.downcast::<BackendError>() {
                 Ok(e) => e,

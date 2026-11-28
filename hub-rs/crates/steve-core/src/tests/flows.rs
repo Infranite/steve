@@ -1789,12 +1789,7 @@ fn seed_registers_steves_own_repo_once() {
     assert_eq!(ps.len(), 1);
     assert!(ps[0].release.is_none());
     assert_eq!(
-        k.db()
-            .bot("dev")
-            .unwrap()
-            .unwrap()
-            .default_project
-            .as_deref(),
+        k.db().bot_default_project("dev", WS).unwrap().as_deref(),
         Some(ps[0].id.as_str())
     );
     k.core.seed().unwrap();

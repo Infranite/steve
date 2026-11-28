@@ -335,7 +335,16 @@ impl ResearchAdapter {
                     ..Default::default()
                 };
             }
-            _ => {}
+            Err(e) => {
+                tracing::warn!(run = %q.run, "research: failed to probe local Node capabilities: {e}");
+                metrics::counter!("steve_node_research_probe_errors_total").increment(1);
+                return ResearchOutcome {
+                    end: RunEnd::Failed,
+                    error: Some(format!("无法读取本机 Node 能力，研究未启动：{e}")),
+                    ..Default::default()
+                };
+            }
+            Ok(_) => {}
         }
         let cfg = &self.cfg;
         let slot = match self.admission.admit(&q.run, &q.ws, cfg.max_global) {
@@ -351,10 +360,22 @@ impl ResearchAdapter {
         let req = self.request(q);
         let needs_roots = req.cwd.is_some() || !req.add_dirs.is_empty();
         let roots = if needs_roots {
-            (node.roots)().unwrap_or_else(|e| {
-                tracing::error!(run = %q.run, "research: the local Node's roots: {e}");
-                vec![]
-            })
+            match (node.roots)() {
+                Ok(roots) => roots,
+                Err(e) => {
+                    tracing::error!(run = %q.run, "research: failed to read local Node roots: {e}");
+                    metrics::counter!("steve_node_research_root_errors_total").increment(1);
+                    node.runtime.research_fell_back();
+                    drop(slot);
+                    return ResearchOutcome {
+                        end: RunEnd::Failed,
+                        error: Some(format!(
+                            "无法读取本机 Node 允许访问的目录配置，研究未启动：{e}"
+                        )),
+                        ..Default::default()
+                    };
+                }
+            }
         } else {
             vec![]
         };

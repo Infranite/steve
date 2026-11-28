@@ -340,9 +340,18 @@ pub struct SingleModelGateway<M> {
     pub models: Option<crate::models::Models>,
 }
 
-/// The router's time limit: a route that takes longer becomes [`Route::fallback`] (successful routes
-/// take under 20 s).
+/// The router's time limit: a route that takes longer fails explicitly with [`RouteError::ModelCall`]
+/// (successful routes take under 20 s).
 pub const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Why routing a user message did not produce a valid route.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum RouteError {
+    #[error("router model call failed: {0}")]
+    ModelCall(String),
+    #[error("router returned unusable output: {0}")]
+    UnusableOutput(String),
+}
 
 /// The images of [`with_images`] blocks (`{"type":"image","source":{"type":"base64",…}}`); a block
 /// without base64 data is left out.
@@ -1037,8 +1046,6 @@ pub struct Route {
     pub why: String,
     /// which model routed
     pub model: Option<String>,
-    /// the router failed and this is the default
-    pub fallback: bool,
     /// Asked only while Steve is still answering earlier messages ([`RouteCtx::pending`]): the message
     /// needs that answer first (“就按你说的改”, “再详细点”).
     pub after: bool,
@@ -1061,35 +1068,21 @@ impl Default for Route {
             reply: String::new(),
             why: String::new(),
             model: None,
-            fallback: false,
             after: false,
         }
     }
 }
 
 impl Route {
-    /// Not a fallback: a kind the code knew without the router (`route_log.guard = "q"`).
-    pub fn plain(self) -> Route {
+    /// Route selected directly by deterministic domain logic without calling the router model.
+    pub fn deterministic(kind: &str, text: &str, project: Option<String>, why: &str) -> Route {
         Route {
-            fallback: false,
-            ..self
-        }
-    }
-
-    /// What the router falls back to when the model fails: never an item. Research when
-    /// there is a project to read (`project`), else a direct answer.
-    pub fn fallback(text: &str, project: Option<String>) -> Route {
-        Route {
-            kind: if project.is_some() {
-                "research".into()
-            } else {
-                "answer".into()
-            },
+            kind: kind.into(),
+            confidence: 1.0,
             title: js_head(text, 24).into(),
             goal: text.into(),
             project,
-            why: "没能判断，先在这里回答".into(),
-            fallback: true,
+            why: why.into(),
             ..Route::default()
         }
     }
@@ -1478,7 +1471,6 @@ fn parse_route_value(c: &RouteCtx, text: &str, r: &Value, promote: bool) -> Opti
             Some(v) => js_head(&jstr(v), 200).to_string(),
         },
         model: None,
-        fallback: false,
         /* asked and not said: it waits, the safe side */
         after: r
             .get("after")
@@ -1547,26 +1539,25 @@ pub async fn route_many(
     c: &RouteCtx,
     texts: &[String],
     history: &[Said],
-) -> Vec<Route> {
+) -> std::result::Result<Vec<Route>, RouteError> {
     let prompt = route_prompt_for(c, texts, history, false);
-    let routed = match gw
+    match gw
         .call(&prompt, Tier::Fast, ROUTE_TIMEOUT, &ThinkTools::None)
         .await
     {
         Ok(Printed {
             text: raw, model, ..
-        }) => received_routes(c, texts, &raw, model),
+        }) => received_routes(c, texts, &raw, model).ok_or_else(|| {
+            metrics::counter!("steve_router_failures_total", "reason" => "unusable_output")
+                .increment(1);
+            RouteError::UnusableOutput(js_head(&raw, 200).into())
+        }),
         Err(e) => {
             tracing::error!("route batch failed {e}");
-            None
+            metrics::counter!("steve_router_failures_total", "reason" => "model_call").increment(1);
+            Err(RouteError::ModelCall(e.to_string()))
         }
-    };
-    routed.unwrap_or_else(|| {
-        texts
-            .iter()
-            .map(|text| route_without_model(c, text, false))
-            .collect()
-    })
+    }
 }
 
 /// Interpret one successful batch reply and attach its answering model after validation.
@@ -1588,16 +1579,14 @@ fn received_routes(c: &RouteCtx, texts: &[String], raw: &str, model: String) -> 
     })
 }
 
-/// Route a message; any failure gives [`Route::fallback`], which never creates an item. Where Steve
-/// operates the machine ([`RouteCtx::operator`]) the fallback is research even with no project: the
-/// message may ask for something to be done there, and an answer has no tools to do it with.
+/// Route a message through the router model; failures and unusable replies return [`RouteError`].
 pub async fn route(
     gw: &dyn ModelGateway,
     c: &RouteCtx,
     text: &str,
     history: &[Said],
     promote: bool,
-) -> Route {
+) -> std::result::Result<Route, RouteError> {
     let prompt = route_prompt(c, text, history, promote);
     match gw
         .call(&prompt, Tier::Fast, ROUTE_TIMEOUT, &ThinkTools::None)
@@ -1605,36 +1594,20 @@ pub async fn route(
     {
         Ok(Printed {
             text: raw, model, ..
-        }) => {
-            if let Some(r) = received_route(c, text, &raw, model, promote) {
-                return r;
-            }
+        }) => received_route(c, text, &raw, model, promote).ok_or_else(|| {
+            metrics::counter!("steve_router_failures_total", "reason" => "unusable_output")
+                .increment(1);
+            RouteError::UnusableOutput(js_head(&raw, 200).into())
+        }),
+        Err(e) => {
+            tracing::error!("route failed {e}");
+            metrics::counter!("steve_router_failures_total", "reason" => "model_call").increment(1);
+            Err(RouteError::ModelCall(e.to_string()))
         }
-        Err(e) => tracing::error!("route failed {e}"),
     }
-    route_without_model(c, text, promote)
 }
 
-fn route_without_model(c: &RouteCtx, text: &str, promote: bool) -> Route {
-    let project = c.steve_project.clone().or_else(|| {
-        c.projects
-            .iter()
-            .find(|p| !p.archived)
-            .map(|p| p.id.clone())
-    });
-    let mut r = Route::fallback(text, project);
-    if c.operator && r.kind == "answer" {
-        r.kind = "research".into();
-    }
-    if promote {
-        /* “做成事项” was pressed: the user asked for an item, the router only names it */
-        r.kind = "item".into();
-        r.project = None;
-    }
-    r
-}
-
-/// Interpret one successful routing reply; unusable output remains a caller-owned fallback.
+/// Interpret one successful routing reply; unusable output returns `None`.
 fn received_route(
     c: &RouteCtx,
     text: &str,
@@ -2259,7 +2232,6 @@ mod tests {
             persona: String::new(),
             proactive: 1,
             avatar: Default::default(),
-            default_project: None,
             prompt: None,
             device: None,
         }
@@ -2546,19 +2518,25 @@ mod tests {
     }
 
     #[test]
-    fn fallback_route_never_makes_an_item() {
-        let r = Route::fallback(
+    fn deterministic_route_preserves_kind_project_and_title() {
+        let r = Route::deterministic(
+            "research",
             "一二三四五六七八九十一二三四五六七八九十一二三四五六七八",
             Some("prj_a".into()),
+            "确定性规则",
         );
         assert_eq!(r.title.chars().count(), 24);
-        assert_eq!((r.kind.as_str(), r.fallback), ("research", true));
-        assert_eq!(r.why, "没能判断，先在这里回答");
-        assert_eq!(Route::fallback("x", None).kind, "answer");
+        assert_eq!(r.kind, "research");
+        assert_eq!(r.project.as_deref(), Some("prj_a"));
+        assert_eq!(r.why, "确定性规则");
+        assert_eq!(
+            Route::deterministic("answer", "x", None, "why").kind,
+            "answer"
+        );
     }
 
     #[tokio::test]
-    async fn a_failing_or_unusable_router_answers_in_place() {
+    async fn a_failing_or_unusable_router_returns_explicit_error() {
         struct Gw(Option<&'static str>);
         #[async_trait]
         impl ModelGateway for Gw {
@@ -2575,36 +2553,17 @@ mod tests {
             }
         }
         let c = ctx();
-        for gw in [
-            Gw(None),
-            Gw(Some("不是 JSON")),
-            Gw(Some(r#"{"kind":"build"}"#)),
-        ] {
-            let r = route(&gw, &c, "知识系统怎么运作", &[], false).await;
-            assert_eq!((r.kind.as_str(), r.fallback), ("research", true));
-            assert_eq!(r.project.as_deref(), Some("prj_a"));
+        assert!(matches!(
+            route(&Gw(None), &c, "知识系统怎么运作", &[], false).await,
+            Err(RouteError::ModelCall(m)) if m.contains("60000")
+        ));
+        for bad in ["不是 JSON", r#"{"kind":"build"}"#] {
+            assert!(matches!(
+                route(&Gw(Some(bad)), &c, "知识系统怎么运作", &[], false).await,
+                Err(RouteError::UnusableOutput(_))
+            ));
         }
-        let none = RouteCtx {
-            steve_project: None,
-            projects: vec![],
-            ..ctx()
-        };
-        assert_eq!(
-            route(&Gw(None), &none, "hey", &[], false).await.kind,
-            "answer"
-        );
-        /* the owner's own conversation can act on the machine: a run with tools, not a bare answer */
-        let operator = RouteCtx {
-            operator: true,
-            ..none.clone()
-        };
-        let r = route(&Gw(None), &operator, "把下载目录整理一下", &[], false).await;
-        assert_eq!(
-            (r.kind.as_str(), r.fallback, r.project),
-            ("research", true, None)
-        );
-        /* “做成事项” was pressed: still an item */
-        assert_eq!(route(&Gw(None), &c, "x", &[], true).await.kind, "item");
+        assert!(route(&Gw(None), &c, "x", &[], true).await.is_err());
     }
 
     #[test]

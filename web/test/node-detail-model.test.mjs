@@ -317,4 +317,27 @@ test("nodeActionItems surfaces fileAccess for local macOS Nodes and skips non-ma
     },
   })
   assert.deepEqual(nodeActionItems(localLinux, { hubVersion: "0.2.112" }), [])
+
+  const unconfinedNode = view({
+    node: {
+      node_id: "n-1",
+      name: "Unconfined",
+      fingerprint: "abcd",
+      state: "active",
+      linked: true,
+      local: false,
+      host: {
+        os: "linux",
+        arch: "x86_64",
+        confinement: { state: "unconfined", reason: "bubblewrap missing" },
+      },
+    },
+  })
+  const unconfItems = nodeActionItems(unconfinedNode, { hubVersion: "0.2.112" })
+  assert.deepEqual(
+    unconfItems.map((i) => [i.kind, i.tone, i.tab, i.confinementReason]),
+    [["unconfined", "warn", "access", "bubblewrap missing"]],
+  )
+  const snapUnconf = nodeDiagnosticSnapshot(unconfinedNode, { hubVersion: "0.2.112", now: NOW })
+  assert.deepEqual(snapUnconf.host.confinement, { state: "unconfined", reason: "bubblewrap missing" })
 })

@@ -8,6 +8,7 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/component
 import { Spinner } from "@/components/ui/spinner"
 import { tm, toast, type Out } from "@/store"
 import { Segmented, Empty } from "@/ui"
+import { copyText } from "@/lib/clipboard"
 import { cn } from "cn"
 import { OfficeView } from "@/office"
 import { ChevronLeftIcon, ChevronRightIcon, CopyIcon, DownloadIcon, ExternalLinkIcon, FileIcon, FileTextIcon, FolderIcon, GalleryVerticalIcon, GitBranchIcon, ZoomInIcon, ZoomOutIcon } from "lucide-react"
@@ -384,8 +385,8 @@ export function OutPreview({ o, item, anns = [], focus: focus0, siblings = [], o
         {where && <span className="mr-auto min-w-0 truncate type-footnote font-mono text-muted-foreground" title={where}>{where}{p && "size" in p && p.size != null ? ` · ${size(p.size)}` : ""}</span>}
         {file && <Button variant="ghost" size="sm" onClick={() => { location.href = raw(true) }}><DownloadIcon />{t("pages:outputs.download")}</Button>}
         {media && <Button variant="ghost" size="sm" onClick={() => window.open(raw(), "_blank", "noopener")}><ExternalLinkIcon />{t("pages:outputs.newTab")}</Button>}
-        {ref && <Button variant="ghost" size="sm" className={cn(!where && "ml-auto")} onClick={() => { navigator.clipboard?.writeText(ref).catch(() => {}); toast(p?.type === "commit" ? t("pages:outputs.copiedCommit") : t("pages:outputs.copiedBranch")) }}><CopyIcon />{p?.type === "commit" ? t("pages:outputs.copyCommit") : t("pages:outputs.copyBranch")}</Button>}
-        {where && <Button variant="ghost" size="sm" onClick={() => { navigator.clipboard?.writeText(where).catch(() => {}); toast(t("pages:outputs.copiedLocation")) }}><CopyIcon />{t("pages:outputs.copyLocation")}</Button>}
+        {ref && <Button variant="ghost" size="sm" className={cn(!where && "ml-auto")} onClick={async () => { const res = await copyText(ref); if (!res.ok) { console.warn("output ref copy failed", res.error); toast(t("common:action.copyFailed")); return } toast(p?.type === "commit" ? t("pages:outputs.copiedCommit") : t("pages:outputs.copiedBranch")) }}><CopyIcon />{p?.type === "commit" ? t("pages:outputs.copyCommit") : t("pages:outputs.copyBranch")}</Button>}
+        {where && <Button variant="ghost" size="sm" onClick={async () => { const res = await copyText(where); if (!res.ok) { console.warn("output location copy failed", res.error); toast(t("common:action.copyFailed")); return } toast(t("pages:outputs.copiedLocation")) }}><CopyIcon />{t("pages:outputs.copyLocation")}</Button>}
       </div>}
     </div>
   )

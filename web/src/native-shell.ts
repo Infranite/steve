@@ -93,13 +93,13 @@ export class NativeShellSession {
     if (previous?.authenticated !== context.authenticated || previous?.workspaceID !== context.workspaceID || previous?.ready !== context.ready) this.revision++
     this.context = context
     this.waiters.forEach((wake) => wake())
-    void this.publish().catch(() => {}) // A failed bridge is retried at the next poll/change, never an unhandled rejection.
+    void this.publish().catch((e) => console.warn("native shell publish failed", e))
     this.schedule()
   }
 
   invalidate() {
     this.published = ""
-    void this.publish().catch(() => {})
+    void this.publish().catch((e) => console.warn("native shell publish failed", e))
   }
 
   private schedule() {
@@ -211,7 +211,8 @@ export class NativeShellSession {
     } catch (e) {
       // A stale document/account must not acknowledge an intent issued to its replacement.
       if (intent && this.live && auth === this.authGeneration) {
-        await this.bridge.call("shell.navigation.ack", { id: intent.id, ok: false, error: e instanceof Error ? e.message : "Navigation failed" }).catch(() => {})
+        const intentId = intent.id
+        await this.bridge.call("shell.navigation.ack", { id: intentId, ok: false, error: e instanceof Error ? e.message : "Navigation failed" }).catch((ackErr) => console.warn("native shell navigation ack failed", { id: intentId, error: ackErr }))
       }
     } finally {
       this.landing?.abort(); this.landing = undefined

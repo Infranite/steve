@@ -407,7 +407,6 @@ fn bot() -> steve_core::repo::Bot {
         persona: String::new(),
         proactive: 1,
         avatar: Default::default(),
-        default_project: None,
         prompt: None,
         device: None,
     }
@@ -1137,6 +1136,13 @@ async fn what_the_node_cannot_read_fails_and_is_counted() {
         )
         .await;
     assert_eq!(out.end, RunEnd::Failed, "{out:?}");
+    assert!(
+        out.error
+            .as_deref()
+            .is_some_and(|msg| msg.contains("store: locked")),
+        "expected roots read error in ResearchOutcome: {:?}",
+        out.error
+    );
     assert_eq!(rt.research_fallbacks(), 2);
     assert_eq!(health()["research_fallbacks"], 2);
 

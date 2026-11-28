@@ -3824,7 +3824,6 @@ impl Tx<'_> {
                 let stop = crate::takeover::Stop::Stopped {
                     why,
                     whole: self.last_turn_agent_text(&session.id, crate::takeover::WHOLE_CHARS)?,
-                    last,
                     answered_you,
                 };
                 match self.takeover(item_id, &session.id, stop)? {

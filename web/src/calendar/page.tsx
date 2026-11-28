@@ -63,7 +63,7 @@ export function CalendarView({ query, event }: { query?: string; event?: string 
   useEffect(() => {
     if (!connected || Date.now() - lastSyncAsk < SYNC_ON_OPEN_MS) return
     lastSyncAsk = Date.now()
-    for (const s of sources!) void calendarApi.sync(s.connection_id).catch(() => {})
+    for (const s of sources!) void calendarApi.sync(s.connection_id).catch((e) => console.warn("calendar sync failed", { connectionId: s.connection_id, error: e }))
   }, [connected]) // eslint-disable-line react-hooks/exhaustive-deps
 
   const [hidden, setHidden] = useState(readHidden)

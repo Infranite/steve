@@ -405,6 +405,14 @@ pub struct ProcessMeters {
     pub disk_written_bytes: Option<u64>,
 }
 
+/// What OS confinement isolates harness/command runs on the Node, or why none is active.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum ConfinementStatus {
+    Confined { backend: String },
+    Unconfined { reason: String },
+}
+
 /// What the Node's machine is (H→N `node.host`). The Hub asks once per link and also on demand
 /// to recheck file access. It keeps the latest answer for when the Node is away.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -430,6 +438,8 @@ pub struct HostInfo {
     pub mem_total: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_access: Option<crate::FileAccessReport>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confinement: Option<ConfinementStatus>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

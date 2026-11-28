@@ -34,7 +34,14 @@ const hashSub = (cb: () => void) => {
   const on = () => {
     const d = document as Document & { startViewTransition?: (f: () => void) => { ready: Promise<void>; finished: Promise<void> } }
     /* a transition the browser skips (a second route change before the first one drew) rejects its promises: nothing failed */
-    if (d.startViewTransition && !reducedMotion()) { const v = d.startViewTransition(() => flushSync(cb)); v.ready.catch(() => {}); v.finished.catch(() => {}) }
+    if (d.startViewTransition && !reducedMotion()) {
+      const v = d.startViewTransition(() => flushSync(cb))
+      const logUnexpected = (e: unknown) => {
+        if (!(e instanceof DOMException && e.name === "AbortError")) console.warn("view transition failed", e)
+      }
+      v.ready.catch(logUnexpected)
+      v.finished.catch(logUnexpected)
+    }
     else cb()
   }
   window.addEventListener("hashchange", on); return () => window.removeEventListener("hashchange", on)
@@ -440,7 +447,9 @@ export function SidePanel({ open, children, className, test }: { open: boolean; 
     // Includes reduced motion, a canceled animation (e.g. a mutual panel switch), and no animation at all.
     // An old exit must not unmount a panel that was reopened in the meantime.
     const animations = body.current?.getAnimations() ?? []
-    void Promise.all(animations.map((a) => a.finished.catch(() => {}))).then(() => { if (live) setMounted(false) })
+    void Promise.all(animations.map((a) => a.finished.catch((e: unknown) => {
+      if (!(e instanceof DOMException && e.name === "AbortError")) console.warn("side panel exit animation failed", e)
+    }))).then(() => { if (live) setMounted(false) })
     return () => { live = false }
   }, [open])
   if (!open && !mounted) return null

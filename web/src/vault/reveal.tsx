@@ -34,7 +34,7 @@ export async function registerPasskey(name: string): Promise<"ok" | "stale" | "f
   }
 }
 /** registration wants a fresh login: sign out, and the login screen brings the user back to this page */
-export const relogin = async () => { await api.logout().catch(() => {}); location.reload() }
+export const relogin = async () => { await api.logout().catch((e) => console.warn("logout before relogin failed", e)); location.reload() }
 
 /** `row`: as the last row of a panel (the name field takes the width, the button trails) */
 export function RegisterPasskey({ onDone, compact, row }: { onDone: () => void; compact?: boolean; row?: boolean }) {

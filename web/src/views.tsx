@@ -27,6 +27,7 @@ import { Switch } from "@/components/ui/switch"
 import { Textarea } from "@/components/ui/textarea"
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip"
 import { draftKey, newClientId } from "@/composer-draft"
+import { copyText } from "@/lib/clipboard"
 import { GitHubMoreRow } from "@/github/index"
 import { HubMore } from "@/hub-ui"
 import { lazyView } from "@/lazy"
@@ -473,7 +474,7 @@ export function ItemView({ id }: { id: string }) {
         <DropdownMenuItem onClick={() => setDebugOpen(true)} data-item-debug>{t("views:debug.open")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => openSheet("handoff", { item: i.id })} disabled={closedSt(i.st) || !i.ss.length} data-item-handoff><ArrowRightLeftIcon />{t("views:item.handoff")}</DropdownMenuItem>
         <DropdownMenuItem onClick={() => { const k = i.ss[i.ss.length - 1]; openSheet("fork", { k }) }} disabled={!i.ss.length}>{t("views:item.fork")}</DropdownMenuItem>
-        <DropdownMenuItem onClick={() => { navigator.clipboard?.writeText(location.href).catch(() => {}); toast(t("views:item.linkCopied")) }}><LinkIcon />{t("views:item.copyLink")}</DropdownMenuItem>
+        <DropdownMenuItem onClick={async () => { const res = await copyText(location.href); if (!res.ok) { console.warn("item link copy failed", res.error); toast(t("common:action.copyFailed")); return } toast(t("views:item.linkCopied")) }}><LinkIcon />{t("views:item.copyLink")}</DropdownMenuItem>
         <DropdownMenuSeparator />
         {!closedSt(i.st) && <DropdownMenuItem variant="destructive" onClick={() => setConfirmDrop(true)} data-quick="drop"><BanIcon />{t("views:item.drop")}</DropdownMenuItem>}
         {closedSt(i.st) && <DropdownMenuItem onClick={() => { archive([i.id], !i.arch); if (!i.arch) return; go("#/items") }} data-archive><ArchiveIcon />{i.arch ? t("views:item.restore") : t("views:item.archive")}</DropdownMenuItem>}
@@ -574,7 +575,7 @@ export function ItemView({ id }: { id: string }) {
           queue={i.qs && <QueueStrip sid={i.qs} rows={queued.rest} prefix="补充信息：" composer={itemComposer} note={qNote} starting={qSess?.starting} numbered={false} />}
           left={<Segmented size="sm" value={targets.includes(target) ? target : "auto"} onChange={setTarget} options={targets.map((x) => [x, targetLabel[x]] as const)} />} />
       </div></div></div>}
-      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={() => { navigator.clipboard?.writeText(i.id).catch(() => {}); toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><StatePill state={state} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span></Meta>}>
+      sub={<Meta><button type="button" className="inline-flex items-center gap-1 font-mono tabular-nums hover:text-foreground" data-copy-id onClick={async () => { const res = await copyText(i.id); if (!res.ok) { console.warn("item id copy failed", res.error); toast(t("common:action.copyFailed")); return } toast(t("views:item.idCopied", { id: i.id })) }}>{i.id}<CopyIcon className="size-3" /></button><StatePill state={state} /><ProjectChip id={i.project} /><span>{t("views:item.updated", { time: i.up })}</span></Meta>}>
       {debugOpen && <ItemDebugDialog item={i.id} onClose={() => setDebugOpen(false)} />}
       <AlertDialog open={confirmDrop} onOpenChange={setConfirmDrop}>
         <AlertDialogContent size="sm" data-drop-popover>

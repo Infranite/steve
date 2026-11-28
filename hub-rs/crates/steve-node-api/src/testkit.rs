@@ -2325,6 +2325,7 @@ impl Discovery for FakeNode {
             cpus: Some(8),
             mem_total: Some(16 << 30),
             file_access: self.st().file_access.clone(),
+            confinement: None,
         })
     }
     async fn probe(&self, _fresh: bool) -> ApiResult<Capabilities> {

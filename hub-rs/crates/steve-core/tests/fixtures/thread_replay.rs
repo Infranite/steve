@@ -857,11 +857,11 @@ async fn run_queued(report: &mut Report) {
         let q2 = k.core.say(WS, "排队二为什么？", &[]).unwrap();
         let e1 = k
             .core
-            .thread_queued_edit(WS, &q1, "排队一改1为什么？")
+            .thread_queued_edit(WS, &q1, "排队一版本1为什么？")
             .unwrap();
         let e2 = k
             .core
-            .thread_queued_edit(WS, &q1, "排队一改2为什么？")
+            .thread_queued_edit(WS, &q1, "排队一版本2为什么？")
             .unwrap();
         fr.open(3);
         settle_replies(&k, WS, MAIN, &first, 1).await;
@@ -874,7 +874,7 @@ async fn run_queued(report: &mut Report) {
         let latest = seen
             .iter()
             .find(|r| r.mid == q1)
-            .is_some_and(|r| r.question == "排队一改2为什么？");
+            .is_some_and(|r| r.question == "排队一版本2为什么？");
         report.case(
             "core.queued.02_edit_twice_keeps_latest_and_order",
             &[
@@ -2487,9 +2487,7 @@ async fn run_stream(report: &mut Report) {
             .users()
             .create("local:su1", "U1", None, "owner")
             .unwrap();
-        let mid = core
-            .say_as(WS, Some(&user), "为什么断流？", &[], &[])
-            .unwrap();
+        let mid = core.say_as(WS, Some(&user), "你好", &[], &[]).unwrap();
         let mut replies = vec![];
         wait_until("failed stream reply", || {
             replies = store
@@ -3760,6 +3758,8 @@ async fn run_routing(report: &mut Report) {
     // 05: Plain question -> 0 router calls, 1 single generation
     {
         let k = replay_kit(true);
+        let fr = FakeResearch::new(vec![Step::Text("按时间加权。")]);
+        k.core.set_researcher(fr.clone());
         set_scripted_gateway(&k, json!({"kind": "answer", "confidence": 0.9}), "直接回答");
         let mid = k.core.say(WS, "检索是怎么打分的？", &[]).unwrap();
         let replies = settle_replies(&k, WS, MAIN, &mid, 1).await;
@@ -3768,7 +3768,10 @@ async fn run_routing(report: &mut Report) {
             "core.routing.05_plain_question_zero_router_single_generation",
             &[
                 ("explicit_route_zero_router_calls", router_calls(&k) == 0),
-                ("obvious_answer_single_generation", answer_calls(&k) == 1),
+                (
+                    "obvious_answer_single_generation",
+                    fr.seen.lock().unwrap().len() == 1 && answer_calls(&k) == 0,
+                ),
                 ("le1_final_reply_per_intent", replies.len() == 1),
             ],
             &[],

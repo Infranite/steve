@@ -27,6 +27,12 @@ fn valid_subject(s: &str) -> bool {
         .any(|p| s.strip_prefix(p).is_some_and(|rest| !rest.is_empty()))
 }
 
+/// Whether a ledger read error is a transient storage failure (busy lock / pool) rather than
+/// permanent corruption or contract failure.
+pub(crate) fn is_transient_ledger_error(e: &StoreError) -> bool {
+    e.is_storage_failure()
+}
+
 /// A ledger operation as the Hub holds it.
 #[derive(Debug, Clone)]
 pub struct LedgerEntry {
@@ -118,8 +124,30 @@ impl NodeRuntime {
         }
         let (receipt, refusal) = match (row.state.as_str(), row.receipt.and_then(|r| r.payload)) {
             (_, None) => (None, None),
-            ("rejected", Some(p)) => (None, serde_json::from_value(p).ok()),
-            (_, Some(p)) => (serde_json::from_value(p).ok(), None),
+            ("rejected", Some(p)) => match serde_json::from_value(p) {
+                Ok(e) => (None, Some(e)),
+                Err(e) => {
+                    tracing::error!(node, op, "corrupt ledger refusal JSON: {e}");
+                    metrics::counter!(
+                        "steve_node_ledger_read_errors_total",
+                        "kind" => "refusal"
+                    )
+                    .increment(1);
+                    return Err(StoreError::Json(e));
+                }
+            },
+            (_, Some(p)) => match serde_json::from_value(p) {
+                Ok(r) => (Some(r), None),
+                Err(e) => {
+                    tracing::error!(node, op, "corrupt ledger receipt JSON: {e}");
+                    metrics::counter!(
+                        "steve_node_ledger_read_errors_total",
+                        "kind" => "receipt"
+                    )
+                    .increment(1);
+                    return Err(StoreError::Json(e));
+                }
+            },
         };
         Ok(Some(LedgerEntry {
             operation: row.operation,
@@ -266,5 +294,57 @@ mod tests {
             .await;
         submit.await.unwrap();
         assert_eq!(seen.as_deref(), Some("pending"));
+    }
+
+    #[test]
+    fn ledger_exposes_corrupt_receipt_and_refusal_json_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("steve.db"), steve_store::NoPublisher).unwrap();
+        let node = FakeNode::new("local");
+        let runtime = NodeRuntime::new(store.clone(), node, Arc::new(NoopDomain));
+        runtime
+            .submit(
+                "op_bad_receipt",
+                "flow_run:r1",
+                "exec",
+                serde_json::json!({}),
+            )
+            .unwrap();
+        runtime
+            .submit(
+                "op_bad_refusal",
+                "flow_run:r2",
+                "exec",
+                serde_json::json!({}),
+            )
+            .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_command_receipt_raw(
+            &store,
+            "op_bad_receipt",
+            "finished",
+            "{\"payload\":{\"not\":\"a receipt\"}}",
+        )
+        .unwrap();
+        steve_store::testkit::hub::node_fixtures::set_command_receipt_raw(
+            &store,
+            "op_bad_refusal",
+            "rejected",
+            "{\"payload\":{\"not\":\"an error\"}}",
+        )
+        .unwrap();
+
+        let receipt_err = runtime.ledger("op_bad_receipt").unwrap_err();
+        assert!(
+            matches!(receipt_err, StoreError::Json(_)),
+            "{receipt_err:?}"
+        );
+        assert!(!is_transient_ledger_error(&receipt_err));
+
+        let refusal_err = runtime.ledger("op_bad_refusal").unwrap_err();
+        assert!(
+            matches!(refusal_err, StoreError::Json(_)),
+            "{refusal_err:?}"
+        );
+        assert!(!is_transient_ledger_error(&refusal_err));
     }
 }

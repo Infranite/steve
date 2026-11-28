@@ -91,11 +91,6 @@ fn describe(c: &HarnessChoice, p: &ExecutionPolicy) -> String {
     s
 }
 
-fn system_in(tx: &mut W<'_>, session: &str, text: &str) -> Result<(), StoreError> {
-    event_in(tx, session, "system", json!({ "text": text }))?;
-    Ok(())
-}
-
 pub(super) fn desired_in(store: &Store, session: &str) -> Result<Option<Desired>, StoreError> {
     store.read(|r| node_sessions::desired_config(r, session))
 }
@@ -104,8 +99,9 @@ pub(super) fn set_desired_in(
     store: &Store,
     session: &str,
     desired: Option<&Desired>,
+    at: i64,
 ) -> Result<(), StoreError> {
-    store.write(|w| node_sessions::set_desired_config(w, session, desired, now()))
+    store.write(|w| node_sessions::set_desired_config(w, session, desired, at))
 }
 
 /// The session's config in force: successful commands override the latest open request.
@@ -209,7 +205,7 @@ impl NodeRuntime {
                 policy.revision = idv(uid("pol"))?;
             }
             if same_config((&choice, &policy), (&prospective.0, &prospective.1)) {
-                set_desired_in(&self.store, session, None)?;
+                set_desired_in(&self.store, session, None, self.clock.now())?;
                 return Ok(Configured::Unchanged);
             }
             let text = describe(&choice, &policy);
@@ -222,6 +218,7 @@ impl NodeRuntime {
                     refreshes: 0,
                     expected: None,
                 }),
+                self.clock.now(),
             )?;
             let unfinished = self.store.read(|r| node_sessions::unfinished(r, session))?;
             if !self.is_holding()
@@ -240,6 +237,7 @@ impl NodeRuntime {
                 tx,
                 session,
                 &format!("配置变更将在当前回合结束后生效：{text}"),
+                self.clock.now(),
             )?;
             Ok(Configured::Pending)
         })?;
@@ -298,7 +296,7 @@ impl NodeRuntime {
             self.clock.now(),
         )?;
         d.expected = None;
-        set_desired_in(&self.store, session, Some(&d))?;
+        set_desired_in(&self.store, session, Some(&d), self.clock.now())?;
         let rev = self.session_revision(session)?;
         if !node_write::session_cas_in(
             tx,
@@ -378,7 +376,7 @@ impl NodeRuntime {
         next.policy.revision = idv(uid("pol"))?;
         next.refreshes = 0;
         next.expected = None;
-        set_desired_in(&self.store, session, Some(&next))
+        set_desired_in(&self.store, session, Some(&next), self.clock.now())
     }
 
     /// At an idle boundary of a ready session: a desired config goes before any turn. True: the
@@ -429,15 +427,21 @@ impl NodeRuntime {
             return Ok(());
         }
         if success {
-            set_desired_in(&self.store, session, None)?;
+            set_desired_in(&self.store, session, None, self.clock.now())?;
             system_in(
                 tx,
                 session,
                 &format!("已切换：{}", describe(&d.choice, &d.policy)),
+                self.clock.now(),
             )?;
         } else if !self.narrows_in(session, &d)? {
-            set_desired_in(&self.store, session, None)?;
-            system_in(tx, session, "未能切换：会话没能按新配置打开")?;
+            set_desired_in(&self.store, session, None, self.clock.now())?;
+            system_in(
+                tx,
+                session,
+                "未能切换：会话没能按新配置打开",
+                self.clock.now(),
+            )?;
         }
         Ok(())
     }
@@ -476,12 +480,13 @@ impl NodeRuntime {
                 if let Some(d) = desired_in(&self.store, &session)?
                     && same_config((&d.choice, &d.policy), (&sent.choice, &sent.policy))
                 {
-                    set_desired_in(&self.store, &session, None)?;
+                    set_desired_in(&self.store, &session, None, self.clock.now())?;
                 }
                 system_in(
                     tx,
                     &session,
                     &format!("已切换：{}", describe(&sent.choice, &sent.policy)),
+                    self.clock.now(),
                 )?;
                 self.plan_after_in(tx, &session)?;
             }
@@ -500,6 +505,7 @@ impl NodeRuntime {
                     tx,
                     &session,
                     &steve_i18n::stored(|| steve_i18n::t!("hub.node.config_unknown")),
+                    self.clock.now(),
                 )?;
             }
             _ => {}
@@ -521,7 +527,7 @@ impl NodeRuntime {
             && d.refreshes < MAX_REFRESHES
         {
             d.refreshes += 1;
-            set_desired_in(&self.store, &session, Some(&d))?;
+            set_desired_in(&self.store, &session, Some(&d), self.clock.now())?;
             return Ok(Some(session));
         }
         self.config_not_applied_in(tx, &session, false, &e.safe_detail)?;
@@ -568,7 +574,7 @@ impl NodeRuntime {
             Some(v) if v.phase == SessionPhase::Ready && v.active.is_none() => {
                 if let Some(mut d) = desired_in(&self.store, session)? {
                     d.expected = Some(v.revision);
-                    set_desired_in(&self.store, session, Some(&d))?;
+                    set_desired_in(&self.store, session, Some(&d), self.clock.now())?;
                 }
                 if !self.configure_in(tx, session)? {
                     set_phase(tx, "ready")?;
@@ -599,7 +605,7 @@ impl NodeRuntime {
             None => false,
         };
         if !narrowing {
-            set_desired_in(&self.store, session, None)?;
+            set_desired_in(&self.store, session, None, self.clock.now())?;
         }
         let phase = if node_released {
             "released"
@@ -627,7 +633,7 @@ impl NodeRuntime {
         } else {
             format!("未能切换：{detail}")
         };
-        system_in(tx, session, &text)
+        system_in(tx, session, &text, self.clock.now())
     }
 
     fn session_phase(&self, session: &str) -> Result<String, StoreError> {

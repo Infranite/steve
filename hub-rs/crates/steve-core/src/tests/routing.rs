@@ -394,30 +394,34 @@ async fn a4a_an_item_goes_back_into_the_conversation() {
 }
 
 #[tokio::test]
-async fn a_failing_router_never_makes_an_item() {
+async fn a_failing_router_fails_explicitly_without_making_an_item() {
     let k = Kit::new();
     k.gw.set(|p, _| {
         if p.starts_with("You are the router") {
             Err(msg("Command timed out after 60000 ms"))
         } else {
-            Ok(r#"{"thought":"","answer":"先在这里回答"}"#.into())
+            Ok(r#"{"thought":"","answer":"不应回落到直接回答"}"#.into())
         }
     });
     let before = items(&k);
     for t in ["帮我把 X 改成 Y", "把登录页改成深色模式", A1] {
         let mid = k.core.say(WS, t, &[]).unwrap();
-        eventually_sync("The conversation route is bound to a reply.", || {
-            route_opt(&k, &mid).is_some_and(|l| l.reply_message_id.is_some())
-        })
+        eventually_sync(
+            "The conversation route is bound to an explicit failure reply.",
+            || route_opt(&k, &mid).is_some_and(|l| l.reply_message_id.is_some()),
+        )
         .await;
         let l = route_log(&k, &mid);
-        assert!(l.route_fallback);
-        assert!(
-            l.route_kind == "answer" || l.route_kind == "research",
-            "{}",
-            l.route_kind
-        );
-        assert_eq!(l.route_guard.as_deref(), Some("6"));
+        let reply = k
+            .db()
+            .messages(WS)
+            .unwrap()
+            .into_iter()
+            .find(|m| Some(&m.id) == l.reply_message_id.as_ref())
+            .expect("explicit failure reply message");
+        assert_eq!(reply.meta["error"], json!(true));
+        assert_eq!(reply.meta["error_code"], json!("route_failed"));
+        assert_eq!(reply.item_id, None);
     }
     assert_eq!(items(&k), before);
     /* unusable JSON too */
@@ -429,11 +433,47 @@ async fn a_failing_router_never_makes_an_item() {
         })
     });
     let mid = k.core.say(WS, "随便", &[]).unwrap();
-    eventually_sync("The conversation route is bound to a reply.", || {
-        route_opt(&k, &mid).is_some_and(|l| l.reply_message_id.is_some())
-    })
+    eventually_sync(
+        "The conversation route is bound to an explicit failure reply.",
+        || route_opt(&k, &mid).is_some_and(|l| l.reply_message_id.is_some()),
+    )
     .await;
+    let l = route_log(&k, &mid);
+    let reply = k
+        .db()
+        .messages(WS)
+        .unwrap()
+        .into_iter()
+        .find(|m| Some(&m.id) == l.reply_message_id.as_ref())
+        .expect("explicit failure reply message");
+    assert_eq!(reply.meta["error"], json!(true));
+    assert_eq!(reply.meta["error_code"], json!("route_failed"));
     assert_eq!(items(&k), before);
+}
+
+#[tokio::test]
+async fn research_without_mounted_researcher_fails_explicitly() {
+    let k = Kit::new();
+    k.gw.set(|_, _| Ok(r#"{"thought":"","answer":"不应静默回落为 answer"}"#.into()));
+    let mid = k
+        .core
+        .say(WS, "今天 steve 的知识系统是怎么运作的？", &[])
+        .unwrap();
+    eventually_sync(
+        "research route without researcher emits explicit failure",
+        || route_opt(&k, &mid).is_some_and(|l| l.reply_message_id.is_some()),
+    )
+    .await;
+    let l = route_log(&k, &mid);
+    let reply = k
+        .db()
+        .messages(WS)
+        .unwrap()
+        .into_iter()
+        .find(|m| Some(&m.id) == l.reply_message_id.as_ref())
+        .expect("researcher_unavailable reply");
+    assert_eq!(reply.meta["error"], json!(true));
+    assert_eq!(reply.meta["error_code"], json!("researcher_unavailable"));
 }
 
 /// What is said while Steve is on a turn waits for it: held in view, editable and withdrawable until
@@ -569,7 +609,9 @@ async fn an_answer_with_an_offer_is_taken_by_a_confirmation() {
             Ok(r#"{"thought":"","answer":"评论现在是纯文本。","offer":{"title":"修评论渲染","goal":"让评论支持 markdown"}}"#.into())
         }
     });
-    k.core.say(WS, "评论支持 markdown 吗", &[]).unwrap();
+    k.core
+        .say(WS, "帮我确认评论对 markdown 的支持", &[])
+        .unwrap();
     let ms = settle(&k, 2).await;
     assert_eq!(ms[1].meta["offer"]["title"], "修评论渲染");
     let mid = k.core.say(WS, "好，改吧", &[]).unwrap();
@@ -1405,7 +1447,7 @@ async fn personal_attention_tracks_only_final_owned_inline_run_receipts() {
     router(&k, |_| json!({"kind":"answer"}));
     let mid = k
         .core
-        .say_as(WS, Some("attention_user"), "解释这个概念", &[], &[])
+        .say_as(WS, Some("attention_user"), "概括这个概念", &[], &[])
         .unwrap();
     eventually_sync(
         "The inline conversation run records its final completion receipt.",
@@ -1424,7 +1466,7 @@ async fn personal_attention_tracks_only_final_owned_inline_run_receipts() {
     assert_eq!(entries[0].order, Some(upper));
     assert!(k.db().message(reply).unwrap().unwrap().meta["run_receipt"] == true);
     // An unowned workspace answer is not assigned to the signed-in user's attention.
-    let unowned = k.core.say(WS, "再解释一下", &[]).unwrap();
+    let unowned = k.core.say(WS, "再概括一下", &[]).unwrap();
     eventually_sync(
         "The inline conversation run records its final completion receipt.",
         || route_opt(&k, &unowned).is_some_and(|r| r.outcome == "answered"),
@@ -1453,7 +1495,7 @@ async fn personal_attention_tracks_actual_stopped_short_answer_receipt() {
     *k.gw.slow.lock().unwrap() = Some(("You are Steve", Duration::from_secs(60)));
     let mid = k
         .core
-        .say_as(WS, Some("attention_user"), "解释这个概念", &[], &[])
+        .say_as(WS, Some("attention_user"), "概括这个概念", &[], &[])
         .unwrap();
     eventually_sync("The answer prompt reaches the fake model gateway.", || {
         k.gw.calls
@@ -1960,7 +2002,7 @@ async fn offer_explicit_bot_override_and_failed_override_recovery() {
             .to_string())
         }
     });
-    k.core.say(WS, "看下这部分", &[]).unwrap();
+    k.core.say(WS, "帮我看下这部分", &[]).unwrap();
     let ms = settle(&k, 2).await;
     // With >=2 eligible Bots and no Steve selection, OFFER leaves bot unset instead of scoring.
     assert!(

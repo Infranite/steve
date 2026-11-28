@@ -312,6 +312,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/148.sql"),
     // 149: remove retired agent-robot-avatar skin field from bots.avatar JSON (#645).
     include_str!("../migrations/149.sql"),
+    // 150: sink Bot.default_project into workspace-scoped bot_workspaces (#582).
+    include_str!("../migrations/150.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

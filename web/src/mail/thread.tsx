@@ -30,7 +30,7 @@ export function ThreadView({ id }: { id: string }) {
   const t = useT()
   const T = useHubQuery(["mail", "thread", id], () => mailApi.thread(id), { events: ["mail"] })
   const read = useRef(false)
-  useEffect(() => { if (T.data && T.data.unread > 0 && !read.current) { read.current = true; mailApi.read(id).catch(() => {}) } }, [T.data, id])
+  useEffect(() => { if (T.data && T.data.unread > 0 && !read.current) { read.current = true; mailApi.read(id).catch((e) => { read.current = false; console.warn("mark mail read failed", { id, error: e }) }) } }, [T.data, id])
   const back: [string, string] = ["#/mail", t("mail:shared.title")]
   if (T.loading) return <Page title={t("mail:shared.title")} back={back}><div className="flex justify-center py-16"><Spinner className="size-5 text-muted-foreground" /></div></Page>
   if (T.error || !T.data) return <Page title={t("mail:shared.title")} back={back}><Empty title={T.status === 404 ? t("mail:thread.notFound") : (T.error?.message ?? "")} /></Page>

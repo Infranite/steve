@@ -1,5 +1,7 @@
 //! Bots (owned by the user, members of workspaces) and their memories.
 
+use std::collections::HashMap;
+
 use super::Cached;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -162,15 +164,44 @@ impl Bots<'_> {
         self.0.read_conn(|c| {
             all(
                 c,
-                "SELECT workspace_id, duty FROM bot_workspaces WHERE bot_id = ?",
+                "SELECT workspace_id, duty, default_project FROM bot_workspaces WHERE bot_id = ?",
                 [id],
                 |r| {
                     Ok(BotWorkspace {
                         workspace_id: r.get(0)?,
                         duty: r.get(1)?,
+                        default_project: r.get(2)?,
                     })
                 },
             )
+        })
+    }
+
+    pub fn default_project(&self, id: &str, ws: &str) -> Result<Option<String>> {
+        self.0.read_conn(|c| {
+            Ok(one(
+                c,
+                "SELECT default_project FROM bot_workspaces WHERE bot_id = ? AND workspace_id = ?",
+                [id, ws],
+                |r| r.get::<_, Option<String>>(0),
+            )?
+            .flatten()
+            .filter(|s| !s.is_empty()))
+        })
+    }
+
+    pub fn default_projects_in(&self, ws: &str) -> Result<HashMap<String, String>> {
+        self.0.read_conn(|c| {
+            let mut map = HashMap::new();
+            for (bot_id, project_id) in all(
+                c,
+                "SELECT bot_id, default_project FROM bot_workspaces WHERE workspace_id = ? AND default_project IS NOT NULL AND default_project <> ''",
+                [ws],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )? {
+                map.insert(bot_id, project_id);
+            }
+            Ok(map)
         })
     }
 
@@ -256,10 +287,43 @@ impl Bots<'_> {
 
     /// Fails with `没有这个 Bot`. Bumps `revision` when something changed and always records
     /// a revision row `{before, after}` with the given keys.
+    /// Rejects `default_project`: use [`Self::patch_in`] for workspace-scoped default projects.
     pub fn patch(&self, id: &str, p: &BotPatch, author: &str) -> Result<Option<Bot>> {
+        if p.default_project.is_some() {
+            return Err(StoreError::Hook(
+                "default_project requires workspace-scoped patch_in".into(),
+            ));
+        }
+        self.patch_with_ws(None, id, p, author)
+    }
+
+    /// Workspace-scoped patch supporting both Bot fields and `bot_workspaces.default_project` in `ws`.
+    pub fn patch_in(&self, ws: &str, id: &str, p: &BotPatch, author: &str) -> Result<Option<Bot>> {
+        self.patch_with_ws(Some(ws), id, p, author)
+    }
+
+    fn patch_with_ws(
+        &self,
+        ws: Option<&str>,
+        id: &str,
+        p: &BotPatch,
+        author: &str,
+    ) -> Result<Option<Bot>> {
         self.0.write_conn(|w| {
             let cur =
                 one(w.c, BOT, [id], Bot::from_row)?.ok_or(StoreError::NotFound("没有这个 Bot"))?;
+            let cur_dp = match ws {
+                Some(ws) => one(
+                    w.c,
+                    "SELECT default_project FROM bot_workspaces WHERE bot_id = ? AND workspace_id = ?",
+                    [id, ws],
+                    |r| r.get::<_, Option<String>>(0),
+                )?,
+                None => None,
+            };
+            if p.default_project.is_some() && cur_dp.is_none() {
+                return Err(StoreError::NotFound("没有这个 Bot"));
+            }
             let avatar = p.avatar.as_ref().map(to_json).transpose()?;
             let mut s = Sets::default();
             s.val("name", p.name.clone())
@@ -280,7 +344,6 @@ impl Bots<'_> {
                 .val("accept_mode", p.accept_mode.clone())
                 .val("perm_mode", p.perm_mode.clone())
                 .val("avatar", avatar)
-                .null("default_project", p.default_project.clone())
                 .null("prompt", p.prompt.clone())
                 .null("device", p.device.clone())
                 .val("enabled", p.enabled);
@@ -292,6 +355,13 @@ impl Bots<'_> {
             if let Some(fallbacks) = &p.fallback_surfaces {
                 write_fallback_surfaces(w.c, id, fallbacks)?;
             }
+            if let (Some(ws), Some(dp)) = (ws, &p.default_project) {
+                w.c.run(
+                    "UPDATE bot_workspaces SET default_project = ? WHERE bot_id = ? AND workspace_id = ?",
+                    params![dp.as_deref(), id, ws],
+                )?;
+            }
+            let global_changed = !s.is_empty() || p.fallback_surfaces.is_some();
             if !s.is_empty() {
                 w.c.run(
                     &format!(
@@ -300,7 +370,7 @@ impl Bots<'_> {
                     ),
                     rusqlite::params_from_iter(s.params([now().into(), id.to_string().into()])),
                 )?;
-            } else if p.fallback_surfaces.is_some() {
+            } else if p.fallback_surfaces.is_some() || p.default_project.is_some() {
                 w.c.run(
                     "UPDATE bots SET revision = revision + 1, updated = ? WHERE id = ?",
                     params![now(), id],
@@ -314,25 +384,39 @@ impl Bots<'_> {
             if let (Some(prev_fs), Value::Object(obj)) = (cur_fallbacks, &mut cur_json) {
                 obj.insert("fallback_surfaces".into(), serde_json::to_value(prev_fs)?);
             }
+            if let (Some(prev_dp), Value::Object(obj)) = (cur_dp, &mut cur_json) {
+                obj.insert("default_project".into(), json!(prev_dp));
+            }
             let before: Map<String, Value> = after
                 .keys()
                 .map(|k| (k.clone(), cur_json.get(k).cloned().unwrap_or(Value::Null)))
                 .collect();
+            let event_ws = ws.unwrap_or(&cur.workspace_id);
             revision(
                 w.c,
-                &cur.workspace_id,
+                event_ws,
                 "bot",
                 id,
                 cur.revision + 1,
                 &json!({ "before": before, "after": after }),
                 author,
             )?;
-            w.publish(steve_types::DomainEvent::from(
-                steve_types::ConfigEvent::Bot {
-                    ws: cur.workspace_id.clone().into(),
-                    id: id.into(),
-                },
-            ));
+            if global_changed {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Bot {
+                        ws: cur.workspace_id.clone().into(),
+                        id: id.into(),
+                    },
+                ));
+            }
+            if !global_changed || event_ws != cur.workspace_id {
+                w.publish(steve_types::DomainEvent::from(
+                    steve_types::ConfigEvent::Bot {
+                        ws: event_ws.to_string().into(),
+                        id: id.into(),
+                    },
+                ));
+            }
             one(w.c, BOT, [id], Bot::from_row)
         })
     }
@@ -370,7 +454,10 @@ impl Bots<'_> {
     pub fn seed_fixups(&self, steve_project: Option<&str>) -> Result<()> {
         self.0.write_conn(|w| {
             if let Some(p) = steve_project {
-                w.c.run("UPDATE bots SET default_project = ? WHERE id = 'dev' AND default_project IS NULL", [p])?;
+                w.c.run(
+                    "UPDATE bot_workspaces SET default_project = ? WHERE bot_id = 'dev' AND workspace_id = COALESCE((SELECT workspace_id FROM projects WHERE id = ?), (SELECT workspace_id FROM bots WHERE id = 'dev')) AND default_project IS NULL",
+                    [p, p],
+                )?;
             }
             w.c.run(r##"UPDATE bots SET avatar = '{"color":"#7aa7c7","round":70}' WHERE id = 'steve' AND avatar = '{}'"##, [])?;
             w.c.run(r##"UPDATE bots SET avatar = '{"color":"#8c7ae6","round":45}' WHERE id = 'dev' AND avatar = '{}'"##, [])?;
@@ -423,8 +510,8 @@ fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) ->
     let avatar = to_json(b.avatar.as_ref().unwrap_or(&Avatar::default()))?;
     let inserted = c
         .prepare_cached(
-            "INSERT INTO bots (id, workspace_id, name, role, main, harness, model, reasoning_effort, rules, persona, proactive, accept_mode, perm_mode, avatar, default_project, specialties, enabled, revision, updated)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(id) DO NOTHING",
+            "INSERT INTO bots (id, workspace_id, name, role, main, harness, model, reasoning_effort, rules, persona, proactive, accept_mode, perm_mode, avatar, specialties, enabled, revision, updated)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?) ON CONFLICT(id) DO NOTHING",
         )?
         .execute(params![
             id,
@@ -441,7 +528,6 @@ fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) ->
             b.accept_mode.as_deref().unwrap_or("inherit"),
             b.perm_mode.as_deref().unwrap_or("ask"),
             avatar,
-            b.default_project,
             to_json(&b.specialties.as_deref().unwrap_or_default())?,
             b.enabled.unwrap_or(true) as i64,
             now(),
@@ -453,8 +539,8 @@ fn seed(c: &rusqlite::Connection, id: &str, main: bool, b: &NewBot, ws: &str) ->
         write_fallback_surfaces(c, id, fallbacks)?;
     }
     c.run(
-        "INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id, created) VALUES (?, ?, ?)",
-        params![id, ws, now()],
+        "INSERT OR IGNORE INTO bot_workspaces (bot_id, workspace_id, default_project, created) VALUES (?, ?, ?, ?)",
+        params![id, ws, b.default_project, now()],
     )?;
     c.run(
         "INSERT OR IGNORE INTO bot_node_bindings (workspace_id, bot_id, nodes) VALUES (?, ?, ?)",

@@ -3,7 +3,7 @@
 
 use std::sync::LazyLock;
 
-use chrono::{DateTime, SecondsFormat, Utc};
+use chrono::DateTime;
 use regex::Regex;
 
 static CAPACITY: LazyLock<Regex> = LazyLock::new(|| {
@@ -12,7 +12,7 @@ static CAPACITY: LazyLock<Regex> = LazyLock::new(|| {
 });
 static RECOVERY: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(concat!(
-        r"(?i)(?:expected to be available at|预计恢复时间[:：])\s*<?",
+        r"(?i)expected to be available at\s*<?",
         r"(\d{4}-\d{2}-\d{2}[Tt]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:[Zz]|[+-]\d{2}:\d{2}))",
     ))
     .unwrap()
@@ -76,10 +76,6 @@ pub fn capacity_recovery_at(error: &str, now: i64) -> Option<i64> {
             .ok()
             .map(|d| d.timestamp_millis())
     });
-    // Our persisted summary already resolved delta-seconds at the failure's observation time.
-    if error.starts_with("预计恢复时间：") {
-        return absolute.max();
-    }
     let after = RETRY_AFTER.captures_iter(error).filter_map(|c| {
         let value = c[1].trim().trim_end_matches(['}', ',', '.']);
         if value.bytes().all(|b| b.is_ascii_digit()) {
@@ -91,19 +87,6 @@ pub fn capacity_recovery_at(error: &str, now: i64) -> Option<i64> {
         }
     });
     absolute.chain(after).max()
-}
-
-/// Keep the resolved time ahead of bounded adapter text, so a long diagnostic or a Hub restart
-/// cannot lose a hint or start a fresh relative wait. This is safe text for the eventual card.
-pub fn capacity_summary(error: &str, now: i64) -> String {
-    let expected = capacity_recovery_at(error, now)
-        .and_then(DateTime::<Utc>::from_timestamp_millis)
-        .map(|d| d.to_rfc3339_opts(SecondsFormat::Millis, true))
-        .unwrap_or_else(|| "未提供有效时间".into());
-    format!(
-        "预计恢复时间：{expected}；{}",
-        error.chars().take(700).collect::<String>()
-    )
 }
 
 #[cfg(test)]
@@ -134,11 +117,6 @@ mod tests {
                 "expected to be available at 2026-11-18T08:01:00Z; Retry-After: 120",
                 NOW
             ),
-            Some(NOW + 120_000)
-        );
-        let summary = capacity_summary("503 Retry-After: 120", NOW);
-        assert_eq!(
-            capacity_recovery_at(&summary, NOW + 30_000),
             Some(NOW + 120_000)
         );
     }

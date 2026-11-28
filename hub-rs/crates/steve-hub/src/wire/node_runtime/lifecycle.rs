@@ -330,7 +330,7 @@ impl NodeRuntime {
                 },
             );
             desired.choice = choice.clone();
-            super::config::set_desired_in(&self.store, session, Some(&desired))?;
+            super::config::set_desired_in(&self.store, session, Some(&desired), self.clock.now())?;
             self.store
                 .write(|w| node_sessions::startup::clear_stop(w, session))?;
             self.plan_open_in(tx, session, Advance::ExplicitRetry)?;
@@ -617,10 +617,19 @@ pub fn health(
     linked: bool,
 ) -> Result<Value, StoreError> {
     let counts = store.read(|r| sessions::health(r, local.is_some(), remote))?;
+    let confined = match local {
+        Some(n) => store
+            .read(|r| steve_store::node_directory::host(r, n.node_id.as_str()))?
+            .and_then(|raw| serde_json::from_str::<HostInfo>(&raw).ok())
+            .and_then(|host| host.confinement)
+            .map(|status| matches!(status, ConfinementStatus::Confined { .. })),
+        None => None,
+    };
     Ok(json!({
         "enabled": local.is_some(),
         "remote": remote,
         "linked": local.is_some() && linked,
+        "confined": confined,
         "reconciled": local.map(|n| n.is_reconciled()),
         "stopped": local.is_some_and(|n| n.is_stopped()),
         "holding": local.is_some_and(|n| n.is_holding()),

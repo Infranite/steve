@@ -1090,7 +1090,7 @@ export function useItemRuntime(id: string) {
     loadItemRuntime(id)
     if (!v) return
     const missing = (v.deps ?? []).filter((d) => !itemView(d) && !table().tomb.has(`item:${d}`))
-    if (missing.length) void readViews("item", missing).catch(() => {})
+    if (missing.length) void readViews("item", missing).catch((e) => console.warn("readViews missing deps failed", { missing, error: e }))
   }, [id, scope, v])
   return stable.current.slice().sort((a, b) => b.created - a.created || b.no - a.no || a.id.localeCompare(b.id)).map(sessOf)
 }

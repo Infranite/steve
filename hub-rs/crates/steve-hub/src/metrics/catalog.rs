@@ -702,6 +702,36 @@ pub(super) fn describe() {
         Count,
         "GitHub release update checks finished. Label: result (available, up_to_date, ahead, unknown_current, no_release, unsupported_platform, unavailable, error)."
     );
+    describe_counter!(
+        "steve_thread_research_unavailable_total",
+        Count,
+        "Inline research routes that failed explicitly because no researcher runtime was mounted."
+    );
+    describe_counter!(
+        "steve_router_failures_total",
+        Count,
+        "Thread router calls that failed without producing a valid route. Label: reason (model_call, unusable_output)."
+    );
+    describe_counter!(
+        "steve_node_research_probe_errors_total",
+        Count,
+        "Node capability probe failures surfaced when starting a research run."
+    );
+    describe_counter!(
+        "steve_node_research_root_errors_total",
+        Count,
+        "Local Node root configuration read failures surfaced when starting a research run."
+    );
+    describe_counter!(
+        "steve_node_ledger_read_errors_total",
+        Count,
+        "Node ledger JSON decode errors surfaced when reading persisted receipts or refusals. Label: kind (receipt, refusal)."
+    );
+    describe_gauge!(
+        "steve_node_confined",
+        Count,
+        "Whether the local Node has an active OS sandbox confinement backend (1 = confined, 0 = unconfined)."
+    );
     // Node meters, from each Node's vitals (nodes::vitals); totals count from the Node's start
     describe_gauge!(
         "steve_node_sample_timestamp_seconds",

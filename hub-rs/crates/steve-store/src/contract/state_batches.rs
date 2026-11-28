@@ -31,6 +31,7 @@ pub struct McpSummary {
 #[derive(Default)]
 pub struct BotExtras {
     pub workspaces: HashMap<String, Vec<String>>,
+    pub default_projects: HashMap<(String, String), String>,
     pub mcp: HashMap<String, Vec<McpSummary>>,
     pub fallback_surfaces: HashMap<String, Vec<crate::ExecutionSurface>>,
 }
@@ -88,16 +89,22 @@ pub fn bot_extras(r: &mut impl Read) -> Result<BotExtras> {
     let mut extras = BotExtras::default();
     r.scan(
         Query::select()
-            .columns(["bot_id", "workspace_id"])
+            .columns(["bot_id", "workspace_id", "default_project"])
             .from("bot_workspaces")
             .order_by("bot_id", Order::Asc)
             .order_by("workspace_id", Order::Asc),
         |row| {
+            let bot_id: String = row.get(0)?;
+            let workspace_id: String = row.get(1)?;
+            let default_project: Option<String> = row.get(2)?;
             extras
                 .workspaces
-                .entry(row.get(0)?)
+                .entry(bot_id.clone())
                 .or_default()
-                .push(row.get(1)?);
+                .push(workspace_id.clone());
+            if let Some(dp) = default_project.filter(|s| !s.is_empty()) {
+                extras.default_projects.insert((bot_id, workspace_id), dp);
+            }
             Ok(())
         },
     )?;

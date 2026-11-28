@@ -228,7 +228,7 @@ pub fn without_router(
     (text.trim().chars().count() <= GUEST_SHORT).then_some("answer")
 }
 
-/// Apply the guards in order. Rule 6, the router failing, is already in `route.fallback`.
+/// Apply the guards in order. Router failures are returned as errors by [`crate::gateway::route`].
 pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
     let model = r.kind.as_str();
     let d = |kind: &str, guard: Option<&'static str>| Decision {
@@ -251,13 +251,6 @@ pub fn decide(r: &Route, text: &str, cx: DecideCtx) -> Decision {
             .clone()
             .or_else(|| (!r.title.trim().is_empty()).then(work))
     };
-    /* 6: no usable answer from the router — answer here, never an item */
-    if r.fallback {
-        return Decision {
-            guard: Some("6"),
-            ..d(model, None)
-        };
-    }
     /* 1: “@Bot …” names who does it */
     if cx.named_bot {
         return d("item", Some("1"));
@@ -528,22 +521,6 @@ mod tests {
         for t in ["追加到 ST-30", "追加到 ST-4", "TEST-3 那边也改"] {
             assert_eq!(go("supplement", 0.5, &[], t).0, "research", "{t}");
         }
-    }
-
-    #[test]
-    fn rule_6_a_failed_router_never_makes_an_item() {
-        let r = Route::fallback("给我讲一下", Some("prj".into()));
-        let d = decide(&r, "给我讲一下", DecideCtx::default());
-        assert_eq!((d.kind.as_str(), d.guard), ("research", Some("6")));
-        let d = decide(
-            &Route::fallback("建个事项", None),
-            "建个事项",
-            DecideCtx::default(),
-        );
-        assert_eq!(
-            d.kind, "answer",
-            "even explicit words wait for a working router"
-        );
     }
 
     #[test]

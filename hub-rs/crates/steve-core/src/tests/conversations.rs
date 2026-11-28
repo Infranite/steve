@@ -118,7 +118,7 @@ async fn main_channel_turns_report_outcomes_without_using_the_hosts_voice() {
         .say_in(
             WS,
             Conv::main(),
-            "看下磁盘",
+            "聊聊磁盘",
             &json!({"chan": {"message": "cm_web", "web": true}}),
         )
         .unwrap();

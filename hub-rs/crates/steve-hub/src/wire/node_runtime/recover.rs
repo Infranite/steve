@@ -230,6 +230,7 @@ impl NodeRuntime {
             tx,
             &session,
             &steve_i18n::stored(|| steve_i18n::t!("hub.node.recover_failed", detail = detail)),
+            self.clock.now(),
         )
     }
 
@@ -251,6 +252,7 @@ impl NodeRuntime {
                 tx,
                 &session,
                 &steve_i18n::stored(|| steve_i18n::t!("hub.node.recovered_abandon", what = what)),
+                self.clock.now(),
             )?,
             "resolve_permission" => {
                 if let Some(row) = node_write::permission_of_answer_in(tx, &target)? {
@@ -266,6 +268,7 @@ impl NodeRuntime {
                     &steve_i18n::stored(|| {
                         steve_i18n::t!("hub.node.recovered_permission", what = what)
                     }),
+                    self.clock.now(),
                 )?;
             }
             _ => {}
@@ -308,6 +311,7 @@ impl NodeRuntime {
             tx,
             session,
             &steve_i18n::stored(|| steve_i18n::t!("hub.node.recovered_released", what = what)),
+            self.clock.now(),
         )?;
         Ok(())
     }
@@ -337,6 +341,7 @@ impl NodeRuntime {
             tx,
             session,
             &steve_i18n::stored(|| steve_i18n::t!("hub.node.recovered_prepare", what = what)),
+            self.clock.now(),
         )?;
         if !opens.is_empty() {
             self.opened_in(tx, session, false, "workspace preparation was retired")?;

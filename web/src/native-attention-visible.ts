@@ -57,7 +57,7 @@ export class AttentionVisibilityPublisher {
   invalidate() { this.sent = ""; this.later() }
   private later = () => {
     if (!this.live) return
-    clearTimeout(this.timer); this.timer = setTimeout(() => { void this.flush().catch(() => {}) }, 50)
+    clearTimeout(this.timer); this.timer = setTimeout(() => { void this.flush().catch((e) => console.warn("native attention flush failed", e)) }, 50)
   }
   async flush(): Promise<void> {
     if (this.sending) { await this.sending; return this.flush() }

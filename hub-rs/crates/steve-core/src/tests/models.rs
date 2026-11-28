@@ -39,8 +39,7 @@ async fn the_setting_picks_the_routers_model_in_order() {
     };
 
     /* default: the fast list of the environment (STEVE_MODELS_FAST), no effort */
-    let r = route().await;
-    assert!(!r.fallback, "{r:?}");
+    let r = route().await.unwrap();
     assert_eq!(r.model.as_deref(), Some("claude-haiku-5-5"));
     assert_eq!(runs(&acp), [("claude-haiku-5-5".into(), None)]);
 
@@ -53,7 +52,7 @@ async fn the_setting_picks_the_routers_model_in_order() {
             "me",
         )
         .unwrap();
-    let r = route().await;
+    let r = route().await.unwrap();
     assert_eq!(r.model.as_deref(), Some("claude-opus-5-5"));
     let run = acp.runs().remove(0);
     assert_eq!(
@@ -61,7 +60,7 @@ async fn the_setting_picks_the_routers_model_in_order() {
         (Some("claude-opus-5-5"), Some("high"))
     );
 
-    /* The first configured model fails; caller policy returns its deterministic route. */
+    /* The first configured model fails; route returns an explicit error instead of falling back. */
     k.core
         .models()
         .apply(
@@ -70,9 +69,10 @@ async fn the_setting_picks_the_routers_model_in_order() {
             "me",
         )
         .unwrap();
-    let r = route().await;
-    assert!(r.fallback);
-    assert_eq!(r.model, None);
+    assert!(matches!(
+        route().await,
+        Err(crate::gateway::RouteError::ModelCall(_))
+    ));
     assert_eq!(runs(&acp), [("broken".into(), None)]);
 
     /* another purpose's setting does not touch routing; without its override routing follows Steve
@@ -85,7 +85,7 @@ async fn the_setting_picks_the_routers_model_in_order() {
             "me",
         )
         .unwrap();
-    route().await;
+    let _ = route().await.unwrap();
     assert_eq!(runs(&acp), [("claude-sonnet-5-5".into(), None)]);
 }
 
@@ -200,8 +200,8 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
         WS,
         crate::gateway::route(&gw, &ctx, "你好", &[], false),
     )
-    .await;
-    assert!(!r.fallback, "{r:?}");
+    .await
+    .unwrap();
     assert_eq!(r.kind, "answer");
     assert_eq!(r.model.as_deref(), Some("gpt-6-luna"));
     let run = acp.runs().remove(0);
@@ -258,7 +258,8 @@ async fn a_codex_steve_routes_and_answers_on_its_adapter() {
         WS,
         crate::gateway::route(&gw, &ctx, "你好", &[], false),
     )
-    .await;
+    .await
+    .unwrap();
     assert_eq!(r.model.as_deref(), Some("claude-haiku-5-5"));
     let last = acp.runs().pop().unwrap();
     assert_eq!(

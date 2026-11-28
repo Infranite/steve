@@ -195,6 +195,7 @@ function NodeDetail({ v, tab }: { v: NodeView; tab: NodeTab }) {
 const ACTION_ICON: Record<NodeActionItem["kind"], typeof ShieldAlertIcon> = {
   pending: ShieldAlertIcon,
   offline: WifiOffIcon,
+  unconfined: ShieldAlertIcon,
   fileAccess: FolderIcon,
   harnessAuth: KeyRoundIcon,
   harnessProbeFailed: CpuIcon,
@@ -225,6 +226,8 @@ function ActionText({ v, item }: { v: NodeView; item: NodeActionItem }) {
         </span>
       )
     }
+    case "unconfined":
+      return <>{t("devices:nodeOverview.actionUnconfined", { reason: item.confinementReason || "" })}</>
     case "fileAccess":
       return (
         <>
@@ -655,6 +658,7 @@ function NodeFileAccess({ v, actions }: { v: NodeView; actions: NodeActions }) {
 function NodeSandbox({ v, actions }: { v: NodeView; actions: NodeActions }) {
   const t = useT(), { harnesses } = useDevices()
   const report = harnesses?.[v.id]
+  const confinement = v.node?.host?.confinement ?? null
   const execAllowed: boolean | null = v.local
     ? true
     : report?.exec_allowed != null
@@ -678,6 +682,29 @@ function NodeSandbox({ v, actions }: { v: NodeView; actions: NodeActions }) {
         <DRow title={t("devices:sandbox.ownerScope")} sub={t(v.local ? "devices:sandbox.ownerScopeLocal" : "devices:sandbox.ownerScopeRemote")} />
         <DRow title={t("devices:sandbox.isolation")} sub={t(v.local ? "devices:sandbox.isolationLocal" : "devices:sandbox.isolationRemote")} />
         <DRow title={t("devices:sandbox.projectBoundary")} sub={t("devices:sandbox.projectBoundaryDesc")} />
+        <div className="flex flex-col gap-2 border-t border-border/70 px-5 py-3.5" data-node-confinement={confinement?.state ?? "unknown"}>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <span className="type-callout font-medium text-foreground">{t("devices:sandbox.confinementTitle")}</span>
+            <Badge
+              tone={confinement?.state === "confined" ? "success" : confinement?.state === "unconfined" ? "warning" : "neutral"}
+              size="sm"
+              dot={confinement != null}
+            >
+              {confinement?.state === "confined"
+                ? t("devices:sandbox.confinementState.confined", { backend: confinement.backend })
+                : confinement?.state === "unconfined"
+                  ? t("devices:sandbox.confinementState.unconfined")
+                  : t("devices:sandbox.confinementState.unknown")}
+            </Badge>
+          </div>
+          <p className="type-footnote text-muted-foreground">
+            {confinement?.state === "confined"
+              ? t("devices:sandbox.confinementConfinedDesc", { backend: confinement.backend })
+              : confinement?.state === "unconfined"
+                ? t("devices:sandbox.confinementUnconfinedDesc", { reason: confinement.reason })
+                : t("devices:sandbox.confinementUnknownDesc")}
+          </p>
+        </div>
         <div className="flex flex-col gap-2 border-t border-border/70 px-5 py-3.5" data-node-execution-policy={policyState}>
           <div className="flex flex-wrap items-center justify-between gap-2">
             <span className="type-callout font-medium text-foreground">{t("devices:sandbox.execPolicyTitle")}</span>

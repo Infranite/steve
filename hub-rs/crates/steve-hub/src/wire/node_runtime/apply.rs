@@ -478,6 +478,7 @@ impl NodeRuntime {
                             "harness": view.effective.harness,
                             "effort_mapping": mapping,
                         }),
+                        self.clock.now(),
                     )?;
                 }
                 // the resume handle is the harness's own session id (ACP `sessionId`), what ST-28
@@ -755,14 +756,14 @@ impl NodeRuntime {
             }
             EventBody::Diagnostic { code, .. } if code == STEVE_TOOLS_MISSING => {
                 if let Some(s) = &session {
-                    tools_missing_in(w, s)?;
+                    tools_missing_in(w, s, self.clock.now())?;
                 }
             }
             EventBody::Diagnostic { code, severity, .. }
                 if code == AUTO_MODE_CLASSIFIER_UNAVAILABLE =>
             {
                 if let Some(s) = &session {
-                    auto_mode_classifier_unavailable_in(w, s, *severity)?;
+                    auto_mode_classifier_unavailable_in(w, s, *severity, self.clock.now())?;
                 }
             }
             _ => {}
@@ -955,6 +956,7 @@ impl NodeRuntime {
             session,
             "turn_end",
             json!({ "stopReason": c.stop_reason }),
+            at,
         )?;
         // an abandoned attempt takes its harness with it: the Node has let the session go, so
         // the next message opens it again rather than starting a turn on a released session
@@ -976,7 +978,7 @@ impl NodeRuntime {
 }
 
 /// Says once in the session's timeline that its agent ran without Steve's tools.
-fn tools_missing_in(w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
+fn tools_missing_in(w: &mut W<'_>, session: &str, at: i64) -> Result<(), StoreError> {
     let told = observations::has_system_code(w, session, STEVE_TOOLS_MISSING)?;
     if !told {
         let text = steve_i18n::stored(|| steve_i18n::t!("hub.node.steve_tools_missing"));
@@ -985,7 +987,7 @@ fn tools_missing_in(w: &mut W<'_>, session: &str) -> Result<(), StoreError> {
             "system",
             json!({ "text": text, "code": STEVE_TOOLS_MISSING }),
             None,
-            now(),
+            at,
         )?;
     }
     Ok(())
@@ -997,6 +999,7 @@ fn auto_mode_classifier_unavailable_in(
     w: &mut W<'_>,
     session: &str,
     severity: Severity,
+    at: i64,
 ) -> Result<(), StoreError> {
     let stopped = matches!(severity, Severity::Error);
     let already = observations::has_system_code_since_turn(
@@ -1036,7 +1039,7 @@ fn auto_mode_classifier_unavailable_in(
             "stopped": stopped,
         }),
         None,
-        now(),
+        at,
     )?;
     Ok(())
 }

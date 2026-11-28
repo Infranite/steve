@@ -337,7 +337,7 @@ export function NewProjectDialog() {
   // The Nodes are the owner's to list: anyone else is offered the Hub's own.
   useEffect(() => {
     mounted.current = true
-    api.nodes().then((r) => setNodes(r.nodes)).catch(() => {})
+    api.nodes().then((r) => setNodes(r.nodes)).catch((e) => console.warn("project dialog nodes load failed", e))
     return () => { mounted.current = false }
   }, [])
   useEffect(() => {

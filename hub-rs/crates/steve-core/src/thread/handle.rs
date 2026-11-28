@@ -69,7 +69,6 @@ pub(super) struct RouteInfo {
     pub model: Option<String>,
     pub confidence: Option<f64>,
     pub signals: Vec<String>,
-    pub fallback: bool,
     pub ms: i64,
     pub project: Option<String>,
     pub tags: Vec<String>,
@@ -86,7 +85,6 @@ impl Default for RouteInfo {
             model: None,
             confidence: None,
             signals: vec![],
-            fallback: false,
             ms: 0,
             project: None,
             tags: vec![],
@@ -261,7 +259,7 @@ impl Core {
                     route_model: route.model.as_deref(),
                     route_confidence: route.confidence,
                     route_signals: &route.signals,
-                    route_fallback: route.fallback,
+                    route_fallback: false,
                     route_ms: route.ms,
                     route_outcome,
                     item_id,
@@ -326,6 +324,44 @@ impl Core {
             ReceiptDispatch::NoDispatch,
             None,
             None,
+        )?;
+        Ok(())
+    }
+
+    fn commit_route_failed(
+        &self,
+        task: &ThreadTask,
+        lease: &str,
+        steps: &Mutex<Steps>,
+        t0: i64,
+        detail: &str,
+    ) -> Result<()> {
+        tracing::error!(
+            run = %task.id,
+            ws = %task.workspace_id,
+            "thread router failed: {detail}"
+        );
+        let mut meta = Map::new();
+        meta.insert("origin".into(), json!(task.origin_message_id));
+        meta.insert("error".into(), json!(true));
+        meta.insert("error_code".into(), json!("route_failed"));
+        meta.insert(SYSTEM.into(), json!(true));
+        meta.insert("steps".into(), lock(steps).json(now() - t0));
+        let route = RouteInfo::default();
+        self.commit_simple(
+            task,
+            lease,
+            false,
+            "failed",
+            Some("（消息判断失败，请稍后重试或检查当前路由模型配置）"),
+            None,
+            Value::Object(meta),
+            &route,
+            None,
+            None,
+            ReceiptDispatch::NoDispatch,
+            Some("route_failed"),
+            Some(detail),
         )?;
         Ok(())
     }
@@ -714,24 +750,12 @@ impl Core {
 
         let deterministic = if meeting {
             Some((
-                Route {
-                    kind: "research".into(),
-                    confidence: 1.0,
-                    why: "初次见面，没有问路由".into(),
-                    ..Route::fallback(text, None)
-                }
-                .plain(),
+                Route::deterministic("research", text, None, "初次见面，没有问路由"),
                 "meet",
             ))
         } else if decide::obvious_reply(text, !files.is_empty()) {
             Some((
-                Route {
-                    kind: "answer".into(),
-                    confidence: 1.0,
-                    why: "简短寒暄或致谢，直接回复".into(),
-                    ..Route::fallback(text, None)
-                }
-                .plain(),
+                Route::deterministic("answer", text, None, "简短寒暄或致谢，直接回复"),
                 "obvious",
             ))
         } else if decide::without_router(text, !files.is_empty(), guest, &[]).is_some() {
@@ -744,13 +768,7 @@ impl Core {
                         .map(|p| p.id.clone())
                 });
                 (
-                    Route {
-                        kind: kind.into(),
-                        confidence: 1.0,
-                        why: "纯问题，没有问路由".into(),
-                        ..Route::fallback(text, project)
-                    }
-                    .plain(),
+                    Route::deterministic(kind, text, project, "纯问题，没有问路由"),
                     "q",
                 )
             })
@@ -759,6 +777,10 @@ impl Core {
         };
 
         // 8. Ambiguous message -> single router model call raced against stop.
+        enum RouteAttempt {
+            Routed(Result<Route>),
+            Stopped,
+        }
         let r0 = now();
         let (r, ms, det_guard) = match deterministic {
             Some((r, g)) => (r, now() - r0, Some(g)),
@@ -769,13 +791,22 @@ impl Core {
                     self.phase(ws, "route");
                 }
                 let routed = super::routed_text(text, &files);
-                let maybe = tokio::select! {
-                    res = self.route_in(ws, &routed, &history, false, guest) => Some(res?),
-                    _ = stop.stopped() => None,
+                let attempt = tokio::select! {
+                    res = self.route_in(ws, &routed, &history, false, guest) => RouteAttempt::Routed(res),
+                    _ = stop.stopped() => RouteAttempt::Stopped,
                 };
                 lock(&self.0.thread.running_phase).remove(&(ws.to_string(), space.to_string()));
-                let Some(r) = maybe.filter(|_| !stop.is_stopped()) else {
+                if stop.is_stopped() {
                     return self.commit_stopped(task, lease, steps, t0, &RouteInfo::default());
+                }
+                let r = match attempt {
+                    RouteAttempt::Stopped => {
+                        return self.commit_stopped(task, lease, steps, t0, &RouteInfo::default());
+                    }
+                    RouteAttempt::Routed(Ok(r)) => r,
+                    RouteAttempt::Routed(Err(e)) => {
+                        return self.commit_route_failed(task, lease, steps, t0, &e.to_string());
+                    }
                 };
                 (r, now() - r0, None)
             }
@@ -794,7 +825,8 @@ impl Core {
             d = decide::for_owner(d, conv.owner_only && conv.research);
         }
         if !guest
-            && d.kind == "supplement"
+            && r.kind == "supplement"
+            && matches!(d.kind.as_str(), "supplement" | "research")
             && let Some(id) = r.item.as_deref()
             && db.item(id)?.is_some_and(|i| i.is_closed())
         {
@@ -824,9 +856,8 @@ impl Core {
             model_kind: r.kind.clone(),
             guard: d.guard.map(String::from),
             model: r.model.clone(),
-            confidence: (!r.fallback).then_some(r.confidence),
+            confidence: Some(r.confidence),
             signals: r.signals.clone(),
-            fallback: r.fallback,
             ms,
             project: r.project.clone(),
             tags: r.tag_ids.clone(),

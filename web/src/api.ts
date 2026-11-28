@@ -85,8 +85,11 @@ export type RNodeUpgrade = { build?: RBuild | null; policy: RUpgradePolicy; own_
 /** how a Node's latest link reached the Hub, as the Hub saw it arrive (kept while it is away; `linked` says whether it is up):
  * `route` where its machine is, `via` what it came through, `latency_ms` the latest round trip of a call while it is linked */
 export type RNodeLink = { route: "loopback" | "lan" | "tailnet" | "public" | "unknown"; tls: boolean; via: "direct" | "proxy" | "tailcat"; peer?: string; since: number; latency_ms: number | null; latency_at: number | null }
+export type ConfinementStatus =
+  | { state: "confined"; backend: string }
+  | { state: "unconfined"; reason: string }
 /** what a Node's machine is, as the Node last said (`node.host`); `os`/`arch` as Rust names them (`macos`, `aarch64`) */
-export type RNodeHost = { hostname?: string; os: string; os_name?: string; os_version?: string; arch: string; cpus?: number; mem_total?: number; file_access?: FileAccessReport }
+export type RNodeHost = { hostname?: string; os: string; os_name?: string; os_version?: string; arch: string; cpus?: number; mem_total?: number; file_access?: FileAccessReport; confinement?: ConfinementStatus | null }
 /** one removal of a Node from its machine, as the Hub records it: `requested` | `draining` | `cancelling` | `ready` |
  * `confirming`, then `removed` (unpaired), `unconfirmed` (it did not confirm), `failed` or `manual` (it cannot remove itself) */
 export type RNodeRemovalRun = { operation_id: string; phase: string; error?: string | null; requested_by: string; grace_secs: number; created: number; updated: number }
@@ -319,7 +322,7 @@ async function setupProject(p: ProjectSetup, progress: (p: CloneProgress) => voi
       }
     }
   } finally {
-    void reader.cancel().catch(() => {})
+    void reader.cancel().catch((e) => { if (!(e instanceof DOMException && e.name === "AbortError")) console.warn("clone progress reader cancel failed", e) })
   }
 }
 export class BotPlacementError extends Error {

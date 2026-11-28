@@ -129,7 +129,7 @@ impl NodeRuntime {
                 PermissionDecision::Reject => format!("{REJECT}|拒绝|reject_once"),
             })
             .collect();
-        let opened_at = now();
+        let opened_at = self.clock.now();
         let wait = steve_types::WaitContract::new(
             steve_types::WaitOwner::Owner,
             steve_types::Millis(opened_at.min(request.expires_at.0)),
@@ -169,6 +169,7 @@ impl NodeRuntime {
             &session,
             "permission",
             json!({ "decision": d.id, "title": request.title }),
+            opened_at,
         )?;
         let at = self.clock.now();
         node_write::insert_permission_in(

@@ -179,7 +179,7 @@ export function startPerf(send: (r: PerfReport) => Promise<unknown>, every = 60_
         ...(nav_opens ? { nav_opens } : {}),
         ...(errors ? { errors } : {}),
         ...(sse_reconnects ? { sse_reconnects } : {}),
-      }).catch(() => {})
+      }).catch((e) => console.warn("perf report failed", e))
     }
   }
   addEventListener("hashchange", () => {

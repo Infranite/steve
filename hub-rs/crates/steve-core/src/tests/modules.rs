@@ -414,12 +414,12 @@ async fn chat_context_goes_into_the_answer_prompt_and_chat_done_rewrites_the_rep
     });
     router(&k, "用 Rust [1] [9]");
     k.core
-        .say_as(WS, Some("u_1"), "Acme 用什么？", &[], &[])
+        .say_as(WS, Some("u_1"), "聊聊 Acme", &[], &[])
         .unwrap();
     let m = reply(&k).await;
     assert_eq!(m.text, "用 Rust [1]");
     assert_eq!(m.meta["cites"], json!([{"n": 1}]));
-    assert_eq!(m.meta["chat"], "Acme 用什么？");
+    assert_eq!(m.meta["chat"], "聊聊 Acme");
     assert_eq!(m.meta["steps"]["answer"]["failed"], false);
     let calls = k.gw.calls.lock().unwrap().clone();
     let p = calls
@@ -437,8 +437,8 @@ async fn chat_context_goes_into_the_answer_prompt_and_chat_done_rewrites_the_rep
     assert_eq!(
         logged(&seen),
         [
-            format!("chat {WS} u_1 Acme 用什么？"),
-            format!("chat {WS} u_1 Acme 用什么？"),
+            format!("chat {WS} u_1 聊聊 Acme"),
+            format!("chat {WS} u_1 聊聊 Acme"),
             format!("done {} 用 Rust [1] [9] [1] 笔记：Acme 用 Rust。", m.id),
         ]
     );

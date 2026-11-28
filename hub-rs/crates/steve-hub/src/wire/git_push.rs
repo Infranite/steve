@@ -201,20 +201,36 @@ impl GitPush {
     }
 
     /// Waits for `op` to settle.
-    async fn settled(&self, runtime: &NodeRuntime, op: &str) -> Option<LedgerEntry> {
+    async fn settled(
+        &self,
+        runtime: &NodeRuntime,
+        op: &str,
+    ) -> Result<Option<LedgerEntry>, steve_store::StoreError> {
+        let mut last_err: Option<steve_store::StoreError> = None;
         runtime
             .wait_ledger_until(op, self.answer_wait, |res| match res {
-                Ok(Some(l)) if l.is_settled() => std::ops::ControlFlow::Break(Some(l)),
-                Ok(Some(_)) => std::ops::ControlFlow::Continue(()),
-                Ok(None) => std::ops::ControlFlow::Break(None),
-                // the store is there again later; the push is in the ledger either way
-                Err(e) => {
-                    tracing::warn!("push {op}: {e}");
+                Ok(Some(l)) if l.is_settled() => std::ops::ControlFlow::Break(Ok(Some(l))),
+                Ok(Some(_)) => {
+                    last_err = None;
                     std::ops::ControlFlow::Continue(())
+                }
+                Ok(None) => std::ops::ControlFlow::Break(Ok(None)),
+                // Transient storage failures retry; permanent decode/contract errors fail immediately.
+                Err(e) if super::node_runtime::is_transient_ledger_error(&e) => {
+                    tracing::warn!("push {op}: {e}");
+                    last_err = Some(e);
+                    std::ops::ControlFlow::Continue(())
+                }
+                Err(e) => {
+                    tracing::error!("push {op}: permanent ledger read error: {e}");
+                    std::ops::ControlFlow::Break(Err(e))
                 }
             })
             .await
-            .flatten()
+            .unwrap_or_else(|| match last_err {
+                Some(e) => Err(e),
+                None => Ok(None),
+            })
     }
 
     /// A push the ledger lost: stopped (asked once) and given a moment to be, never sent again.
@@ -352,17 +368,27 @@ impl GitPush {
     /// yet); asked again, the ledger's entry is waited for again.
     async fn wait(&self, placed: &Placement, op: &str) -> Result<LedgerEntry, PushError> {
         match self.settled(&placed.runtime, op).await {
-            Some(l) => {
+            Ok(Some(l)) => {
                 self.secrets.retire_push(op);
                 Ok(l)
             }
-            None if matches!(placed.runtime.ledger(op), Ok(None)) => {
+            Ok(None) => match placed.runtime.ledger(op) {
+                Ok(None) => {
+                    self.secrets.retire_push(op);
+                    Err(PushError::Lost)
+                }
+                Ok(Some(_)) => {
+                    self.secrets.watch_push(&placed.runtime, op);
+                    Err(PushError::Running)
+                }
+                Err(e) => {
+                    self.secrets.retire_push(op);
+                    Err(node_error(e))
+                }
+            },
+            Err(e) => {
                 self.secrets.retire_push(op);
-                Err(PushError::Lost)
-            }
-            None => {
-                self.secrets.watch_push(&placed.runtime, op);
-                Err(PushError::Running)
+                Err(node_error(e))
             }
         }
     }

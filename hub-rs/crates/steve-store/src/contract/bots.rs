@@ -44,7 +44,6 @@ pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> 
                 "accept_mode",
                 "perm_mode",
                 "avatar",
-                "default_project",
                 "specialties",
                 "enabled",
                 "revision",
@@ -66,7 +65,6 @@ pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> 
                 accept_mode.as_str().into(),
                 perm_mode.as_str().into(),
                 avatar_json.as_str().into(),
-                b.default_project.as_deref().into(),
                 specialties_json.as_str().into(),
                 i64::from(enabled).into(),
                 1_i64.into(),
@@ -93,8 +91,13 @@ pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> 
     w.exec(
         Query::insert()
             .into_table("bot_workspaces")
-            .columns(["bot_id", "workspace_id", "created"])
-            .values_panic([id.as_str().into(), ws.into(), now.into()])
+            .columns(["bot_id", "workspace_id", "default_project", "created"])
+            .values_panic([
+                id.as_str().into(),
+                ws.into(),
+                b.default_project.as_deref().into(),
+                now.into(),
+            ])
             .on_conflict(
                 OnConflict::columns(["bot_id", "workspace_id"])
                     .do_nothing()
@@ -141,7 +144,6 @@ pub fn create(w: &mut W<'_>, ws: &str, b: &NewBot, author: &str) -> Result<Bot> 
         persona,
         proactive,
         avatar,
-        default_project: b.default_project.clone(),
         prompt: None,
         device: None,
         owner,

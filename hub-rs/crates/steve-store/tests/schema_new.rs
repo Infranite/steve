@@ -2314,3 +2314,84 @@ fn ordinary_rpc_error_migration_converts_legacy_retry_shapes() {
     assert_eq!(job_err.params.0["operation"], "op_ja1".into());
     assert_eq!(job_err.params.0["state"], "unknown".into());
 }
+
+#[test]
+fn migration_150_moves_default_project_to_bot_workspaces() {
+    let before_150 = db::MIGRATIONS
+        .iter()
+        .position(|sql| sql.contains("ALTER TABLE bots DROP COLUMN default_project"))
+        .unwrap();
+    let (_dir, path) = at_version(before_150);
+    let c = Connection::open(&path).unwrap();
+    c.execute_batch(
+        r#"INSERT INTO workspaces(id,name,created) VALUES ('w2','W2',1);
+           INSERT INTO projects(id,workspace_id,name,description,device_id,path,kind,worktree,default_bot,archived,created,updated)
+             VALUES ('prj_1','default','P1','','hub','/p1','dir',0,NULL,0,1,1),
+                    ('prj_2','w2','P2','','hub','/p2','dir',0,NULL,0,1,1);
+           INSERT INTO bots(id,workspace_id,name,main,harness,perm_mode,default_project,updated)
+             VALUES ('b_match','default','Match',0,'claude-code','ask','prj_1',1),
+                    ('b_foreign','default','Foreign',0,'claude-code','ask','prj_2',1),
+                    ('b_orphan','default','Orphan',0,'claude-code','ask','prj_missing',1);
+           INSERT INTO bot_workspaces(bot_id,workspace_id,created)
+             VALUES ('b_match','default',1),('b_match','w2',1),
+                    ('b_foreign','default',1),('b_foreign','w2',1),
+                    ('b_orphan','default',1),('b_orphan','w2',1);"#,
+    )
+    .unwrap();
+    drop(c);
+
+    let store = Store::open(&path, NoPublisher).unwrap();
+    // Idempotent re-migration changes nothing.
+    db::migrate_file(&path).unwrap();
+
+    let has_default_project_col: bool = Connection::open(&path)
+        .unwrap()
+        .prepare("PRAGMA table_info(bots)")
+        .unwrap()
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .collect::<rusqlite::Result<Vec<_>>>()
+        .unwrap()
+        .into_iter()
+        .any(|c| c == "default_project");
+    assert!(
+        !has_default_project_col,
+        "bots.default_project column must be dropped by migration 150"
+    );
+    assert_eq!(
+        store
+            .bots()
+            .default_project("b_match", "default")
+            .unwrap()
+            .as_deref(),
+        Some("prj_1")
+    );
+    assert_eq!(store.bots().default_project("b_match", "w2").unwrap(), None);
+    assert_eq!(
+        store
+            .bots()
+            .default_project("b_foreign", "default")
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        store
+            .bots()
+            .default_project("b_foreign", "w2")
+            .unwrap()
+            .as_deref(),
+        Some("prj_2")
+    );
+    assert_eq!(
+        store
+            .bots()
+            .default_project("b_orphan", "default")
+            .unwrap()
+            .as_deref(),
+        Some("prj_missing")
+    );
+    assert_eq!(
+        store.bots().default_project("b_orphan", "w2").unwrap(),
+        None
+    );
+}

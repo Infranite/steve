@@ -102,9 +102,9 @@ export function AuditSettingsPane() {
   useEffect(() => {
     void load()
     /* the purposes by the names the models page gives them; without them an entry says the purpose's key */
-    modelsApi.get().then((v) => setPurposes(Object.fromEntries(v.purposes.map((p) => [p.key, p.label])))).catch(() => {})
+    modelsApi.get().then((v) => setPurposes(Object.fromEntries(v.purposes.map((p) => [p.key, p.label])))).catch((e) => console.warn("audit purposes load failed", e))
     /* who "you" are, so your own steps say 你 */
-    if (!st.me?.user_id) api.me().then((r) => setMe(r.user.id), () => {})
+    if (!st.me?.user_id) api.me().then((r) => setMe(r.user.id), (e) => console.warn("audit me load failed", e))
   }, [])
   const w: Words = { names: page?.names ?? {}, purposes }
   const items = useMemo(() => {

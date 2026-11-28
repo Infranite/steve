@@ -96,7 +96,7 @@ function Account({ route, meOn }: { route: string; meOn: boolean }) {
     place("devices", "devices", t("core:nav.devices"), ServerIcon, route === "devices"),
     place("accounts", "accounts", t("core:nav.accounts"), KeyRoundIcon, route === "accounts" || route === "vault"),
     place("settings", "settings", t("core:nav.settings"), SettingsIcon, route === "settings"),
-    { id: "signout", label: t("pages:access.signOut"), icon: <LogOutIcon strokeWidth={1.75} />, data: { "data-account-sign-out": "" }, onSelect: async () => { setOpen(false); await api.logout().catch(() => {}); location.reload() } },
+    { id: "signout", label: t("pages:access.signOut"), icon: <LogOutIcon strokeWidth={1.75} />, data: { "data-account-sign-out": "" }, onSelect: async () => { setOpen(false); await api.logout().catch((e) => console.warn("logout failed", e)); location.reload() } },
   ]
   const on = items.some((x) => x.current)
   return (

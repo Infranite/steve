@@ -752,9 +752,16 @@ impl steve_core::AgentRuntime for RoutedRuntime {
             })
             .collect();
         let Some(n) = n else {
-            return super::node_runtime::park(&self.store, session_id, text, via, &files)
-                .map(|()| steve_core::Prompted::Queued)
-                .map_err(|e| CoreError::Msg(e.to_string()));
+            return super::node_runtime::park(
+                &self.store,
+                session_id,
+                text,
+                via,
+                &files,
+                steve_store::now(),
+            )
+            .map(|()| steve_core::Prompted::Queued)
+            .map_err(|e| CoreError::Msg(e.to_string()));
         };
         match n.prompt(session_id, text, via, &files) {
             Ok(super::node_runtime::Planned::Created) => Ok(steve_core::Prompted::Sent),

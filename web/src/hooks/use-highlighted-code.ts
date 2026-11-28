@@ -20,7 +20,9 @@ export function useHighlightedCode(value: string, language: string) {
           setLoaded({ language, highlighter: next })
         }
       })
-      .catch(() => {})
+      .catch((e) => {
+        if (!cancelled) console.warn("code highlighter load failed", { language, error: e })
+      })
 
     return () => {
       cancelled = true

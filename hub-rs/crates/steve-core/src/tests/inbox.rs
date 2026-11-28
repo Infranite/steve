@@ -21,6 +21,9 @@ fn chat_answer(k: &Kit) -> String {
 fn count(k: &Kit) -> usize {
     k.db().items(WS).unwrap().len()
 }
+fn promote_router(k: &Kit) {
+    k.gw.set(|_, _| Ok(r#"{"kind":"item","title":"按建议","goal":"按建议"}"#.into()));
+}
 
 #[test]
 fn session_decisions_commit_the_input_and_choice_together() {
@@ -109,6 +112,7 @@ fn session_decisions_commit_the_input_and_choice_together() {
 #[tokio::test]
 async fn promoting_the_same_answer_twice_at_once_makes_one_item() {
     let k = Kit::new();
+    promote_router(&k);
     let m = chat_answer(&k);
     let before = count(&k);
     let (a, b) = tokio::join!(k.core.promote(WS, &m, None), k.core.promote(WS, &m, None));
@@ -132,7 +136,7 @@ async fn promoting_with_a_slow_router_waits_for_the_same_item() {
             .unwrap()
             .recv_timeout(steve_runtime::testkit::EVENTUALLY)
             .expect("the second promotion polls while routing is held");
-        Err(crate::error::msg("slow and broken"))
+        Ok(r#"{"kind":"item","title":"按建议","goal":"按建议"}"#.into())
     });
     let c1 = k.core.clone();
     let c2 = k.core.clone();
@@ -160,6 +164,7 @@ async fn promoting_with_a_slow_router_waits_for_the_same_item() {
 #[tokio::test]
 async fn promoting_an_answer_that_was_already_promoted_returns_the_same_item() {
     let k = Kit::new();
+    promote_router(&k);
     let m = chat_answer(&k);
     let first = k.core.promote(WS, &m, None).await.unwrap();
     let before = count(&k);

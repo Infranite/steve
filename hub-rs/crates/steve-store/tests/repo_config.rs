@@ -499,8 +499,52 @@ fn seed_fixups() {
         r##"{"color":"#7aa7c7","round":70}"##
     );
     let dev = s.bots().get("dev").unwrap().unwrap();
-    assert_eq!(dev.default_project.as_deref(), Some("prj_1"));
+    assert_eq!(
+        s.bots().default_project("dev", WS).unwrap().as_deref(),
+        Some("prj_1")
+    );
+    assert!(dev.owner.is_none());
     assert_eq!(dev.avatar.round, Some(45.into()));
+    assert!(
+        s.bots()
+            .patch(
+                "dev",
+                &BotPatch {
+                    default_project: Some(Some("prj_2".into())),
+                    ..Default::default()
+                },
+                "me",
+            )
+            .is_err(),
+        "un-scoped Bot::patch must reject default_project"
+    );
+    s.bots()
+        .patch_in(
+            WS,
+            "dev",
+            &BotPatch {
+                default_project: Some(Some("prj_2".into())),
+                ..Default::default()
+            },
+            "me",
+        )
+        .unwrap();
+    assert_eq!(
+        s.bots().default_project("dev", WS).unwrap().as_deref(),
+        Some("prj_2")
+    );
+    s.fixture_write(|c| {
+        c.execute(
+            "INSERT INTO workspaces (id, name, created) VALUES ('w2', 'W2', 1)",
+            [],
+        )?;
+        Ok(())
+    })
+    .unwrap();
+    s.bots()
+        .set_workspaces("dev", &[WS.into(), "w2".into()])
+        .unwrap();
+    assert_eq!(s.bots().default_project("dev", "w2").unwrap(), None);
 }
 
 #[test]

@@ -9,6 +9,7 @@ export default {
     edit: "Edit",
     copy: "Copy",
     copied: "Copied",
+    copyFailed: "Could not copy to clipboard",
     confirm: "Confirm",
     back: "Back",
     more: "More",

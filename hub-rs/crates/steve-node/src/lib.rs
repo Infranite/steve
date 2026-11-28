@@ -1577,6 +1577,20 @@ impl LocalNode {
             Ok(())
         })?;
         let confine = confine::Confine::open(&cfg.acp.steve_home, &cfg.home);
+        match confine.state() {
+            Ok(backend) => {
+                tracing::info!(node = %cfg.node, backend, "local node confinement active");
+                metrics::gauge!("steve_node_confined").set(1.0);
+            }
+            Err(ref reason) => {
+                tracing::warn!(
+                    node = %cfg.node,
+                    reason = %reason,
+                    "local node running without OS sandbox confinement"
+                );
+                metrics::gauge!("steve_node_confined").set(0.0);
+            }
+        }
         let node = LocalNode(Arc::new_cyclic(|weak| Inner {
             confine,
             roots: std::sync::RwLock::new(Arc::new(cfg.roots.clone())),
@@ -4671,8 +4685,15 @@ impl Discovery for LocalNode {
         let host = tokio::task::spawn_blocking(host::this_machine)
             .await
             .map_err(|e| Error::new(Code::Internal, e.to_string()))?;
+        let confinement = Some(match self.0.confine.state() {
+            Ok(backend) => ConfinementStatus::Confined {
+                backend: backend.to_string(),
+            },
+            Err(reason) => ConfinementStatus::Unconfined { reason },
+        });
         let host = HostInfo {
             file_access: Some(self.file_access().await),
+            confinement,
             ..host
         };
         Ok(host)
@@ -5639,6 +5660,12 @@ mod fit_tests {
             .unwrap_err();
         assert_eq!(err.code, Code::Forbidden);
         assert!(err.safe_detail.contains("sandbox"), "{}", err.safe_detail);
+        let host = unsandboxed.host().await.unwrap();
+        assert!(
+            matches!(host.confinement, Some(ConfinementStatus::Unconfined { .. })),
+            "expected Unconfined confinement in HostInfo, got {:?}",
+            host.confinement
+        );
         unsandboxed.shutdown().await;
     }
 

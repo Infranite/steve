@@ -20,11 +20,10 @@ pub(crate) const WHOLE_CHARS: usize = 6000;
 #[derive(Debug, Clone)]
 pub(crate) enum Stop {
     /// A turn ended without a delivery, a question or a pending card: `why` is the card's text,
-    /// `last` the agent's last words (their tail), `whole` what it said in the turn that ended (up to
-    /// [`WHOLE_CHARS`]), `answered_you` the turn answered what you asked it from the conversation.
+    /// `whole` what it said in the turn that ended (up to [`WHOLE_CHARS`]), `answered_you` the
+    /// turn answered what you asked it from the conversation.
     Stopped {
         why: String,
-        last: String,
         whole: String,
         answered_you: bool,
     },
@@ -50,21 +49,16 @@ impl Tx<'_> {
         stop: Stop,
     ) -> Result<Option<String>> {
         let i = self.item(item_id)?;
-        /* it stopped on purpose — a question, or an answer to what you asked it from the conversation —
-         * so it is yours, not continued. A report, a plan or something to confirm left in plain text is
-         * reminded first: the agent may have lost Steve's tools after a compaction or in a long context
-         * (decided by the user on 2026-11-09), and it decides then whether to deliver or ask */
-        if let Stop::Stopped {
-            last, answered_you, ..
-        } = &stop
-            && (crate::agent_questions::looks_like_question(last).is_some() || *answered_you)
-        {
-            return Ok(Some(stop.why().into()));
-        }
-        /* and it waits for something only you can do (sign in, scan a code, confirm on a device),
-         * said anywhere in its final reply however long: continuing it would only have it take the
-         * step as done. Whatever way it stopped. */
-        if crate::agent_questions::own_action(&self.db().final_reply(sid)?).is_some() {
+        /* A turn that answered what you asked from the conversation ended on purpose, so it stays
+         * with you without spending a continue. Anything else without steve_deliver or steve_ask
+         * is reminded/continued under the deterministic takeover contract. */
+        if matches!(
+            stop,
+            Stop::Stopped {
+                answered_you: true,
+                ..
+            }
+        ) {
             return Ok(Some(stop.why().into()));
         }
         let why = stop.why().to_string();

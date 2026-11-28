@@ -5,6 +5,10 @@ use steve_store::testkit::hub::node_planning as planning_fixture;
 
 use steve_runtime::FakeClock;
 
+fn now() -> i64 {
+    steve_store::now()
+}
+
 /// Counts what the runtime books after commits.
 #[derive(Default)]
 struct Seen {
@@ -1938,4 +1942,176 @@ async fn repeated_failure_cancel_emits_typed_stall_stop_reason() {
         seen.ended_reasons.lock().unwrap().as_slice(),
         &[steve_types::orchestration::STOP_REASON_STALL_REPEATED_FAILURE.to_owned()]
     );
+}
+
+#[tokio::test]
+async fn injected_clock_drives_park_mid_turn_desired_config_and_fault_timestamps() {
+    const T0: i64 = 1_700_000_000_000;
+    let (_dir, node, original, seen) = retry_fixture();
+    let store = original.store.clone();
+    drop(original);
+
+    let clock = Arc::new(FakeClock::new(T0));
+    let rt = NodeRuntime::with_clock(store.clone(), node.clone(), seen, clock.clone());
+    rt.reconciled.store(true, Ordering::SeqCst);
+    node.connect(Arc::new(Sink(Arc::downgrade(&rt))));
+
+    // 1. park() + queue_in(): both queued row and system parked notice must record T0.
+    park(&store, "s1", "parked msg", "user", &[], clock.now()).unwrap();
+    let evs = store.events().after("s1", 0, 50).unwrap();
+    let queued_ev = evs
+        .iter()
+        .find(|e| e.kind == "queued")
+        .expect("queued event");
+    assert_eq!(queued_ev.ts, T0);
+    let parked_ev = evs
+        .iter()
+        .find(|e| e.kind == "system" && e.data["parked"] == json!(true))
+        .expect("parked notice");
+    assert_eq!(parked_ev.ts, T0);
+
+    // 2. Drain prepare/open + start the parked turn, then advance clock for diagnostics.
+    clock.advance(5_000);
+    let t_diag = clock.now();
+    assert!(rt.send_one().await);
+    assert!(rt.send_one().await);
+    assert!(rt.send_one().await);
+    let execution: ExecutionRef =
+        serde_json::from_str(&node_checks::attempt_execution(&store).unwrap()).unwrap();
+    let ExecutionRef::Turn {
+        session: node_session,
+        turn,
+        attempt,
+    } = &execution
+    else {
+        panic!("expected Turn execution");
+    };
+
+    rt.receive(&EventBatch {
+        events: vec![
+            NodeEvent {
+                schema: 1,
+                id: EventId::new("clk-tools-missing").unwrap(),
+                at: Timestamp(t_diag),
+                cursor: Watermark {
+                    stream: StreamId::new("clk-diag").unwrap(),
+                    epoch: Epoch::new("e1").unwrap(),
+                    seq: 1,
+                },
+                subject: Subject::Session {
+                    session: SessionId::new("s1").unwrap(),
+                },
+                body: EventBody::Diagnostic {
+                    severity: Severity::Warning,
+                    code: STEVE_TOOLS_MISSING.into(),
+                    safe_text: "never listed".into(),
+                    details: None,
+                },
+            },
+            NodeEvent {
+                schema: 1,
+                id: EventId::new("clk-auto-unavail").unwrap(),
+                at: Timestamp(t_diag),
+                cursor: Watermark {
+                    stream: StreamId::new("clk-diag").unwrap(),
+                    epoch: Epoch::new("e1").unwrap(),
+                    seq: 2,
+                },
+                subject: Subject::Execution(execution.clone()),
+                body: EventBody::Diagnostic {
+                    severity: Severity::Warning,
+                    code: AUTO_MODE_CLASSIFIER_UNAVAILABLE.into(),
+                    safe_text: "classifier unavailable".into(),
+                    details: None,
+                },
+            },
+        ],
+    })
+    .unwrap();
+    let evs = store.events().after("s1", 0, 100).unwrap();
+    for code in [STEVE_TOOLS_MISSING, AUTO_MODE_CLASSIFIER_UNAVAILABLE] {
+        let ev = evs
+            .iter()
+            .find(|e| e.kind == "system" && e.data["code"] == code)
+            .unwrap_or_else(|| panic!("missing system event for {code}"));
+        assert_eq!(ev.ts, t_diag, "{code}");
+    }
+
+    // 3. set_desired_in() + pending configure system notice use injected clock.
+    clock.advance(5_000);
+    let t_cfg = clock.now();
+    assert_eq!(
+        rt.configure(
+            "s1",
+            &ConfigChange {
+                permissions: Some(PermissionMode::AcceptEdits),
+                ..Default::default()
+            }
+        )
+        .unwrap(),
+        Configured::Pending
+    );
+    let evs = store.events().after("s1", 0, 100).unwrap();
+    let cfg_ev = evs
+        .iter()
+        .rev()
+        .find(|e| {
+            e.kind == "system"
+                && e.data["text"]
+                    .as_str()
+                    .is_some_and(|s| s.contains("配置变更将在当前回合结束后生效"))
+        })
+        .expect("pending config system event");
+    assert_eq!(cfg_ev.ts, t_cfg);
+
+    // 4. deliver_mid_turn() writes user mid_turn event with injected clock.
+    clock.advance(5_000);
+    let t_mid = clock.now();
+    assert_eq!(
+        rt.prompt("s1", "mid turn msg", "user", &[]).unwrap(),
+        Planned::Busy
+    );
+    let delivered = deliver_mid_turn(
+        &store,
+        node_session.as_str(),
+        turn.as_str(),
+        attempt.as_str(),
+        clock.now(),
+    )
+    .unwrap();
+    assert_eq!(delivered, vec!["mid turn msg"]);
+    let evs = store.events().after("s1", 0, 100).unwrap();
+    let mid_ev = evs
+        .iter()
+        .rev()
+        .find(|e| e.kind == "user" && e.data["mid_turn"] == json!(true))
+        .expect("mid-turn user event");
+    assert_eq!(mid_ev.ts, t_mid);
+
+    // 5. catch_up_streams() -> fault() uses injected clock.
+    clock.advance(5_000);
+    let t_fault = clock.now();
+    let caught = catch_up_streams(
+        &store,
+        &*node,
+        &[StreamHead {
+            stream: StreamId::new(super::heads::session_stream("s1")).unwrap(),
+            epoch: Epoch::new("e_gap").unwrap(),
+            produced: 5,
+            acknowledged: 3,
+        }],
+        None,
+        &*clock,
+    )
+    .await
+    .unwrap();
+    assert_eq!(caught.faulted, 1);
+    let evs = store.events().after("s1", 0, 100).unwrap();
+    let gap_note = steve_i18n::stored(|| steve_i18n::t!("hub.node.gap"));
+    let fault_ev = evs
+        .iter()
+        .rev()
+        .find(|e| e.kind == "system" && e.data["text"] == gap_note)
+        .expect("gap fault system event");
+    assert_eq!(fault_ev.ts, t_fault);
 }

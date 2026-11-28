@@ -49,7 +49,7 @@ export function SteveModelForm({ first = false, onSaved, onDirty, onReady, after
       if (!alive.current || st.workspace?.id !== ws) return
       setView(v); setSaved(true); onSaved?.()
       // Refresh failure must not make an already-committed selection look unsaved.
-      void refresh().catch(() => {})
+      void refresh().catch((e) => console.warn("post-save model refresh failed", e))
       if (afterSave) await afterSave()
     } catch (e) { if (alive.current && st.workspace?.id === ws) setError(e instanceof Error ? e.message : String(e)) }
     finally { inFlight.current = false; if (alive.current) setBusy(false) }

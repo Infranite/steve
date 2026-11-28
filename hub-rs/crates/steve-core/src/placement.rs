@@ -125,12 +125,15 @@ fn assess_bot(
     if !bot.enabled {
         return Ok(Err(vec![Rejection::Bot]));
     }
-    let project = req
-        .project
-        .as_ref()
-        .unwrap_or(&bot.default_project)
-        .as_deref()
-        .filter(|p| !p.is_empty());
+    let default_project = match &req.project {
+        Some(_) => None,
+        None => db.bot_default_project(&bot.id, req.workspace)?,
+    };
+    let project = match &req.project {
+        Some(explicit) => explicit.as_deref(),
+        None => default_project.as_deref(),
+    }
+    .filter(|p| !p.is_empty());
     let found = db
         .project(project)?
         .filter(|p| p.workspace_id == req.workspace && !p.archived);
@@ -655,5 +658,107 @@ mod tests {
         )
         .unwrap();
         assert_eq!(placed.explanation.bot.as_str(), "steve");
+    }
+
+    #[test]
+    fn cross_workspace_bot_ignores_other_workspaces_default_project() {
+        let k = Kit::new();
+        let db = k.core.store();
+        steve_store::testkit::hub::mutations::seed_users(db.store()).unwrap();
+        let ws2 = db
+            .store()
+            .workspaces()
+            .create(
+                &steve_store::NewWorkspace {
+                    name: "Other".into(),
+                    description: None,
+                    item_prefix: None,
+                },
+                "u",
+            )
+            .unwrap();
+        let prj1 = db
+            .store()
+            .projects()
+            .create(
+                WS,
+                &steve_store::NewProject {
+                    name: "MainRepo".into(),
+                    path: "/main-repo".into(),
+                    kind: "dir".into(),
+                    device_id: "hub".into(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        db.store()
+            .bots()
+            .seed(
+                "cross",
+                false,
+                &NewBot {
+                    name: "Cross".into(),
+                    harness: "fixture".into(),
+                    default_project: Some(prj1.id.clone()),
+                    ..Default::default()
+                },
+                WS,
+            )
+            .unwrap();
+        db.store()
+            .bots()
+            .set_workspaces("cross", &[WS.into(), ws2.id.clone()])
+            .unwrap();
+
+        let (placed_ws1, _) = validate(
+            db,
+            k.rt.as_ref(),
+            &DispatchRequest {
+                workspace: WS,
+                bot: Some("cross"),
+                harness: None,
+                model: None,
+                effort: None,
+                team: None,
+                project: &None,
+                required_specialties: &[],
+                node: None,
+                required_nodes: None,
+                allow_main: false,
+            },
+            |_| None,
+            PlacementReason::SteveSelected,
+            None,
+        )
+        .unwrap();
+        assert_eq!(placed_ws1.explanation.bot.as_str(), "cross");
+        assert_eq!(
+            db.bot_default_project("cross", WS).unwrap().as_deref(),
+            Some(prj1.id.as_str())
+        );
+
+        let (placed_ws2, _) = validate(
+            db,
+            k.rt.as_ref(),
+            &DispatchRequest {
+                workspace: &ws2.id,
+                bot: Some("cross"),
+                harness: None,
+                model: None,
+                effort: None,
+                team: None,
+                project: &None,
+                required_specialties: &[],
+                node: None,
+                required_nodes: None,
+                allow_main: false,
+            },
+            |_| None,
+            PlacementReason::SteveSelected,
+            None,
+        )
+        .unwrap();
+        assert_eq!(placed_ws2.explanation.bot.as_str(), "cross");
+        assert_eq!(db.bot_default_project("cross", &ws2.id).unwrap(), None);
     }
 }
