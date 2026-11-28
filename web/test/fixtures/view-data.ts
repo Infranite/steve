@@ -18,7 +18,7 @@ export function fixtureBot(overrides: Partial<Bot> = {}): Bot {
   return {
     id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex",
     m: "", model: null, on: true, acc: "manual", ws: "default", project: null, perm: "", permMode: "auto",
-    rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: ["default"],
+    rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, workspaces: ["default"],
     ...overrides,
   }
 }

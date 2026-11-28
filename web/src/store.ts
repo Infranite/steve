@@ -23,7 +23,7 @@ import type { Cite } from "./api/knowledge"
 import { applyLook } from "./lib/motion"
 import { PERMISSION_MODES, canConfigurePermission } from "./runtime-status"
 import type { SendRecoveryInfo } from "./api/channels"
-import type { DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, PlacementReason, PlacementRejection, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
+import type { BotAccessory, DecisionTier, DecisionView, EffortMapping, FoldReason, ItemView, MemberIdentity, MessageView, PlacementExplanation, PlacementReason, PlacementRejection, ReasoningEffort, SessionLiveVitals, SessionView, SessionWaiting, ViewKind } from "./gen"
 import { applyPatch, decisionsForItem, decisionsForSession, decisionView, loadViews, onCatalog, onEntityView, onViewKinds, messageView, messageViews, openDecisions, resetViews, settle, settled, subscribeItemScope, viewsCursor, itemView, itemViews, sessionView, sessionViews, sessionsForItem, qc, scopeKey, readViews, readItemSessions, table, itemWork, useItemView, useSessionView, useViewGroup } from "./data/sync"
 import { chatLive, updateChat } from "./data/live"
 import { itemDisplayStatusOf, itemState } from "./item-state"
@@ -71,7 +71,7 @@ export type Item = {
 export type Tag = { id: string; name: string; cat: string; desc: string; by: "Steve" | "你"; created: string }
 export type ExecutionSurface = RExecutionSurface
 export type Bot = { id: string; owner?: string | null; main?: boolean; n: string; a: string; role: string; specialties?: string[]; pers: string; pro: number; h: string; harness: string; m: string; model: string | null; fallbackSurfaces?: ExecutionSurface[]; on: boolean; acc: string; ws: string; project: string | null; perm: string; permMode: string; rule: string; prompt: string | null
-  reasoningEffort?: ReasoningEffort | null; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; skin: string | null; dev?: string; workspaces: string[] }
+  reasoningEffort?: ReasoningEffort | null; routines: { t: string; d: string; m: string; on: boolean; last: string }[]; hue: string; color: string; round: number; accessory?: BotAccessory | null; dev?: string; workspaces: string[] }
 export type Draft = { mid: string; thought: string; text: string; /** when the reasoning began, and when the answer's text did (the reasoning is over) */ t0: number; t1?: number }
 export type Msg = { id?: string; clientId?: string; k: "me" | "steve" | "thinking" | "digest"; t?: string; item?: string; fresh?: boolean; chat?: string; files?: RFile[]; cfgs?: any[]; created?: number; steps?: Steps; notice?: { kind: string; level: string; ref?: string; closed?: boolean }; cites?: Cite[]
   /** Steve's welcome that opened the first meeting */
@@ -294,13 +294,15 @@ function botOf(b: RBot): Bot {
   const proj = shell()?.projects.find((p) => p.id === b.default_project)
   return { id: b.id, owner: b.owner ?? null, main: b.main, n: b.name, a: b.name[0] ?? "B", role: b.role, specialties: b.specialties ?? [], pers: b.persona, pro: b.proactive, h: harnessLabel(b.harness), harness: b.harness, m: b.model ?? t("core:defaultModel"), model: b.model, reasoningEffort: b.reasoning_effort, fallbackSurfaces: b.fallback_surfaces ?? [],
     on: b.enabled, acc: ACC[b.accept_mode] ?? ACC.inherit, ws: proj?.name ?? t("core:projectByItem"), project: b.default_project, perm: PERM[b.perm_mode] ?? b.perm_mode, permMode: b.perm_mode, rule: b.rules, prompt: b.prompt,
-    routines: [], hue: b.avatar.color ?? "#8e8e93", color: b.avatar.color ?? defaultColor(b.name), round: b.avatar.round ?? 60, skin: b.avatar.skin ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
+    routines: [], hue: b.avatar.color ?? defaultColor(b.id), color: b.avatar.color ?? defaultColor(b.id), round: b.avatar.round ?? defaultRound(b.id), accessory: b.avatar.accessory ?? null, dev: b.device ?? undefined, workspaces: b.workspaces }
 }
 const AVATAR_HUES = [["#7aa7c7", "mist"], ["#8c7ae6", "lavender"], ["#5fb39a", "teal"], ["#e0a458", "amber"], ["#d9777f", "coral"], ["#6c7a89", "slate"], ["#3d4a5c", "navy"], ["#b08968", "walnut"]] as const
+const DEFAULT_AVATAR_ROUNDS = [15, 45, 70, 95] as const
 /** [color, its name] */
 export const AVATAR_COLORS: [string, string][] = AVATAR_HUES.map(([c, k]) => liveList<[string, string]>([c, ""], 1, () => t(`core:avatarColor.${k}`)))
 const hash = (s: string) => { let h = 2166136261; for (const ch of s) { h ^= ch.codePointAt(0)!; h = Math.imul(h, 16777619) } return h >>> 0 }
-export const defaultColor = (name: string) => AVATAR_COLORS[hash(name) % AVATAR_COLORS.length][0]
+export const defaultColor = (id: string) => AVATAR_COLORS[hash(id) % AVATAR_COLORS.length][0]
+export const defaultRound = (id: string) => DEFAULT_AVATAR_ROUNDS[(hash(id) >>> 3) % DEFAULT_AVATAR_ROUNDS.length]
 
 /** what Steve's own tools are called; one Steve has no word for goes by its name */
 export const STEVE_TOOL: Record<string, string> = live(["steve_contacts","steve_github_read","steve_mail_read","steve_matters","steve_tools_search","steve_tool_call","steve_person_holdings","steve_digest_batch","steve_digest_read","steve_digest_chunk","steve_digest_finish","steve_digest_control","steve_digest_report","steve_matters_search","steve_matter_read","steve_todo_list","steve_todo_add","steve_todo_update","steve_todo_complete", "steve_update", "steve_ask", "steve_request_approval", "steve_deliver", "steve_deliver_file", "steve_publish", "steve_lane_status", "steve_item_read", "steve_items_search", "steve_item_dependencies", "steve_knowledge_search", "steve_knowledge_read", "steve_knowledge_get", "steve_debug", "steve_devices", "steve_reply_source", "steve_event_get", "steve_sessions_list", "steve_remember", "steve_memory_list", "steve_memory_tidy", "steve_note", "steve_whois", "steve_contacts_find", "steve_contacts_search", "steve_contact_get", "steve_contacts_remember", "steve_im_read", "steve_mail_thread", "steve_mail_attachment", "steve_mail_draft", "steve_mail_send", "steve_github_status", "steve_github_ci_log", "steve_github_comment", "steve_github_open_pr", "steve_secret_list", "steve_secret_use", "steve_steward_propose", "steve_upgrade"] as const, (k) => t(`core:steveTool.${k}`))
@@ -1558,7 +1560,7 @@ async function changeBotMemory(k: string, action: Promise<unknown>, message?: st
     await qc.invalidateQueries({ queryKey })
   } catch (e) { fail(e) }
 }
-export async function saveBot(k: string, p: { n?: string; role?: string; specialties?: string[]; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: ReasoningEffort | null; fallbackSurfaces?: ExecutionSurface[]; permMode?: string; project?: string | null; color?: string; round?: number; skin?: string | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
+export async function saveBot(k: string, p: { n?: string; role?: string; specialties?: string[]; pers?: string; pro?: number; rule?: string; acc?: string; harness?: string; model?: string | null; reasoningEffort?: ReasoningEffort | null; fallbackSurfaces?: ExecutionSurface[]; permMode?: string; project?: string | null; color?: string; round?: number; accessory?: BotAccessory | null; prompt?: string | null; on?: boolean; dev?: string | null }, msg = t("core:toast.botSaved")) {
   const b = st.bots[k]
   const q: Partial<RBot> = {}
   if (p.reasoningEffort !== undefined) q.reasoning_effort = p.reasoningEffort
@@ -1567,7 +1569,13 @@ export async function saveBot(k: string, p: { n?: string; role?: string; special
   if (p.n !== undefined) q.name = p.n; if (p.role !== undefined) q.role = p.role; if (p.pers !== undefined) q.persona = p.pers; if (p.pro !== undefined) q.proactive = p.pro; if (p.rule !== undefined) q.rules = p.rule
   if (p.acc !== undefined) q.accept_mode = accKey(p.acc); if (p.harness !== undefined) q.harness = p.harness; if (p.model !== undefined) q.model = p.model; if (p.permMode !== undefined) q.perm_mode = p.permMode
   if (p.project !== undefined) q.default_project = p.project; if (p.prompt !== undefined) q.prompt = p.prompt; if (p.on !== undefined) q.enabled = p.on; if (p.dev !== undefined) q.device = p.dev
-  if (p.color !== undefined || p.round !== undefined || p.skin !== undefined) q.avatar = { color: p.color ?? b.color, round: p.round ?? b.round, skin: p.skin !== undefined ? p.skin : b.skin }
+  if (p.color !== undefined || p.round !== undefined || p.accessory !== undefined) {
+    q.avatar = {
+      color: p.color ?? b.color,
+      round: p.round ?? b.round,
+      accessory: p.accessory !== undefined ? p.accessory : (b.accessory ?? null),
+    }
+  }
   const saved = await shellCall(api.patchBot(k, q), msg)
   if (saved?.selection_validation === "unknown" && (p.harness !== undefined || p.model !== undefined || p.reasoningEffort !== undefined)) toast(t("core:toast.botSelectionUnknown"))
 }

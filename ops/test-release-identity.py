@@ -20,8 +20,13 @@ parser.add_argument("binary", type=Path)
 parser.add_argument("--version", required=True)
 parser.add_argument("--commit", required=True)
 parser.add_argument("--target")
+parser.add_argument("--web", type=Path)
 args = parser.parse_args()
 binary = args.binary.resolve(strict=True)
+packaged_web = args.web.resolve(strict=True) if args.web else None
+if packaged_web is not None:
+    assert (packaged_web / "index.html").is_file(), f"missing web index: {packaged_web}"
+    assert (packaged_web / "release.json").is_file(), f"missing web release.json: {packaged_web}"
 identity = json.loads(subprocess.check_output([str(binary), "--build-info"], timeout=15))
 assert identity["version"] == args.version and identity["commit"] == args.commit, identity
 if args.target:
@@ -30,11 +35,16 @@ assert type(identity["schema"]) is int and identity["schema"] > 0, identity
 
 with tempfile.TemporaryDirectory(prefix="steve-release-identity-") as temp:
     root = Path(temp)
-    home, keys, web, os_home = (root / name for name in ("runtime", "keys", "web", "user-home"))
-    for path in (home, keys, web, os_home):
+    home, keys, os_home = (root / name for name in ("runtime", "keys", "user-home"))
+    for path in (home, keys, os_home):
         path.mkdir(mode=0o700)
-    (web / "index.html").write_text("<html>isolated release identity test</html>")
-    (web / "release.json").write_text(json.dumps({"version": args.version}))
+    if packaged_web is None:
+        web = root / "web"
+        web.mkdir(mode=0o700)
+        (web / "index.html").write_text("<html>isolated release identity test</html>")
+        (web / "release.json").write_text(json.dumps({"version": args.version}))
+    else:
+        web = packaged_web
     with socket.socket() as sock:
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
@@ -42,7 +52,8 @@ with tempfile.TemporaryDirectory(prefix="steve-release-identity-") as temp:
     env.update(HOME=str(os_home), CODEX_HOME=str(root / "codex-home"),
         STEVE_HOME=str(home), STEVE_PORT=str(port), STEVE_HOST="127.0.0.1",
         STEVE_WEB_DIR=str(web), STEVE_VAULT_KEYSTORE="dir", STEVE_VAULT_KEY_DIR=str(keys),
-        STEVE_VERSION="forged-runtime-version", STEVE_NO_RESUME="1", STEVE_REPO=str(root / "repo"),
+        STEVE_VERSION="forged-runtime-version", STEVE_NO_RESUME="1", STEVE_UPDATE_CHECK="0",
+        STEVE_REPO=str(root / "repo"),
         STEVE_ADAPTER_CLAUDE="/nonexistent", STEVE_ADAPTER_CODEX="/nonexistent",
         CLAUDE_CODE_EXECUTABLE="/nonexistent", CODEX_EXECUTABLE="/nonexistent")
 
@@ -105,6 +116,12 @@ with tempfile.TemporaryDirectory(prefix="steve-release-identity-") as temp:
     with running(env, "normal") as process:
         wait_health(process, False)
         print("PASS actual Hub reports compiled version/commit/target despite forged runtime version")
+        if packaged_web is not None:
+            with urllib.request.urlopen(f"http://127.0.0.1:{port}/", timeout=5) as response:
+                assert response.status == 200, response.status
+                html = response.read().decode("utf-8")
+            assert f'<meta name="steve-web-version" content="{args.version}"' in html, html[:500]
+            print("PASS unpacked Hub serves packaged web index with matching web version")
 
     # A negative-only test could pass if all candidates were rejected. Prove a matching binary
     # serves maintenance only until a durable commit and then starts its ordinary business router.

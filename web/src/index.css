@@ -64,6 +64,11 @@
   --sh-md: 0 6px 16px -4px rgb(16 24 40 / 0.1), 0 0 0 1px rgb(16 24 40 / 0.05);
   --sh-lg: 0 12px 32px -6px rgb(16 24 40 / 0.14), 0 0 0 1px rgb(16 24 40 / 0.05);
   --sh-xl: 0 28px 64px -12px rgb(16 24 40 / 0.22), 0 0 0 1px rgb(16 24 40 / 0.06);
+  /* Steve charcoal brand mark tokens */
+  --steve-ink: #1c1d22;
+  --steve-wash: #e8a58c;
+  --steve-wash-opacity: 0.36;
+  --steve-accent: #d46a49;
 }
 .dark {
   --background: #111113;
@@ -109,6 +114,11 @@
   --sh-md: 0 8px 24px -6px rgb(0 0 0 / 0.55), inset 0 1px 0 rgb(255 255 255 / 0.05), 0 0 0 1px rgb(255 255 255 / 0.07);
   --sh-lg: 0 16px 40px -8px rgb(0 0 0 / 0.6), inset 0 1px 0 rgb(255 255 255 / 0.05), 0 0 0 1px rgb(255 255 255 / 0.08);
   --sh-xl: 0 32px 72px -12px rgb(0 0 0 / 0.7), inset 0 1px 0 rgb(255 255 255 / 0.06), 0 0 0 1px rgb(255 255 255 / 0.09);
+  /* Steve charcoal brand mark tokens */
+  --steve-ink: #f2efe6;
+  --steve-wash: #c86d52;
+  --steve-wash-opacity: 0.29;
+  --steve-accent: #f08d6c;
 }
 
 /* fonts and radii are variables the utilities read (not inlined), so an appearance choice (web/src/themes) can change

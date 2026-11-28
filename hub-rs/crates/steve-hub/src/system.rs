@@ -81,7 +81,11 @@ async fn os_label() -> String {
 
 /// Name and OS line of this machine for the `hub` device row.
 pub async fn hub_device(version: &str) -> (String, String, String) {
-    let mut name = run("scutil", &["--get", "ComputerName"]).await;
+    let mut name = if cfg!(target_os = "macos") {
+        run("scutil", &["--get", "ComputerName"]).await
+    } else {
+        String::new()
+    };
     if name.is_empty() {
         name = run("hostname", &[]).await;
     }

@@ -30,6 +30,7 @@ pub use item_delivery::{
 pub mod automation;
 pub mod autonomy;
 pub mod backup;
+pub mod bot_accessory;
 pub mod channels;
 pub mod config;
 pub mod devices;
@@ -85,6 +86,7 @@ pub use autonomy::{
     ApprovalMode, ApprovalPolicy, AutonomyEvent, PermissionHarnessSupport, PermissionPolicyView,
     SessionPermissionStatus, SessionPermissionView,
 };
+pub use bot_accessory::BotAccessory;
 pub use channels::ChannelsEvent;
 pub use config::{ConfigEvent, ConfigReason};
 pub use devices::DevicesEvent;

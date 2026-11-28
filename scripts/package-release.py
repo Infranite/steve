@@ -6,14 +6,16 @@ Only explicit build outputs enter a release. Never archive runtime shell/Python 
 import argparse
 import bz2
 import hashlib
+import importlib.util
 import json
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.request
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 
 RESTIC_VERSION = "0.19.1"
@@ -22,6 +24,8 @@ RESTIC_ASSETS = {
     "aarch64-apple-darwin": ("darwin_arm64", "7be0a144ccc377880f294204aa271d76e4b79554b42a751151d425ce6ebac143"),
     "x86_64-unknown-linux-gnu": ("linux_amd64", "f415415624dcc452f2a02b8c33641791a8c6d6d3b65bbb3543fcf9a25151585c"),
 }
+VERSION_RE = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
+COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 
 def verified_download(url, sha256):
@@ -83,13 +87,35 @@ def archive_bundle(root, manifest, target, asset, platform_manifest):
         sha256=hashlib.sha256(asset.read_bytes()).hexdigest(), size=asset.stat().st_size)]))
 
 
-def package(a):
-    if not re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", a.version):
+def validate_identity_args(version, commit, target):
+    if not VERSION_RE.fullmatch(version):
         raise ValueError("version must be a stable SemVer without v")
-    if not re.fullmatch(r"[0-9a-f]{40}", a.commit):
+    if not COMMIT_RE.fullmatch(commit):
         raise ValueError("commit must be a full Git SHA")
-    if a.target not in {"aarch64-apple-darwin", "x86_64-unknown-linux-gnu"}:
+    if target not in RESTIC_ASSETS:
         raise ValueError("unsupported release target")
+
+
+def verify_binary_info(binary, version, commit, target, label):
+    identity = json.loads(subprocess.check_output([str(binary.resolve()), "--build-info"], timeout=15))
+    if identity.get("version") != version or identity.get("commit") != commit or identity.get("target") != target:
+        raise ValueError(f"{label} build identity does not match release")
+    return identity
+
+
+def verify_asset_entry(asset, bundle_dir):
+    bundle = bundle_dir / asset["name"]
+    if (
+        not bundle.is_file()
+        or bundle.stat().st_size != asset["size"]
+        or hashlib.sha256(bundle.read_bytes()).hexdigest() != asset["sha256"]
+    ):
+        raise ValueError("bundle does not match platform manifest")
+    return bundle
+
+
+def package(a):
+    validate_identity_args(a.version, a.commit, a.target)
     binary, web, out = Path(a.binary), Path(a.web), Path(a.out)
     node = Path(a.node)
     helper = Path(a.keyhelper) if getattr(a, "keyhelper", None) else None
@@ -110,16 +136,10 @@ def package(a):
     for path in [binary, node, *([helper] if helper else []), *installer_files, web, *web.rglob("*")]:
         if path.is_symlink():
             raise ValueError(f"symlink in build output: {path}")
-    identity = json.loads(subprocess.check_output([str(binary.resolve()), "--build-info"], timeout=15))
-    if identity.get("version") != a.version or identity.get("commit") != a.commit or identity.get("target") != a.target:
-        raise ValueError("binary build identity does not match release")
-    node_identity = json.loads(subprocess.check_output([str(node.resolve()), "--build-info"], timeout=15))
-    if any(node_identity.get(k) != getattr(a, k) for k in ("version", "commit", "target")):
-        raise ValueError("Node build identity does not match release")
+    identity = verify_binary_info(binary, a.version, a.commit, a.target, "binary")
+    verify_binary_info(node, a.version, a.commit, a.target, "Node")
     if installer:
-        cli_identity = json.loads(subprocess.check_output([str(cli.resolve()), "--build-info"], timeout=15))
-        if any(cli_identity.get(k) != getattr(a, k) for k in ("version", "commit", "target")):
-            raise ValueError("CLI build identity does not match release")
+        verify_binary_info(cli, a.version, a.commit, a.target, "CLI")
     schema = identity.get("schema")
     if not isinstance(schema, int) or schema < 1:
         raise ValueError("binary did not report a valid schema")
@@ -162,6 +182,154 @@ def package(a):
                            out / f"installer-manifest-{a.target}.json")
 
 
+def safe_extract(archive_path, dest):
+    seen = set()
+    with tarfile.open(archive_path, "r:gz") as archive:
+        for member in archive:
+            name = member.name.rstrip("/")
+            part = PurePosixPath(name)
+            if (
+                not name
+                or part.is_absolute()
+                or ".." in part.parts
+                or "\\" in name
+                or str(part) != name
+                or name in seen
+            ):
+                raise ValueError(f"unsafe or duplicate archive path: {member.name}")
+            seen.add(name)
+            if member.isdir():
+                (dest / part).mkdir(parents=True, exist_ok=True)
+            elif member.isfile():
+                if part.parts[0] == "ops" or name.endswith((".py", ".sh")):
+                    raise ValueError(f"runtime script forbidden in release archive: {name}")
+                target = dest / part
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with archive.extractfile(member) as src, target.open("wb") as dst:
+                    shutil.copyfileobj(src, dst)
+                target.chmod(0o755 if member.mode & 0o111 else 0o644)
+            else:
+                raise ValueError(f"unsupported archive member type: {member.name}")
+
+
+def load_tap_verifier():
+    tap_path = Path(__file__).resolve().parent.parent / "packaging/homebrew/tap/sync.py"
+    spec = importlib.util.spec_from_file_location("homebrew_sync", tap_path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_and_check_platform_manifest(manifest_path, bundle_dir, expected, expected_asset_name, target):
+    manifest = json.loads(manifest_path.read_text())
+    if dict(manifest, assets=[]) != expected:
+        raise ValueError(f"platform manifest does not match release identity: {manifest_path.name}")
+    assets = manifest.get("assets")
+    if not isinstance(assets, list) or len(assets) != 1:
+        raise ValueError(f"platform manifest must list one asset: {manifest_path.name}")
+    asset = assets[0]
+    if asset.get("target") != target or asset.get("name") != expected_asset_name:
+        raise ValueError(f"platform manifest asset does not match target/version: {manifest_path.name}")
+    bundle = verify_asset_entry(asset, bundle_dir)
+    return manifest, bundle
+
+
+def verify(a):
+    validate_identity_args(a.version, a.commit, a.target)
+    out = Path(a.out).resolve(strict=True)
+    manifest_path = out / f"manifest-{a.target}.json"
+    if not manifest_path.is_file():
+        raise ValueError(f"missing platform manifest: {manifest_path}")
+    raw_manifest = json.loads(manifest_path.read_text())
+    schema = raw_manifest.get("schema")
+    if (
+        not isinstance(schema, dict)
+        or not all(type(schema.get(k)) is int and schema[k] > 0 for k in ("min_read", "max_read", "target"))
+        or not (schema["min_read"] <= schema["target"] <= schema["max_read"])
+    ):
+        raise ValueError("platform manifest has invalid schema")
+    expected_runtime = dict(
+        format_version=1,
+        version=a.version,
+        commit=a.commit,
+        hub_version=a.version,
+        web_version=a.version,
+        api_protocol=1,
+        schema=schema,
+        restic_version=RESTIC_VERSION,
+        assets=[],
+    )
+    _, runtime_archive = load_and_check_platform_manifest(
+        manifest_path, out, expected_runtime, f"steve-{a.version}-{a.target}.tar.gz", a.target
+    )
+    identity_script = Path(
+        getattr(a, "identity_script", None) or Path(__file__).resolve().parent.parent / "ops/test-release-identity.py"
+    ).resolve(strict=True)
+    with tempfile.TemporaryDirectory(prefix="steve-verify-") as tmp:
+        tmp_path = Path(tmp)
+        runtime_dir = tmp_path / "runtime"
+        safe_extract(runtime_archive, runtime_dir)
+        inner_path = runtime_dir / "release.json"
+        if not inner_path.is_file() or json.loads(inner_path.read_text()) != expected_runtime:
+            raise ValueError("runtime release.json does not match platform manifest")
+        web_dir = runtime_dir / "web/dist"
+        web_release_path = web_dir / "release.json"
+        if not (web_dir / "index.html").is_file() or not web_release_path.is_file():
+            raise ValueError("runtime bundle is missing packaged web assets")
+        web_identity = json.loads(web_release_path.read_text())
+        if web_identity.get("version") != a.version or web_identity.get("commit") != a.commit:
+            raise ValueError("runtime web identity does not match release")
+        executables = ["bin/steve-hub", "bin/steve-node", "bin/restic"]
+        if a.target == "aarch64-apple-darwin" or (runtime_dir / "bin/steve-keyhelper").exists():
+            executables.append("bin/steve-keyhelper")
+        for rel in executables:
+            path = runtime_dir / rel
+            if path.is_symlink() or not path.is_file() or not (path.stat().st_mode & 0o111):
+                raise ValueError(f"runtime bundle missing executable {rel}")
+        license_path = runtime_dir / "bin/restic.LICENSE"
+        if license_path.is_symlink() or not license_path.is_file() or not license_path.stat().st_size:
+            raise ValueError("runtime bundle missing bin/restic.LICENSE")
+        verify_binary_info(runtime_dir / "bin/steve-node", a.version, a.commit, a.target, "Node")
+        hub_info = verify_binary_info(runtime_dir / "bin/steve-hub", a.version, a.commit, a.target, "binary")
+        if hub_info.get("schema") != schema["target"]:
+            raise ValueError("runtime Hub schema does not match manifest")
+        subprocess.run(
+            [
+                sys.executable,
+                str(identity_script),
+                str(runtime_dir / "bin/steve-hub"),
+                "--version",
+                a.version,
+                "--commit",
+                a.commit,
+                "--target",
+                a.target,
+                "--web",
+                str(web_dir),
+            ],
+            check=True,
+        )
+        print(f"PASS verified runtime bundle {runtime_archive.name}")
+        if getattr(a, "installer", False):
+            installer_manifest_path = out / f"installer-manifest-{a.target}.json"
+            if not installer_manifest_path.is_file():
+                raise ValueError(f"missing installer platform manifest: {installer_manifest_path}")
+            expected_installer = dict(expected_runtime, cli_protocol=2)
+            installer_manifest, installer_archive = load_and_check_platform_manifest(
+                installer_manifest_path,
+                out,
+                expected_installer,
+                f"steve-{a.version}-{a.target}-installer.tar.gz",
+                a.target,
+            )
+            tap = load_tap_verifier()
+            tap.verify_bundle(installer_archive, installer_manifest, a.target)
+            installer_dir = tmp_path / "installer"
+            safe_extract(installer_archive, installer_dir)
+            verify_binary_info(installer_dir / "bin/steve", a.version, a.commit, a.target, "CLI")
+            print(f"PASS verified installer bundle {installer_archive.name}")
+
+
 def merge(a):
     manifests = [json.loads(Path(p).read_text()) for p in a.manifests]
     result = dict(manifests[0], assets=[])
@@ -173,9 +341,7 @@ def merge(a):
             if asset["target"] in targets:
                 raise ValueError("duplicate platform")
             targets.add(asset["target"])
-            bundle = Path(a.out).parent / asset["name"]
-            if not bundle.is_file() or bundle.stat().st_size != asset["size"] or hashlib.sha256(bundle.read_bytes()).hexdigest() != asset["sha256"]:
-                raise ValueError("bundle does not match platform manifest")
+            verify_asset_entry(asset, Path(a.out).parent)
             result["assets"].append(asset)
     if getattr(a, "expected_target", None) and targets != set(a.expected_target):
         raise ValueError("release is missing expected platforms")
@@ -193,6 +359,11 @@ if __name__ == "__main__":
     pack.add_argument("--cli", help="prebuilt native steve binary (required with --installer)")
     pack.add_argument("--license")
     pack.add_argument("--restic-dir", help="trusted build output containing the verified restic and license")
+    check = sub.add_parser("verify", help="verify packaged release archives and boot the unpacked Hub")
+    for name in ("version", "commit", "target", "out"):
+        check.add_argument("--" + name, required=True)
+    check.add_argument("--installer", action="store_true", help="also verify the standalone CLI installer archive")
+    check.add_argument("--identity-script", type=Path, help="override ops/test-release-identity.py path")
     tool = sub.add_parser("restic", help="stage the verified upstream restic binary and license")
     tool.add_argument("--target", required=True, choices=RESTIC_ASSETS)
     tool.add_argument("--out", required=True, type=Path)
@@ -203,6 +374,8 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.action == "package":
         package(args)
+    elif args.action == "verify":
+        verify(args)
     elif args.action == "restic":
         restic(args.target, args.out)
     else:

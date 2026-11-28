@@ -6,7 +6,7 @@ import { st, msgOf, useStore, type Item, type Bot } from "../../src/store"
 
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const now = Date.now()
-const dev: Bot = { id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
+const dev: Bot = { id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, workspaces: [] }
 const item = (id: string, t: string): Item => fixtureItem({ id, t, st: "done", ws: "", acc: "", created: now, updated: now })
 st.bots = { dev }
 seedItems([item("ST-33", "排队中的消息支持撤回修改"), item("ST-40", "会话列表支持搜索"),

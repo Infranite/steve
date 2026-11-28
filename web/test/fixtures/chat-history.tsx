@@ -10,7 +10,7 @@ import { st, useStore, type Msg, type Bot } from "../../src/store"
 import { created, older, text } from "./chat-history-data"
 
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
-const steve: Bot = { id: "steve", main: true, n: "Steve", a: "", role: "你的助手", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
+const steve: Bot = { id: "steve", main: true, n: "Steve", a: "", role: "你的助手", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, workspaces: [] }
 st.bots = { steve }
 st.workspace = fixtureWorkspace({ id: "ws-history", name: "测试", item_prefix: "ST" })
 seedMessages(Array.from({ length: 200 }, (_, n): Msg => { const i = older + n; return { id: "w" + i, k: i % 2 ? "steve" : "me", t: text(i), created: created(i) } }))

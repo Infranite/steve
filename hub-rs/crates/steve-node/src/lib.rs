@@ -300,7 +300,12 @@ where
 }
 
 /// The exclusive hold on a Node's home: one Node per journal.
-struct HomeLock(std::fs::File);
+struct HomeLock {
+    file: std::fs::File,
+    path: PathBuf,
+    #[cfg(unix)]
+    identity: Option<(u64, u64)>,
+}
 
 impl HomeLock {
     fn take(home: &Path) -> ApiResult<HomeLock> {
@@ -317,11 +322,12 @@ impl HomeLock {
     fn take_retry(home: &Path, mut again: impl FnMut() -> bool) -> ApiResult<HomeLock> {
         use std::io::{Seek, SeekFrom, Write};
         use std::os::fd::AsRawFd;
+        let path = home.join("node.lock");
         let mut f = std::fs::OpenOptions::new()
             .create(true)
             .truncate(false)
             .write(true)
-            .open(home.join("node.lock"))
+            .open(&path)
             .map_err(|e| Error::new(Code::Internal, format!("node lock: {e}")))?;
         // A concurrent fork briefly inherits even a CLOEXEC descriptor until exec. After the
         // old Node closes, that small window must not turn an otherwise clean restart into a
@@ -340,7 +346,36 @@ impl HomeLock {
             let _ = writeln!(f, "{}", std::process::id());
             let _ = f.flush();
         }
-        Ok(HomeLock(f))
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            f.metadata().ok().map(|m| (m.dev(), m.ino()))
+        };
+        Ok(HomeLock {
+            file: f,
+            path,
+            #[cfg(unix)]
+            identity,
+        })
+    }
+
+    /// True if `node.lock` at the original path still resolves to the same file opened at startup.
+    fn intact(&self) -> bool {
+        match std::fs::metadata(&self.path) {
+            Ok(meta) => {
+                #[cfg(unix)]
+                if let Some(id) = self.identity {
+                    use std::os::unix::fs::MetadataExt;
+                    return (meta.dev(), meta.ino()) == id;
+                }
+                let _ = meta;
+                true
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            #[cfg(unix)]
+            Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => false,
+            Err(_) => true,
+        }
     }
 }
 
@@ -348,12 +383,12 @@ impl Drop for HomeLock {
     fn drop(&mut self) {
         use std::os::fd::AsRawFd;
         // Clear the PID while still holding the exclusive lock so clean exits never leave a stale PID.
-        let _ = self.0.set_len(0);
+        let _ = self.file.set_len(0);
         // CLOEXEC prevents inheritance after exec, but another thread may currently be
         // between fork and exec. Closing only our descriptor would leave that child holding
         // the same flock. The last Node owner has quiesced: release its lock explicitly,
         // independently of when an unrelated child closes its inherited descriptor.
-        unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+        unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
     }
 }
 
@@ -380,7 +415,7 @@ mod home_lock_tests {
         ));
         // dup holds the same open-file description as fork would. Close it at the retry
         // boundary (exec's CLOEXEC), without relying on a child being scheduled within 200 ms.
-        let mut inherited = Some(lease.0.try_clone().unwrap());
+        let mut inherited = Some(lease.file.try_clone().unwrap());
         drop(lease);
         assert!(
             std::fs::read_to_string(dir.path().join("node.lock"))
@@ -400,6 +435,27 @@ mod home_lock_tests {
             "a short inherited descriptor must clear within acquisition: {}",
             next.err().map(|e| e.safe_detail).unwrap_or_default()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn home_lock_intact_detects_rename_and_recreated_lock_file() {
+        let root = tempfile::tempdir().unwrap();
+        let home = root.path().join("node");
+        std::fs::create_dir(&home).unwrap();
+        let lease = HomeLock::take(&home).unwrap();
+        assert!(lease.intact());
+
+        let retired = root.path().join("retired");
+        std::fs::rename(&home, &retired).unwrap();
+        assert!(!lease.intact());
+
+        // Recreating the directory and even a brand-new node.lock at the old path must not fool
+        // intact(), because its inode differs from the locked file descriptor.
+        std::fs::create_dir(&home).unwrap();
+        assert!(!lease.intact());
+        std::fs::write(home.join("node.lock"), "").unwrap();
+        assert!(!lease.intact());
     }
 }
 
@@ -1722,10 +1778,16 @@ impl LocalNode {
         Ok(())
     }
 
+    /// Whether this Node's `node.lock` still resolves to the inode opened at startup.
+    pub fn home_intact(&self) -> bool {
+        self.0._lock.intact()
+    }
+
     /// Stops every harness (confirmed or recorded as not stopped) and ends the Node's tasks; the
     /// home is free once the last handle is dropped.
     pub async fn shutdown(&self) {
         self.0.closed.store(true, Ordering::SeqCst);
+        self.0.wake.notify_waiters();
         self.0.wake.notify_one();
         let tasks = std::mem::take(&mut *self.0.tasks.lock().unwrap());
         for task in tasks {
@@ -1741,6 +1803,7 @@ impl LocalNode {
         self.0.stdio_mcp.shutdown();
         // All effects have quiesced. Preserve unresolved outcomes for explicit Hub recovery.
         let _ = self.0.j.tx(|t| t.mark_unknown());
+        self.0.wake.notify_waiters();
         self.0.wake.notify_one();
     }
 
@@ -2469,13 +2532,32 @@ async fn deliver_loop(inner: std::sync::Weak<Inner>) {
             progress = false;
             sent.clear();
             if was_short || sink.is_none() {
-                drop(me);
-                tokio::time::sleep(if sink.is_none() {
+                let wait = if sink.is_none() {
                     Duration::from_millis(200)
                 } else {
                     backoff
-                })
-                .await;
+                };
+                let wake = me.wake.clone();
+                drop(me);
+                let deadline = tokio::time::Instant::now() + wait;
+                loop {
+                    let notified = wake.notified();
+                    tokio::pin!(notified);
+                    notified.as_mut().enable();
+                    if inner
+                        .upgrade()
+                        .is_none_or(|m| m.closed.load(Ordering::SeqCst))
+                    {
+                        return;
+                    }
+                    if tokio::time::Instant::now() >= deadline {
+                        break;
+                    }
+                    tokio::select! {
+                        _ = tokio::time::sleep_until(deadline) => break,
+                        _ = &mut notified => {}
+                    }
+                }
                 if sink.is_some() {
                     backoff = if moved {
                         Duration::from_millis(100)
@@ -2485,13 +2567,41 @@ async fn deliver_loop(inner: std::sync::Weak<Inner>) {
                 }
                 continue;
             }
-            let _ = tokio::time::timeout(Duration::from_secs(2), me.wake.notified()).await;
+            let wake = me.wake.clone();
+            let notified = wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if me.closed.load(Ordering::SeqCst) {
+                return;
+            }
+            drop(me);
+            let _ = tokio::time::timeout(Duration::from_secs(2), notified).await;
             continue;
         }
         let room = flight.len() < IN_FLIGHT && !short;
-        let done = tokio::select! {
-            d = flight.join_next() => d,
-            _ = me.wake.notified(), if room => continue,
+        let done = loop {
+            let notified = me.wake.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if me.closed.load(Ordering::SeqCst) {
+                flight.abort_all();
+                return;
+            }
+            tokio::select! {
+                d = flight.join_next() => break Some(d),
+                _ = &mut notified => {
+                    if me.closed.load(Ordering::SeqCst) {
+                        flight.abort_all();
+                        return;
+                    }
+                    if room {
+                        break None;
+                    }
+                }
+            }
+        };
+        let Some(done) = done else {
+            continue;
         };
         let Some(Ok((marks, answered))) = done else {
             short = true;
@@ -4570,6 +4680,12 @@ impl Discovery for LocalNode {
         .map_err(|e| Error::new(Code::Internal, e.to_string()))
     }
     async fn probe(&self, fresh: bool) -> ApiResult<Capabilities> {
+        if self.0.closed.load(Ordering::SeqCst) || !self.home_intact() {
+            return Err(Error::new(
+                Code::Unavailable,
+                "node home is no longer intact",
+            ));
+        }
         let binaries = async {
             match self.discovery() {
                 Ok(d) => self.0.probes.get(&d, fresh).await,
@@ -4591,6 +4707,12 @@ impl Discovery for LocalNode {
             }
         };
         let (probed, snapshot) = tokio::join!(binaries, adapters);
+        if self.0.closed.load(Ordering::SeqCst) || !self.home_intact() {
+            return Err(Error::new(
+                Code::Unavailable,
+                "node home is no longer intact",
+            ));
+        }
         let adapter_probe::ProbeSnapshot {
             adapters,
             login_env,
@@ -5503,5 +5625,155 @@ mod fit_tests {
         assert_eq!(err.code, Code::Forbidden);
         assert!(err.safe_detail.contains("sandbox"), "{}", err.safe_detail);
         unsandboxed.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn probe_returns_unavailable_without_recreating_retired_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let steve_home = dir.path().join("steve");
+        let node_home = steve_home.join("data/node");
+        let node = LocalNode::open(NodeConfig {
+            node: NodeId::new("n_probe_retired").unwrap(),
+            home: node_home.clone(),
+            acp: AcpConfig {
+                adapters: HashMap::from([("pi".into(), steve_home.join("adapters/pi"))]),
+                declared: Default::default(),
+                node: PathBuf::from("/usr/bin/false"),
+                claude_executable: PathBuf::from("/usr/bin/false"),
+                claude_config_dir: None,
+                steve_home: steve_home.clone(),
+                codex_home: steve_home.join("codex"),
+                user_home: dir.path().to_path_buf(),
+                version: "0.14.0".into(),
+            },
+            roots: vec![],
+            capacity: Capacity {
+                sessions: 1,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Storage::default(),
+            ceiling: PolicyCeiling::default(),
+        })
+        .unwrap();
+
+        let retired = dir.path().join("retired-steve");
+        std::fs::rename(&steve_home, &retired).unwrap();
+
+        let err = node.probe(false).await.unwrap_err();
+        assert_eq!(err.code, Code::Unavailable);
+        assert!(
+            !steve_home.exists(),
+            "probe must not recreate retired STEVE_HOME"
+        );
+        node.shutdown().await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn deliver_loop_exits_promptly_on_shutdown_while_in_flight_or_backing_off() {
+        struct HangSink(Arc<tokio::sync::Notify>);
+        #[async_trait]
+        impl EventSink for HangSink {
+            async fn commit(&self, _batch: EventBatch) -> ApiResult<EventAck> {
+                self.0.notify_one();
+                std::future::pending().await
+            }
+        }
+
+        struct FailSink {
+            calls: AtomicUsize,
+            wake_at: usize,
+            ready: Arc<tokio::sync::Notify>,
+        }
+        #[async_trait]
+        impl EventSink for FailSink {
+            async fn commit(&self, _batch: EventBatch) -> ApiResult<EventAck> {
+                let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+                if n >= self.wake_at {
+                    self.ready.notify_one();
+                }
+                Err(Error::later(Code::Unavailable, "down"))
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let make_node = |id: &str| {
+            LocalNode::open(NodeConfig {
+                node: NodeId::new(id).unwrap(),
+                home: dir.path().join(id),
+                acp: AcpConfig {
+                    adapters: Default::default(),
+                    declared: Default::default(),
+                    node: PathBuf::from("/usr/bin/false"),
+                    claude_executable: PathBuf::from("/usr/bin/false"),
+                    claude_config_dir: None,
+                    steve_home: dir.path().to_path_buf(),
+                    codex_home: dir.path().to_path_buf(),
+                    user_home: dir.path().to_path_buf(),
+                    version: "0.14.0".into(),
+                },
+                roots: vec![],
+                capacity: Capacity {
+                    sessions: 1,
+                    jobs: 0,
+                    execs: 0,
+                },
+                storage: Storage::default(),
+                ceiling: PolicyCeiling::default(),
+            })
+            .unwrap()
+        };
+        let prepare_cmd = |res: &str, op: &str| Command {
+            id: OperationId::new(op).unwrap(),
+            issued_at: Timestamp(now()),
+            accept_before: Timestamp(now() + 60_000),
+            grant: GrantId::new("g_deliver").unwrap(),
+            body: Prepare {
+                resource: res.into(),
+                kind: PrepareKind::Scratch,
+            },
+        };
+
+        // 1. In-flight commit hanging up to HUB_TIMEOUT (15s) aborts immediately on shutdown.
+        let n1 = make_node("n_hang");
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let waiting = entered.notified();
+        n1.connect(Arc::new(HangSink(entered.clone())), None);
+        n1.prepare_workspace(prepare_cmd("item:hang", "op_hang"))
+            .await
+            .unwrap();
+        waiting.await;
+        let before = tokio::time::Instant::now();
+        n1.shutdown().await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            before,
+            "shutdown must not wait out HUB_TIMEOUT while commit is in flight"
+        );
+
+        // 2. Backoff sleep after repeated failures exits immediately on shutdown.
+        let n2 = make_node("n_backoff");
+        let ready = Arc::new(tokio::sync::Notify::new());
+        let waiting = ready.notified();
+        n2.connect(
+            Arc::new(FailSink {
+                calls: AtomicUsize::new(0),
+                wake_at: 5,
+                ready: ready.clone(),
+            }),
+            None,
+        );
+        n2.prepare_workspace(prepare_cmd("item:backoff", "op_backoff"))
+            .await
+            .unwrap();
+        waiting.await;
+        tokio::task::yield_now().await;
+        let before = tokio::time::Instant::now();
+        n2.shutdown().await;
+        assert_eq!(
+            tokio::time::Instant::now(),
+            before,
+            "shutdown must not wait out deliver_loop backoff sleep"
+        );
     }
 }

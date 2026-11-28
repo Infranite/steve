@@ -8,7 +8,7 @@ import { st, useStore, type Item, type Bot, type Wait } from "../../src/store"
 
 document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-scheme: dark)").matches)
 const now = Date.now()
-const dev: Bot = { id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
+const dev: Bot = { id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, workspaces: [] }
 const item = (id: string, t: string, x: Partial<Item>): Item => fixtureItem({ id, t, phase: "active", ws: "", up: "02:03", acc: "", created: now, updated: now, ...x })
 const wait = (type: Wait["type"], q: string, subject = "action"): Wait => fixtureWait({ type, q, since: "3 分钟", decision: "d-" + q, subject })
 const approve = wait("approve", "合并 PR #12 并打 tag 发版")

@@ -61,6 +61,7 @@ export const SMOKE = [
   "item-card",
   "item-feed",
   "item-rows",
+  "item-state",
   "knowledge",
   "local-harness-unify",
   "look",

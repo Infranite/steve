@@ -5,8 +5,10 @@ name: CI
 # there instead of holding a runner for GitHub's six hours. When GitHub cannot give a macOS job a runner
 # at all it cancels the job itself, with no step run; the `CI rerun` workflow (ci-rerun.yml) reruns such
 # a run on main.
-# A pull request into main runs the Linux jobs (and the Apple job only when it touches the apps, the web
-# client they bundle or this workflow); macOS runners are scarce and were the queue every PR waited in. A push to main
+# A pull request into main runs the Linux jobs (including `release-check`, which builds with a
+# release identity, packages release-shaped bundles and runs `ops/test-release-identity.py` against
+# the unpacked Hub; the Apple job runs only when the PR touches the apps, the web client they bundle
+# or this workflow); macOS runners are scarce and were the queue every PR waited in. A push to main
 # and a merge queue run cover both platforms, with three macOS jobs: two Rust shards (the first also runs the
 # release and boundary scripts) and the Apple job. The web checks are the same TypeScript on both, so Linux runs them. Main pushes share one running and at most one pending run;
 # a newer push replaces the pending run without stopping the running one. Merge queue runs stay independent.
@@ -71,6 +73,13 @@ jobs:
         run: |
           npx playwright install --only-shell chromium
           npm run test:web:browser-smoke
+      - name: Upload built web assets for release-check
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: ci-web-dist
+          path: web/dist
+          if-no-files-found: error
+          retention-days: 1
   # Slow browser tests (> CI_SMOKE_THRESHOLD_S = 30 s on CI, EXTENDED in web/test/browser-smoke.mjs):
   # sharded across parallel Linux runners by test count so each shard stays under 8 minutes; run only when web files change.
   browser-extended:
@@ -358,12 +367,84 @@ jobs:
           CARGO_INCREMENTAL: '0'
           CARGO_PROFILE_TEST_DEBUG: '0'
         run: cargo test --locked -p steve-store --lib -- --ignored contract::postgres::tests::postgres_contract
+  # Exercise the release pipeline on Linux in pull requests too: build the binaries with a compile-time
+  # release identity (without dev-dependencies), reuse the `web` job's `web/dist`, package release and
+  # installer bundles, verify manifests/layout and boot the unpacked Hub with `ops/test-release-identity.py`.
+  release-check:
+    name: release-check
+    needs: [changes, web]
+    if: ${{ !cancelled() && needs.changes.outputs.skip != 'true' && needs.web.result == 'success' }}
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      TARGET: x86_64-unknown-linux-gnu
+      RELEASE_CHECK_VERSION: '0.0.0'
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.13'
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec
+        with:
+          toolchain: 1.99.1
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: ci-web-dist
+          path: web/dist
+      - uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        id: rust-cache
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            hub-rs/target/debug
+          key: rust-release-check-v1-ubuntu-22.04-${{ runner.arch }}-1.99.1-${{ hashFiles('hub-rs/Cargo.lock', 'hub-rs/Cargo.toml', 'hub-rs/crates/*/Cargo.toml', '.github/workflows/ci.yml') }}
+          restore-keys: ${{ github.event_name == 'pull_request' && format('rust-release-check-v1-ubuntu-22.04-{0}-1.99.1-', runner.arch) || '' }}
+      - name: Always rebuild workspace packages from this checkout
+        run: cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev
+      - name: Build CLI, Hub, Node and keyhelper with release identity
+        id: build
+        shell: bash
+        run: |
+          STEVE_RELEASE_VERSION="$RELEASE_CHECK_VERSION" STEVE_RELEASE_COMMIT="$GITHUB_SHA" \
+            cargo build --locked --manifest-path hub-rs/Cargo.toml \
+              -p steve-install -p steve-hub -p steve-node-cli -p steve-keyhelper
+      - name: Stage the pinned backup engine
+        shell: bash
+        run: python3 scripts/package-release.py restic --target "$TARGET" --out release-restic
+      - name: Package and verify release-shaped bundles
+        shell: bash
+        run: |
+          python3 scripts/package-release.py package \
+            --version "$RELEASE_CHECK_VERSION" --commit "$GITHUB_SHA" --target "$TARGET" \
+            --binary hub-rs/target/debug/steve-hub \
+            --node hub-rs/target/debug/steve-node \
+            --keyhelper hub-rs/target/debug/steve-keyhelper \
+            --web web/dist --out release-assets \
+            --installer --cli hub-rs/target/debug/steve \
+            --restic-dir release-restic
+          python3 scripts/package-release.py verify \
+            --version "$RELEASE_CHECK_VERSION" --commit "$GITHUB_SHA" --target "$TARGET" \
+            --out release-assets --installer
+      - name: Keep only dependency artifacts in the cache
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        run: cargo clean --locked --manifest-path hub-rs/Cargo.toml --workspace --profile dev
+      - uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            hub-rs/target/debug
+          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
   test:
     name: CI gate
     # Always runs, so a cancelled run reports a failed gate: branch rules take a skipped required check
     # as passed. A superseded run's failure stays on its own commit and never touches the newer one's.
     if: ${{ always() }}
-    needs: [changes, scripts, web, browser-extended, rust-plan, rust-test, rust, apple, postgres-contract]
+    needs: [changes, scripts, web, browser-extended, rust-plan, rust-test, rust, apple, postgres-contract, release-check]
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     steps:
@@ -374,12 +455,12 @@ jobs:
           python3 - <<'PY'
           import json, os
           results = json.loads(os.environ['RESULTS'])
-          assert set(results) == {'changes', 'scripts', 'web', 'browser-extended', 'rust-plan', 'rust-test', 'rust', 'apple', 'postgres-contract'}, results
+          assert set(results) == {'changes', 'scripts', 'web', 'browser-extended', 'rust-plan', 'rust-test', 'rust', 'apple', 'postgres-contract', 'release-check'}, results
           changes = results.pop('changes')
           assert changes['result'] in ('success', 'skipped'), changes
-          # Rust, PostgreSQL, Apple and extended browser tests may skip release-notes-only changes after a successful base run.
+          # Rust, PostgreSQL, Apple, release-check and extended browser tests may skip release-notes-only changes after a successful base run.
           if changes['result'] == 'success' and changes['outputs'].get('skip') == 'true':
-              for job in ('rust-test', 'rust', 'apple', 'postgres-contract', 'browser-extended'):
+              for job in ('rust-test', 'rust', 'apple', 'postgres-contract', 'browser-extended', 'release-check'):
                   assert results.pop(job)['result'] in ('success', 'skipped'), results
           else:
               # A pull request that does not touch the apps skips the Apple job, on the word of `changes` only.

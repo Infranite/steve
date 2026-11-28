@@ -96,14 +96,10 @@ pub struct Parent {
 pub struct Avatar {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
-    #[serde(
-        default,
-        deserialize_with = "double",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub skin: Option<Option<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub round: Option<Number>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accessory: Option<steve_types::BotAccessory>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

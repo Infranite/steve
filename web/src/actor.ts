@@ -17,7 +17,7 @@ export type Actor = {
   avatar?: AvatarRef | unknown
   /** Stable color seed: defaults to canonical id (party_id / user_id) so same-named people get distinct colors. */
   seed?: string | null
-  /** Bot id when kind === "bot", rendered with agent-robot-avatar. */
+  /** Bot id when kind === "bot" (rendered with the charcoal mascot family). */
   botId?: string | null
   /** Unconfirmed contact styling (dashed muted placeholder). */
   unconfirmed?: boolean

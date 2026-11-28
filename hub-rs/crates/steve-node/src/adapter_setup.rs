@@ -301,7 +301,7 @@ pub(crate) fn setup(
     let (last, busy) = inner.j.read(|t| Ok((t.installation(id)?, idle(t).err())))?;
     let managed = cfg.managed_adapter(id);
     let prefix_error = if managed && maintenance.is_none() && busy.is_none() {
-        managed::prefix_lock(&cfg.steve_home, true).err()
+        managed::check_prefix_available(&cfg.steve_home).err()
     } else {
         None
     };
