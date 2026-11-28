@@ -452,6 +452,42 @@ async fn a_failing_router_fails_explicitly_without_making_an_item() {
 }
 
 #[tokio::test]
+async fn a_router_blocked_by_local_node_updating_surfaces_updating_notice() {
+    let k = Kit::new();
+    k.gw.set(|p, _| {
+        if p.starts_with("You are the router") {
+            Err(crate::gateway::GatewayError::LocalNodeUpdating.into())
+        } else {
+            Ok(r#"{"thought":"","answer":"不应直接回答"}"#.into())
+        }
+    });
+    let before = items(&k);
+    let mid = k.core.say(WS, "帮我看看最近的状态", &[]).unwrap();
+    eventually_sync(
+        "The conversation route is bound to a local_node_updating notice.",
+        || route_opt(&k, &mid).is_some_and(|l| l.reply_message_id.is_some()),
+    )
+    .await;
+    let l = route_log(&k, &mid);
+    let reply = k
+        .db()
+        .messages(WS)
+        .unwrap()
+        .into_iter()
+        .find(|m| Some(&m.id) == l.reply_message_id.as_ref())
+        .expect("local_node_updating reply message");
+    assert_eq!(reply.meta["error"], json!(true));
+    assert_eq!(reply.meta["error_code"], json!("local_node_updating"));
+    assert!(
+        reply.text.contains("本机 Node 正在更新"),
+        "expected local_node_updating notice, got: {}",
+        reply.text
+    );
+    assert_eq!(reply.item_id, None);
+    assert_eq!(items(&k), before);
+}
+
+#[tokio::test]
 async fn research_without_mounted_researcher_fails_explicitly() {
     let k = Kit::new();
     k.gw.set(|_, _| Ok(r#"{"thought":"","answer":"不应静默回落为 answer"}"#.into()));

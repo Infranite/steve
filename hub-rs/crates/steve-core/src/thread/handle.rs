@@ -334,17 +334,43 @@ impl Core {
         lease: &str,
         steps: &Mutex<Steps>,
         t0: i64,
-        detail: &str,
+        err: &crate::CoreError,
     ) -> Result<()> {
-        tracing::error!(
-            run = %task.id,
-            ws = %task.workspace_id,
-            "thread router failed: {detail}"
+        let local_updating = matches!(
+            err,
+            crate::CoreError::Gateway(crate::gateway::GatewayError::LocalNodeUpdating)
+                | crate::CoreError::Route(crate::gateway::RouteError::ModelCall(
+                    crate::gateway::GatewayError::LocalNodeUpdating,
+                ))
         );
+        let (error_code, reply_text, detail) = if local_updating {
+            tracing::warn!(
+                run = %task.id,
+                ws = %task.workspace_id,
+                "thread router deferred: local node updating"
+            );
+            (
+                "local_node_updating",
+                steve_i18n::stored(|| steve_i18n::t!("core.node.local_updating")),
+                "local_node_updating".to_string(),
+            )
+        } else {
+            let detail = err.to_string();
+            tracing::error!(
+                run = %task.id,
+                ws = %task.workspace_id,
+                "thread router failed: {detail}"
+            );
+            (
+                "route_failed",
+                "（消息判断失败，请稍后重试或检查当前路由模型配置）".to_string(),
+                detail,
+            )
+        };
         let mut meta = Map::new();
         meta.insert("origin".into(), json!(task.origin_message_id));
         meta.insert("error".into(), json!(true));
-        meta.insert("error_code".into(), json!("route_failed"));
+        meta.insert("error_code".into(), json!(error_code));
         meta.insert(SYSTEM.into(), json!(true));
         meta.insert("steps".into(), lock(steps).json(now() - t0));
         let route = RouteInfo::default();
@@ -353,15 +379,15 @@ impl Core {
             lease,
             false,
             "failed",
-            Some("（消息判断失败，请稍后重试或检查当前路由模型配置）"),
+            Some(&reply_text),
             None,
             Value::Object(meta),
             &route,
             None,
             None,
             ReceiptDispatch::NoDispatch,
-            Some("route_failed"),
-            Some(detail),
+            Some(error_code),
+            Some(&detail),
         )?;
         Ok(())
     }
@@ -805,7 +831,7 @@ impl Core {
                     }
                     RouteAttempt::Routed(Ok(r)) => r,
                     RouteAttempt::Routed(Err(e)) => {
-                        return self.commit_route_failed(task, lease, steps, t0, &e.to_string());
+                        return self.commit_route_failed(task, lease, steps, t0, &e);
                     }
                 };
                 (r, now() - r0, None)

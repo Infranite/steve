@@ -348,9 +348,15 @@ pub const ROUTE_TIMEOUT: Duration = Duration::from_secs(30);
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RouteError {
     #[error("router model call failed: {0}")]
-    ModelCall(String),
+    ModelCall(GatewayError),
     #[error("router returned unusable output: {0}")]
     UnusableOutput(String),
+}
+
+impl RouteError {
+    pub fn is_local_node_updating(&self) -> bool {
+        matches!(self, Self::ModelCall(GatewayError::LocalNodeUpdating))
+    }
 }
 
 /// The images of [`with_images`] blocks (`{"type":"image","source":{"type":"base64",…}}`); a block
@@ -1532,8 +1538,21 @@ fn route_new_tags(value: Option<&Value>) -> Option<Vec<NewTag>> {
     })
 }
 
-/// Route a burst in one call. Failure uses the same safe deterministic route as a single
-/// request; do not replay the failed batch as individual model calls.
+fn route_call_error(scope: &str, e: CoreError) -> RouteError {
+    let gw_err = gateway_error(e);
+    let reason = if matches!(gw_err, GatewayError::LocalNodeUpdating) {
+        tracing::warn!("{scope} blocked: local node updating");
+        "local_node_updating"
+    } else {
+        tracing::error!("{scope} failed {gw_err}");
+        "model_call"
+    };
+    metrics::counter!("steve_router_failures_total", "reason" => reason).increment(1);
+    RouteError::ModelCall(gw_err)
+}
+
+/// Route a burst in one call; failures and unusable replies return [`RouteError`]. Do not replay a
+/// failed batch as individual model calls.
 pub async fn route_many(
     gw: &dyn ModelGateway,
     c: &RouteCtx,
@@ -1552,11 +1571,7 @@ pub async fn route_many(
                 .increment(1);
             RouteError::UnusableOutput(js_head(&raw, 200).into())
         }),
-        Err(e) => {
-            tracing::error!("route batch failed {e}");
-            metrics::counter!("steve_router_failures_total", "reason" => "model_call").increment(1);
-            Err(RouteError::ModelCall(e.to_string()))
-        }
+        Err(e) => Err(route_call_error("route batch", e)),
     }
 }
 
@@ -1599,11 +1614,7 @@ pub async fn route(
                 .increment(1);
             RouteError::UnusableOutput(js_head(&raw, 200).into())
         }),
-        Err(e) => {
-            tracing::error!("route failed {e}");
-            metrics::counter!("steve_router_failures_total", "reason" => "model_call").increment(1);
-            Err(RouteError::ModelCall(e.to_string()))
-        }
+        Err(e) => Err(route_call_error("route", e)),
     }
 }
 
@@ -2537,33 +2548,64 @@ mod tests {
 
     #[tokio::test]
     async fn a_failing_or_unusable_router_returns_explicit_error() {
-        struct Gw(Option<&'static str>);
+        enum GwMode {
+            Reply(&'static str),
+            Timeout,
+            LocalUpdating,
+        }
+        struct Gw(GwMode);
         #[async_trait]
         impl ModelGateway for Gw {
             async fn call(&self, _: &str, _: Tier, _: Duration, _: &ThinkTools) -> Result<Printed> {
                 match self.0 {
-                    Some(t) => Ok(Printed {
+                    GwMode::Reply(t) => Ok(Printed {
                         text: t.into(),
                         model: "m".into(),
                         cost_usd: None,
                         ..Default::default()
                     }),
-                    None => Err(msg("Command timed out after 60000 ms")),
+                    GwMode::Timeout => Err(msg("Command timed out after 60000 ms")),
+                    GwMode::LocalUpdating => Err(GatewayError::LocalNodeUpdating.into()),
                 }
             }
         }
         let c = ctx();
         assert!(matches!(
-            route(&Gw(None), &c, "知识系统怎么运作", &[], false).await,
-            Err(RouteError::ModelCall(m)) if m.contains("60000")
+            route(&Gw(GwMode::Timeout), &c, "知识系统怎么运作", &[], false).await,
+            Err(RouteError::ModelCall(GatewayError::Other(m))) if m.contains("60000")
         ));
+        let single_updating = route(&Gw(GwMode::LocalUpdating), &c, "帮我看看状态", &[], false)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            single_updating,
+            RouteError::ModelCall(GatewayError::LocalNodeUpdating)
+        );
+        assert!(single_updating.is_local_node_updating());
+        let batch_updating = route_many(
+            &Gw(GwMode::LocalUpdating),
+            &c,
+            &["帮我看看状态".into()],
+            &[],
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            batch_updating,
+            RouteError::ModelCall(GatewayError::LocalNodeUpdating)
+        );
+        assert!(batch_updating.is_local_node_updating());
         for bad in ["不是 JSON", r#"{"kind":"build"}"#] {
             assert!(matches!(
-                route(&Gw(Some(bad)), &c, "知识系统怎么运作", &[], false).await,
+                route(&Gw(GwMode::Reply(bad)), &c, "知识系统怎么运作", &[], false).await,
                 Err(RouteError::UnusableOutput(_))
             ));
         }
-        assert!(route(&Gw(None), &c, "x", &[], true).await.is_err());
+        assert!(
+            route(&Gw(GwMode::Timeout), &c, "x", &[], true)
+                .await
+                .is_err()
+        );
     }
 
     #[test]

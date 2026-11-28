@@ -149,6 +149,13 @@ fn cerr(e: CoreError) -> BackendError {
             status: 503,
             message,
         },
+        CoreError::Gateway(steve_core::gateway::GatewayError::LocalNodeUpdating)
+        | CoreError::Route(steve_core::gateway::RouteError::ModelCall(
+            steve_core::gateway::GatewayError::LocalNodeUpdating,
+        )) => BackendError {
+            status: 503,
+            message: steve_i18n::t!("hub.node.local_updating"),
+        },
         e => BackendError::msg(e.to_string()),
     }
 }
@@ -2580,6 +2587,31 @@ mod routed_tests {
             assert_eq!(got_en.status, status);
             assert_eq!(got_en.message, en);
         }
+    }
+
+    #[tokio::test]
+    async fn local_node_updating_gateway_and_route_errors_map_to_503_in_zh_and_en() {
+        let cases = [
+            steve_core::CoreError::Gateway(steve_core::gateway::GatewayError::LocalNodeUpdating),
+            steve_core::CoreError::Route(steve_core::gateway::RouteError::ModelCall(
+                steve_core::gateway::GatewayError::LocalNodeUpdating,
+            )),
+        ];
+        for err in cases {
+            let zh = super::cerr(err);
+            assert_eq!(zh.status, 503);
+            assert!(zh.message.contains("本机 Node 正在更新"), "{zh:?}");
+        }
+        let en = steve_i18n::scope(steve_i18n::EN, async {
+            super::cerr(steve_core::CoreError::Route(
+                steve_core::gateway::RouteError::ModelCall(
+                    steve_core::gateway::GatewayError::LocalNodeUpdating,
+                ),
+            ))
+        })
+        .await;
+        assert_eq!(en.status, 503);
+        assert!(en.message.contains("local Node is updating"), "{en:?}");
     }
 
     /// N3: `RoutedRuntime::cwd_usable` never blocks on a Node RPC inside Core's lock; it reads
