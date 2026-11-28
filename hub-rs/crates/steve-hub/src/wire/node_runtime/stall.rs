@@ -368,8 +368,23 @@ fn succeeded_tool_progress(
                 .result
                 .iter()
                 .filter_map(|p| match p {
-                    Part::Diff { path, old, new, .. } if old.as_deref() != Some(new.as_str()) => {
-                        Some((path, Digest::sha256(new.as_bytes())))
+                    Part::Diff {
+                        path,
+                        old,
+                        new,
+                        added,
+                        removed,
+                    } if *added > 0
+                        || *removed > 0
+                        || (old.is_some() && old.as_deref() != Some(new.as_str())) =>
+                    {
+                        Some((
+                            path,
+                            Digest::sha256(old.as_deref().unwrap_or("").as_bytes()),
+                            Digest::sha256(new.as_bytes()),
+                            *added,
+                            *removed,
+                        ))
                     }
                     _ => None,
                 })
@@ -963,5 +978,63 @@ mod tests {
         let ev = stalled(summary.observe(NO_PROGRESS_MS, run)).expect("stalls at 15m");
         assert_eq!(ev.reason, StallReason::NoProgress);
         assert!(ev.blocker.is_none());
+    }
+
+    #[test]
+    fn diff_progress_ignores_noop_and_tracks_pure_deletions() {
+        let make_edit = |diff: Part| ToolView {
+            id: CallId::new("edit-1").unwrap(),
+            parent: None,
+            origin: ToolOrigin::Harness,
+            name: "Edit".into(),
+            category: ToolCategory::Edit,
+            title: "Edit a.rs".into(),
+            description: None,
+            target: Some("a.rs".into()),
+            phase: ToolPhase::Succeeded,
+            action: None,
+            evidence: None,
+            result: vec![diff],
+            error: None,
+            duration_ms: None,
+        };
+
+        let noop_empty = make_edit(Part::Diff {
+            path: "a.rs".into(),
+            old: None,
+            new: String::new(),
+            added: 0,
+            removed: 0,
+        });
+        assert_eq!(succeeded_tool_progress(&noop_empty, 0).unwrap(), None);
+
+        let noop_same = make_edit(Part::Diff {
+            path: "a.rs".into(),
+            old: Some("same".into()),
+            new: "same".into(),
+            added: 0,
+            removed: 0,
+        });
+        assert_eq!(succeeded_tool_progress(&noop_same, 0).unwrap(), None);
+
+        let del1 = make_edit(Part::Diff {
+            path: "a.rs".into(),
+            old: Some("gone 1".into()),
+            new: String::new(),
+            added: 0,
+            removed: 1,
+        });
+        let del2 = make_edit(Part::Diff {
+            path: "a.rs".into(),
+            old: Some("gone 2".into()),
+            new: String::new(),
+            added: 0,
+            removed: 1,
+        });
+        let (k1, d1, c1) = succeeded_tool_progress(&del1, 0).unwrap().unwrap();
+        let (k2, d2, c2) = succeeded_tool_progress(&del2, 0).unwrap().unwrap();
+        assert_eq!((k1, c1), ("content_changed", true));
+        assert_eq!((k2, c2), ("content_changed", true));
+        assert_ne!(d1, d2);
     }
 }

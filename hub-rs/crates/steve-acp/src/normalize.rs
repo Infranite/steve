@@ -53,7 +53,8 @@ pub struct ToolFact {
     pub url: Option<String>,
     /// Canonical digest of the complete edit input (or full content diffs), never its preview.
     pub change: Option<Digest>,
-    /// Bounded previews; Diff added/removed count full supplied new/old text lines, not an LCS.
+    /// Bounded previews; `Part::Diff` counts real line-level additions/removals over the
+    /// untruncated texts and previews changed lines bounded by `DIFF_LINES`/`TEXT_MAX`.
     pub result: Vec<Part>,
     pub error: Option<String>,
     pub raw: Value,
@@ -992,67 +993,187 @@ fn path_of(input: &Value) -> Option<String> {
         .map(String::from)
 }
 
-fn lines(s: &str) -> u32 {
-    if s.is_empty() {
-        0
-    } else {
-        s.lines().count() as u32
+fn saturating_u32(n: usize) -> u32 {
+    u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+fn push_preview_lines<'a>(buf: &mut Vec<&'a str>, overflow: &mut bool, lines: &[&'a str]) {
+    let room = DIFF_LINES.saturating_sub(buf.len());
+    let take = room.min(lines.len());
+    buf.extend_from_slice(&lines[..take]);
+    if lines.len() > take {
+        *overflow = true;
     }
 }
 
-fn preview_lines(s: &str) -> String {
-    let mut out: Vec<&str> = s.lines().take(DIFF_LINES).collect();
-    if s.lines().count() > DIFF_LINES {
-        out.push("…");
+fn finalize_preview(lines: &[&str], line_overflow: bool) -> (String, bool) {
+    if lines.is_empty() {
+        return (String::new(), false);
     }
-    bound(&out.join("\n"), TEXT_MAX)
+    let mut text = lines.join("\n");
+    if line_overflow {
+        text.push_str("\n…");
+    }
+    let char_overflow = text.chars().count() > TEXT_MAX;
+    if char_overflow {
+        text = bound(&text, TEXT_MAX);
+    }
+    (text, line_overflow || char_overflow)
 }
 
-/// `added`/`removed` count the complete new/old supplied texts, not a minimal edit script.
-/// Previews may be cut; these counts refer to their untruncated source texts.
-fn diff(path: &str, root: &Path, old: Option<&str>, new: &str) -> Part {
-    Part::Diff {
-        path: shown(path, root),
-        old: old.filter(|o| !o.is_empty()).map(preview_lines),
-        new: preview_lines(new),
-        added: lines(new),
-        removed: old.map(lines).unwrap_or(0),
+#[derive(Default)]
+struct DiffAccumulator<'a> {
+    added: u32,
+    removed: u32,
+    old_preview: Vec<&'a str>,
+    new_preview: Vec<&'a str>,
+    old_line_overflow: bool,
+    new_line_overflow: bool,
+}
+
+impl<'a> DiffAccumulator<'a> {
+    fn record_removed(&mut self, lines: &[&'a str]) {
+        self.removed = self.removed.saturating_add(saturating_u32(lines.len()));
+        push_preview_lines(&mut self.old_preview, &mut self.old_line_overflow, lines);
     }
+
+    fn record_added(&mut self, lines: &[&'a str]) {
+        self.added = self.added.saturating_add(saturating_u32(lines.len()));
+        push_preview_lines(&mut self.new_preview, &mut self.new_line_overflow, lines);
+    }
+
+    fn push_pair(&mut self, old: Option<&'a str>, new: &'a str) {
+        let old_lines: Vec<&str> = old.map(|o| o.lines().collect()).unwrap_or_default();
+        let new_lines: Vec<&str> = new.lines().collect();
+        if old_lines.is_empty() {
+            self.record_added(&new_lines);
+            return;
+        }
+        if new_lines.is_empty() {
+            self.record_removed(&old_lines);
+            return;
+        }
+        let prefix = old_lines
+            .iter()
+            .zip(new_lines.iter())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let old_rem = &old_lines[prefix..];
+        let new_rem = &new_lines[prefix..];
+        let suffix = old_rem
+            .iter()
+            .rev()
+            .zip(new_rem.iter().rev())
+            .take_while(|(a, b)| a == b)
+            .count();
+        let old_mid = &old_rem[..old_rem.len() - suffix];
+        let new_mid = &new_rem[..new_rem.len() - suffix];
+        if old_mid.is_empty() && new_mid.is_empty() {
+            return;
+        }
+        if old_mid.is_empty() {
+            self.record_added(new_mid);
+            return;
+        }
+        if new_mid.is_empty() {
+            self.record_removed(old_mid);
+            return;
+        }
+        for op in similar::capture_diff_slices(similar::Algorithm::Myers, old_mid, new_mid) {
+            match op {
+                similar::DiffOp::Equal { .. } => {}
+                similar::DiffOp::Delete {
+                    old_index, old_len, ..
+                } => self.record_removed(&old_mid[old_index..old_index + old_len]),
+                similar::DiffOp::Insert {
+                    new_index, new_len, ..
+                } => self.record_added(&new_mid[new_index..new_index + new_len]),
+                similar::DiffOp::Replace {
+                    old_index,
+                    old_len,
+                    new_index,
+                    new_len,
+                } => {
+                    self.record_removed(&old_mid[old_index..old_index + old_len]);
+                    self.record_added(&new_mid[new_index..new_index + new_len]);
+                }
+            }
+        }
+    }
+
+    fn finish(self, path: &str, root: &Path) -> (Part, bool) {
+        let (old_text, old_trunc) = finalize_preview(&self.old_preview, self.old_line_overflow);
+        let (new_text, new_trunc) = finalize_preview(&self.new_preview, self.new_line_overflow);
+        (
+            Part::Diff {
+                path: shown(path, root),
+                old: (!old_text.is_empty()).then_some(old_text),
+                new: new_text,
+                added: self.added,
+                removed: self.removed,
+            },
+            old_trunc || new_trunc,
+        )
+    }
+}
+
+/// Computes line-level `added`/`removed` counts by trimming unchanged prefix/suffix lines on the
+/// full untruncated texts and diffing the changed middle with Myers.
+/// New files (`old` omitted or empty) count all `new` lines with `removed = 0`, full deletions
+/// count all `old` lines with `added = 0`, and identical texts yield `0/0`.
+/// `Part::Diff` previews extract changed lines only, bounded by `DIFF_LINES` and `TEXT_MAX`.
+fn diff(path: &str, root: &Path, old: Option<&str>, new: &str) -> (Part, bool) {
+    let mut acc = DiffAccumulator::default();
+    acc.push_pair(old, new);
+    acc.finish(path, root)
 }
 
 /// An edit's change as Claude Code's tools put it in their input (`Edit`, `MultiEdit`, `Write`).
-fn input_diffs(input: &Value, root: &Path) -> Vec<Part> {
+fn input_diffs(input: &Value, root: &Path, diagnostics: &mut Vec<Fact>) -> Vec<Part> {
     let Some(path) = path_of(input) else {
         return vec![];
     };
     if let Some(edits) = input.get("edits").and_then(Value::as_array) {
-        let old: Vec<&str> = edits
-            .iter()
-            .filter_map(|e| e.get("old_string").and_then(Value::as_str))
-            .collect();
-        let new: Vec<&str> = edits
-            .iter()
-            .filter_map(|e| e.get("new_string").and_then(Value::as_str))
-            .collect();
-        return vec![diff(
-            &path,
-            root,
-            Some(&old.join("\n⋯\n")),
-            &new.join("\n⋯\n"),
-        )];
+        let mut acc = DiffAccumulator::default();
+        let mut any = false;
+        for e in edits {
+            let old_s = e.get("old_string").and_then(Value::as_str);
+            let new_s = e.get("new_string").and_then(Value::as_str);
+            if old_s.is_none() && new_s.is_none() {
+                continue;
+            }
+            any = true;
+            acc.push_pair(old_s, new_s.unwrap_or(""));
+        }
+        if !any {
+            return vec![];
+        }
+        let (part, truncated) = acc.finish(&path, root);
+        if truncated {
+            diagnostics.push(diagnostic("truncated", "input diff preview"));
+        }
+        return vec![part];
     }
-    match (
+    let pair = match (
         input.get("old_string").and_then(Value::as_str),
         input.get("new_string").and_then(Value::as_str),
         input.get("content").and_then(Value::as_str),
     ) {
-        (old, Some(new), _) => vec![diff(&path, root, old, new)],
-        (None, None, Some(content)) => vec![diff(&path, root, None, content)],
-        _ => vec![],
+        (old, Some(new), _) => Some((old, new)),
+        (None, None, Some(content)) => Some((None, content)),
+        _ => None,
+    };
+    let Some((old, new)) = pair else {
+        return vec![];
+    };
+    let (part, truncated) = diff(&path, root, old, new);
+    if truncated {
+        diagnostics.push(diagnostic("truncated", "input diff preview"));
     }
+    vec![part]
 }
 
-/// The tool's output as the adapter reports it: text, and diffs with whole texts.
+/// The tool's output as the adapter reports it: text, and line-level diffs.
 fn content_parts(u: &Value, root: &Path, diagnostics: &mut Vec<Fact>) -> Vec<Part> {
     let Some(items) = u.get("content").and_then(Value::as_array) else {
         return vec![];
@@ -1074,12 +1195,18 @@ fn content_parts(u: &Value, root: &Path, diagnostics: &mut Vec<Fact>) -> Vec<Par
                     ));
                 }
             }
-            Some("diff") => out.push(diff(
-                c.get("path").and_then(Value::as_str).unwrap_or(""),
-                root,
-                c.get("oldText").and_then(Value::as_str),
-                c.get("newText").and_then(Value::as_str).unwrap_or(""),
-            )),
+            Some("diff") => {
+                let (part, truncated) = diff(
+                    c.get("path").and_then(Value::as_str).unwrap_or(""),
+                    root,
+                    c.get("oldText").and_then(Value::as_str),
+                    c.get("newText").and_then(Value::as_str).unwrap_or(""),
+                );
+                if truncated {
+                    diagnostics.push(diagnostic("truncated", "tool diff preview"));
+                }
+                out.push(part);
+            }
             // ACP terminal reference (`{type: "terminal", terminalId: ...}`): output streams via
             // `_meta.terminal_output_delta` / `_meta.terminal_output`, not inline content blocks.
             Some("terminal") => {}
@@ -1256,7 +1383,6 @@ fn tool_fact(
         .flatten()
         .filter(|c| c.get("type").and_then(Value::as_str) == Some("diff"))
         .collect();
-    diagnose_tool_diffs(&raw, input, &diffs, &mut diagnostics);
     if title.chars().count() > 200 {
         diagnostics.push(diagnostic("truncated", "tool title preview"));
     }
@@ -1422,7 +1548,7 @@ fn tool_result(
             text: text.to_string(),
         }]
     } else {
-        input_diffs(input, root)
+        input_diffs(input, root, diagnostics)
     }
 }
 
@@ -1455,42 +1581,6 @@ fn tool_error(raw: &Value, phase: ToolPhase, terminal_output: Option<&str>) -> O
     raw.pointer("/_meta/terminal_exit/exit_code")
         .and_then(Value::as_i64)
         .map(|code| format!("exit code {code}"))
-}
-
-fn diagnose_tool_diffs(raw: &Value, input: &Value, diffs: &[&Value], diagnostics: &mut Vec<Fact>) {
-    for d in diffs {
-        for key in ["oldText", "newText"] {
-            if d.get(key)
-                .and_then(Value::as_str)
-                .is_some_and(diff_truncated)
-            {
-                diagnostics.push(diagnostic("truncated", "tool diff preview"));
-            }
-        }
-    }
-    if !raw.get("content").is_some_and(Value::is_array) && raw.get("rawOutput").is_none() {
-        let truncated = if let Some(edits) = input.get("edits").and_then(Value::as_array) {
-            ["old_string", "new_string"].iter().any(|key| {
-                let texts: Vec<&str> = edits
-                    .iter()
-                    .filter_map(|e| e.get(*key).and_then(Value::as_str))
-                    .collect();
-                diff_truncated(&texts.join("\n⋯\n"))
-            })
-        } else {
-            ["old_string", "new_string", "content"]
-                .iter()
-                .filter_map(|key| input.get(*key).and_then(Value::as_str))
-                .any(diff_truncated)
-        };
-        if truncated {
-            diagnostics.push(diagnostic("truncated", "input diff preview"));
-        }
-    }
-}
-
-fn diff_truncated(s: &str) -> bool {
-    s.lines().count() > DIFF_LINES || s.chars().count() > TEXT_MAX
 }
 
 /// Used by tests and drivers that need a digest of something ACP-specific without exposing it.
@@ -1610,10 +1700,279 @@ mod tests {
         };
         assert_eq!(tool.target.as_deref(), Some("src/a.rs"));
         assert!(
-            matches!(&tool.result[0], Part::Diff { path, added: 3, removed: 2, .. } if path == "src/a.rs")
+            matches!(&tool.result[0], Part::Diff { path, old: None, new, added: 1, removed: 0 } if path == "src/a.rs" && new == "z")
         );
         // outside the workspace a path is shown as it is
         assert_eq!(shown("/etc/hosts", Path::new("/work/proj")), "/etc/hosts");
+    }
+
+    #[test]
+    fn large_file_single_line_edit_after_line_60_counts_and_previews_changed_line() {
+        let mut n = n();
+        let old_lines: Vec<String> = (1..=200).map(|i| format!("line {i}")).collect();
+        let mut new_lines = old_lines.clone();
+        new_lines[149] = "line 150 edited".into();
+        let fs = n.update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "big1",
+            "kind": "edit",
+            "status": "completed",
+            "content": [{
+                "type": "diff",
+                "path": "/work/proj/src/big.rs",
+                "oldText": old_lines.join("\n"),
+                "newText": new_lines.join("\n"),
+            }]
+        }));
+        assert!(!fs.iter().any(
+            |f| matches!(f, Fact::Event(EventBody::Diagnostic { code, .. }) if code == "truncated")
+        ));
+        let evs = events(fs);
+        let EventBody::ToolChanged { tool } = &evs[0] else {
+            panic!("{evs:?}");
+        };
+        assert_eq!(
+            tool.result,
+            vec![Part::Diff {
+                path: "src/big.rs".into(),
+                old: Some("line 150".into()),
+                new: "line 150 edited".into(),
+                added: 1,
+                removed: 1,
+            }]
+        );
+    }
+
+    #[test]
+    fn multi_hunk_diff_and_overflow_preview_bounds() {
+        let mut n = n();
+        let old_lines: Vec<String> = (1..=200).map(|i| format!("line {i}")).collect();
+        let mut new_lines = old_lines.clone();
+        new_lines[4] = "line 5 edited".into();
+        new_lines[119] = "line 120 edited".into();
+        new_lines.insert(180, "inserted after 180".into());
+        let fs = n.update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "mh1",
+            "kind": "edit",
+            "status": "completed",
+            "content": [{
+                "type": "diff",
+                "path": "/work/proj/src/mh.rs",
+                "oldText": old_lines.join("\n"),
+                "newText": new_lines.join("\n"),
+            }]
+        }));
+        assert!(!fs.iter().any(
+            |f| matches!(f, Fact::Event(EventBody::Diagnostic { code, .. }) if code == "truncated")
+        ));
+        let evs = events(fs);
+        let EventBody::ToolChanged { tool } = &evs[0] else {
+            panic!("{evs:?}");
+        };
+        assert_eq!(
+            tool.result,
+            vec![Part::Diff {
+                path: "src/mh.rs".into(),
+                old: Some("line 5\nline 120".into()),
+                new: "line 5 edited\nline 120 edited\ninserted after 180".into(),
+                added: 3,
+                removed: 2,
+            }]
+        );
+
+        let mut big_new: Vec<String> = (1..=150).map(|i| format!("line {i}")).collect();
+        let inserted: Vec<String> = (1..=75).map(|i| format!("added {i}")).collect();
+        big_new.splice(100..100, inserted.clone());
+        let old_150: Vec<String> = (1..=150).map(|i| format!("line {i}")).collect();
+        let fs = n.update(&json!({
+            "sessionUpdate": "tool_call_update",
+            "toolCallId": "mh2",
+            "kind": "edit",
+            "status": "completed",
+            "content": [{
+                "type": "diff",
+                "path": "/work/proj/src/big_insert.rs",
+                "oldText": old_150.join("\n"),
+                "newText": big_new.join("\n"),
+            }]
+        }));
+        assert!(fs.iter().any(|f| matches!(
+            f,
+            Fact::Event(EventBody::Diagnostic { code, safe_text, .. })
+                if code == "truncated" && safe_text == "tool diff preview"
+        )));
+        let evs = events(fs);
+        let EventBody::ToolChanged { tool } = &evs[0] else {
+            panic!("{evs:?}");
+        };
+        let mut expected_new = inserted[..DIFF_LINES].to_vec();
+        expected_new.push("…".into());
+        assert_eq!(
+            tool.result,
+            vec![Part::Diff {
+                path: "src/big_insert.rs".into(),
+                old: None,
+                new: expected_new.join("\n"),
+                added: 75,
+                removed: 0,
+            }]
+        );
+    }
+
+    #[test]
+    fn diff_handles_new_file_full_deletion_and_noop() {
+        let mut n = n();
+        let cases = [
+            (
+                "new_none",
+                json!({"type": "diff", "path": "/work/proj/new1.rs", "newText": "a\nb\nc"}),
+                Part::Diff {
+                    path: "new1.rs".into(),
+                    old: None,
+                    new: "a\nb\nc".into(),
+                    added: 3,
+                    removed: 0,
+                },
+            ),
+            (
+                "new_empty",
+                json!({"type": "diff", "path": "/work/proj/new2.rs", "oldText": "", "newText": "a\nb"}),
+                Part::Diff {
+                    path: "new2.rs".into(),
+                    old: None,
+                    new: "a\nb".into(),
+                    added: 2,
+                    removed: 0,
+                },
+            ),
+            (
+                "full_del",
+                json!({"type": "diff", "path": "/work/proj/del.rs", "oldText": "x\ny\nz", "newText": ""}),
+                Part::Diff {
+                    path: "del.rs".into(),
+                    old: Some("x\ny\nz".into()),
+                    new: "".into(),
+                    added: 0,
+                    removed: 3,
+                },
+            ),
+            (
+                "noop",
+                json!({"type": "diff", "path": "/work/proj/noop.rs", "oldText": "same\ntext", "newText": "same\ntext"}),
+                Part::Diff {
+                    path: "noop.rs".into(),
+                    old: None,
+                    new: "".into(),
+                    added: 0,
+                    removed: 0,
+                },
+            ),
+        ];
+        for (id, item, expected) in cases {
+            let evs = events(n.update(&json!({
+                "sessionUpdate": "tool_call_update",
+                "toolCallId": id,
+                "kind": "edit",
+                "status": "completed",
+                "content": [item],
+            })));
+            let EventBody::ToolChanged { tool } = &evs[0] else {
+                panic!("{evs:?}");
+            };
+            assert_eq!(tool.result, vec![expected], "case {id}");
+        }
+    }
+
+    #[test]
+    fn multiedit_sums_line_diffs_without_separator_pollution() {
+        let mut n = n();
+        let fs = n.update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "me1",
+            "kind": "edit",
+            "status": "pending",
+            "title": "MultiEdit src/lib.rs",
+            "rawInput": {
+                "file_path": "/work/proj/src/lib.rs",
+                "edits": [
+                    {"old_string": "a\nb", "new_string": "a\nb\nc"},
+                    {"old_string": "keep\nold", "new_string": "keep\nnew"},
+                    {"old_string": "unchanged", "new_string": "unchanged"},
+                ]
+            },
+            "_meta": {"claudeCode": {"toolName": "MultiEdit"}}
+        }));
+        assert!(!fs.iter().any(
+            |f| matches!(f, Fact::Event(EventBody::Diagnostic { code, .. }) if code == "truncated")
+        ));
+        let evs = events(fs);
+        let EventBody::ToolChanged { tool } = &evs[0] else {
+            panic!("{evs:?}");
+        };
+        assert_eq!(
+            tool.result,
+            vec![Part::Diff {
+                path: "src/lib.rs".into(),
+                old: Some("old".into()),
+                new: "c\nnew".into(),
+                added: 2,
+                removed: 1,
+            }]
+        );
+
+        let many: Vec<String> = (1..=65).map(|i| format!("ins {i}")).collect();
+        let fs_trunc = n.update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "me_trunc",
+            "kind": "edit",
+            "status": "pending",
+            "rawInput": {
+                "file_path": "/work/proj/src/big_me.rs",
+                "edits": [
+                    {"old_string": "base", "new_string": format!("base\n{}", many[..30].join("\n"))},
+                    {"old_string": "tail", "new_string": format!("tail\n{}", many[30..].join("\n"))},
+                ]
+            },
+            "_meta": {"claudeCode": {"toolName": "MultiEdit"}}
+        }));
+        assert!(fs_trunc.iter().any(|f| matches!(
+            f,
+            Fact::Event(EventBody::Diagnostic { code, safe_text, .. })
+                if code == "truncated" && safe_text == "input diff preview"
+        )));
+        let evs_trunc = events(fs_trunc);
+        let EventBody::ToolChanged { tool: trunc_tool } = &evs_trunc[0] else {
+            panic!("{evs_trunc:?}");
+        };
+        let mut expected_preview = many[..DIFF_LINES].to_vec();
+        expected_preview.push("…".into());
+        assert_eq!(
+            trunc_tool.result,
+            vec![Part::Diff {
+                path: "src/big_me.rs".into(),
+                old: None,
+                new: expected_preview.join("\n"),
+                added: 65,
+                removed: 0,
+            }]
+        );
+
+        let empty = events(n.update(&json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "me_empty",
+            "kind": "edit",
+            "status": "pending",
+            "rawInput": {
+                "file_path": "/work/proj/src/empty.rs",
+                "edits": []
+            },
+            "_meta": {"claudeCode": {"toolName": "MultiEdit"}}
+        })));
+        let EventBody::ToolChanged { tool: empty_tool } = &empty[0] else {
+            panic!("{empty:?}");
+        };
+        assert!(empty_tool.result.is_empty());
     }
 
     #[test]

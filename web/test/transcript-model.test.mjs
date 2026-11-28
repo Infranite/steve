@@ -133,3 +133,97 @@ test("autoModeWarningOf tracks warning and stop escalation in the latest turn an
   assert.equal(tm.autoModeWarningOf(tr), null)
   assert.equal(tr.turns[0].ev[1][2], "auto_mode_classifier_unavailable")
 })
+
+test("multi-file tool diffs keep per-file attribution and skip 0/0 no-ops consistently across bulk, streaming, and segmentsOf", () => {
+  const t0 = 1_700_000_000_000
+  const all = [
+    { seq: 1, ts: t0, kind: "user", data: { text: "Patch files", via: "me" } },
+    {
+      seq: 2,
+      ts: t0 + 10,
+      kind: "tool",
+      data: {
+        tool: {
+          id: "patch1",
+          origin: "harness",
+          name: "ApplyPatch",
+          category: "edit",
+          target: "src/a.ts",
+          phase: "succeeded",
+          result: [
+            { type: "diff", path: "src/a.ts", old: "old a", new: "new a1\nnew a2", added: 2, removed: 1 },
+            { type: "diff", path: "src/b.ts", old: "", new: "b1\nb2\nb3\nb4\nb5", added: 5, removed: 0 },
+            { type: "diff", path: "src/a.ts", old: "x\ny", new: "x1\nx2", added: 2, removed: 2 },
+            { type: "diff", path: "src/noop.ts", old: "", new: "", added: 0, removed: 0 },
+          ],
+        },
+      },
+    },
+    {
+      seq: 3,
+      ts: t0 + 20,
+      kind: "tool",
+      data: {
+        tool: {
+          id: "del1",
+          origin: "harness",
+          name: "Edit",
+          category: "edit",
+          target: "src/del.ts",
+          phase: "succeeded",
+          result: [
+            { type: "diff", path: "src/del.ts", old: "gone", new: "", added: 0, removed: 1 },
+          ],
+        },
+      },
+    },
+    { seq: 4, ts: t0 + 30, kind: "turn_end", data: { stopReason: "end_turn" } },
+  ]
+
+  const bulk = tm.mapTurns(all)
+  let one = { turns: tm.mapTurns(all.slice(0, 1)), oldest: null, newest: all[0].seq }
+  for (let i = 1; i < all.length; i++) one = tm.appendEvents(one, [all[i]])
+  let two = { turns: tm.mapTurns(all.slice(0, 2)), oldest: null, newest: all[1].seq }
+  two = tm.appendEvents(two, all.slice(2))
+
+  const snap = (turns) => JSON.parse(JSON.stringify(turns.map(({ rows }) => rows)))
+  assert.deepEqual(snap(one.turns), snap(bulk))
+  assert.deepEqual(snap(two.turns), snap(bulk))
+  assert.deepEqual(snap([{ rows: tm.segmentsOf(one.turns[0]) }]), snap(bulk))
+
+  const filesRow = bulk[0].rows.find((r) => r.t === "files")
+  assert.deepEqual(JSON.parse(JSON.stringify(filesRow?.files)), [
+    ["src/a.ts", 4, 3],
+    ["src/b.ts", 5, 0],
+    ["src/del.ts", 0, 1],
+  ])
+  const delTuple = bulk[0].ev[2]
+  assert.equal(delTuple[4], "- gone")
+})
+
+test("0/0 no-op edits do not emit a files summary row", () => {
+  const t0 = 1_700_000_000_000
+  const events = [
+    { seq: 1, ts: t0, kind: "user", data: { text: "Noop", via: "me" } },
+    {
+      seq: 2,
+      ts: t0 + 10,
+      kind: "tool",
+      data: {
+        tool: {
+          id: "n1",
+          origin: "harness",
+          name: "Edit",
+          category: "edit",
+          target: "src/same.ts",
+          phase: "succeeded",
+          result: [{ type: "diff", path: "src/same.ts", old: "", new: "", added: 0, removed: 0 }],
+        },
+      },
+    },
+    { seq: 3, ts: t0 + 20, kind: "turn_end", data: { stopReason: "end_turn" } },
+  ]
+  const turns = tm.mapTurns(events)
+  assert.equal(turns[0].rows.some((r) => r.t === "files"), false)
+  assert.equal(tm.segmentsOf(turns[0]).some((r) => r.t === "files"), false)
+})

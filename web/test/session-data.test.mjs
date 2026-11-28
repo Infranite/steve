@@ -24,6 +24,21 @@ test("files changed add up per path, failed edits left out, most changed first",
   assert.deepEqual(filesOf([...ev, ["tool", "edit", "Edit", "b.ts", "", 0, 9, 9, 0], ["tool", "edit", "Edit", "c.ts", "", 0, 5, 5, 1]]), [["b.ts", 9, 9], ["a.ts", 5, 1]])
 })
 
+test("filesOf preserves per-file attribution from multi-file tool diffs and filters 0/0 no-ops", () => {
+  const multi = [
+    ["tool", "edit", "ApplyPatch", "a.ts", "", 0, 8, 1, 0, "ApplyPatch", undefined, undefined, undefined, undefined, undefined, "t1", undefined, undefined, [["a.ts", 3, 1], ["b.ts", 5, 0], ["noop.ts", 0, 0]]],
+    ["tool", "edit", "Edit", "b.ts", "", 0, 0, 2, 0],
+    ["tool", "edit", "Edit", "del.ts", "", 0, 0, 4, 0],
+    ["tool", "edit", "Edit", "noop-legacy.ts", "", 0, 0, 0, 0],
+    ["tool", "edit", "ApplyPatch", "ignored.ts", "", 0, 9, 9, 1, "ApplyPatch", undefined, undefined, undefined, undefined, undefined, "t2", undefined, undefined, [["ignored.ts", 9, 9]]],
+  ]
+  assert.deepEqual(filesOf(multi), [
+    ["b.ts", 5, 2],
+    ["a.ts", 3, 1],
+    ["del.ts", 0, 4],
+  ])
+})
+
 test("a session's outputs are the ones delivered with a timeline line naming it", () => {
   const arts = [{ id: "a1", created: 1000 }, { id: "a2", created: 5000 }, { id: "a3", created: 9000 }]
   const tl = [{ ts: 1000, session_id: "s1" }, { ts: 5001, session_id: "s2" }]

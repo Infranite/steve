@@ -23,7 +23,9 @@ export function briefHead(text: string): string {
 }
 const KIND: Record<string, string> = { read: "read", edit: "edit", search: "search", exec: "run", fetch: "fetch", think: "read", delete: "edit", move: "edit", other: "other" }
 const unfence = (t: string) => t.replace(/^```[a-z]*\n?/, "").replace(/\n?```\s*$/, "")
-const diffText = (d: any) => [...String(d.old ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l).map((l) => "- " + l), ...String(d.new ?? "").split("\n").map((l) => "+ " + l)].join("\n")
+const diffLines = (s: unknown) => String(s ?? "").split("\n").filter((l, _i, a) => a.length > 1 || l)
+const diffText = (d: any) => [...diffLines(d.old).map((l) => "- " + l), ...diffLines(d.new).map((l) => "+ " + l)].join("\n")
+export type FileDiff = [path: string, added: number, removed: number]
 function toolName(name: string) {
   const label = i18n.getResource(i18n.language, "core", "steveTool." + name)
   return typeof label === "string" ? label : name
@@ -37,10 +39,29 @@ function toolEv(t: Ev, v: any) {
   const result: any[] = Array.isArray(v.result) ? v.result : [], diffs = result.filter((p) => p?.type === "diff")
   const text = result.filter((p) => p?.type === "text").map((p) => String(p.text ?? "")).join("\n")
   const kind = KIND[v.category] ?? (v.action?.type === "exec" ? "run" : "other")
+  let fileDiffs: FileDiff[] | undefined
   t.length = 0
   if (steve) t.push("tool", "steve", toolName(short), "Steve", "", live)
   else t.push("tool", kind, name || title.split(" ")[0] || i18n.t("core:tool.fallback"), v.target ?? title.split(" ").slice(1).join(" ").slice(0, 80), "", live)
-  if (diffs.length) { t[4] = diffs.map(diffText).join("\n⋯\n"); t[6] = diffs.reduce((n, d) => n + (d.added ?? 0), 0); t[7] = diffs.reduce((n, d) => n + (d.removed ?? 0), 0); if (!steve && diffs[0].path) t[3] = diffs[0].path }
+  if (diffs.length) {
+    t[4] = diffs.map(diffText).filter(Boolean).join("\n⋯\n")
+    let totalAdded = 0, totalRemoved = 0
+    const perFile = new Map<string, FileDiff>()
+    for (const d of diffs) {
+      const added = Number(d.added) || 0, removed = Number(d.removed) || 0
+      totalAdded += added
+      totalRemoved += removed
+      const path = String(d.path || (diffs.length === 1 && !steve ? v.target ?? "" : ""))
+      if (!path || (added <= 0 && removed <= 0)) continue
+      const f = perFile.get(path) ?? [path, 0, 0]
+      f[1] += added; f[2] += removed
+      perFile.set(path, f)
+    }
+    t[6] = totalAdded
+    t[7] = totalRemoved
+    fileDiffs = [...perFile.values()]
+    if (!steve && diffs[0].path) t[3] = diffs[0].path
+  }
   else if (text) t[4] = t[1] === "run" ? unfence(text) : text
   if (!t[4] && v.error) t[4] = String(v.error)
   t[8] = v.phase === "failed" ? 1 : 0; t[9] = name
@@ -56,25 +77,39 @@ function toolEv(t: Ev, v: any) {
     /* [14]: what went into one of Steve's own tools, as the Hub stored it, for the call's card and timeline */
     if (steve && Object.keys(args).length) t[14] = args
   }
-  /* [15]: call id, [16]: parent subtask id when nested, [17]: adapter-observed duration in ms */
+  /* [15]: call id, [16]: parent subtask id when nested, [17]: adapter-observed duration in ms, [18]: per-file non-empty diff stats */
   t[15] = String(v.id ?? "")
   if (typeof v.parent === "string" && v.parent) t[16] = v.parent
   if (typeof v.duration_ms === "number" && Number.isFinite(v.duration_ms)) t[17] = v.duration_ms
+  if (fileDiffs) t[18] = fileDiffs
   return t
 }
 
-export type Seg = { id: string; t: string; evs: Ev[]; seq: number; through: number; prompt?: string; /** when each of `evs` came */ at?: number[]; t0?: number; t1?: number; end?: string; files?: [string, number, number][] }
+export type Seg = { id: string; t: string; evs: Ev[]; seq: number; through: number; prompt?: string; /** when each of `evs` came */ at?: number[]; t0?: number; t1?: number; end?: string; files?: FileDiff[] }
 export type Tuples = { ev: Ev[]; seqs: number[]; ends: number[]; ts: number[] }
 
 const PROMPT = ["u", "hi"]
 
-function collectEditedFiles(files: Map<string, [string, number, number]>, indices: readonly number[], ev: readonly Ev[]) {
-  for (const i of indices) {
-    const e = ev[i]
-    if (e[0] !== "tool" || e[1] !== "edit" || e[6] == null || e[8] === 1 || !e[3]) continue
-    const f = files.get(e[3]) ?? [e[3], 0, 0]
-    f[1] += e[6]; f[2] += e[7] ?? 0; files.set(e[3], f)
+/** Non-empty per-file diff stats (`[path, added, removed]`) for a non-failed edit tool tuple. */
+export function toolFileDiffs(e: Ev): FileDiff[] {
+  if (e[0] !== "tool" || e[1] !== "edit" || e[8] === 1) return []
+  if (Array.isArray(e[18])) {
+    return (e[18] as FileDiff[]).filter(([p, a, d]) => !!p && (a > 0 || d > 0))
   }
+  if (e[6] == null || !e[3]) return []
+  const a = Number(e[6]) || 0, d = Number(e[7]) || 0
+  return a > 0 || d > 0 ? [[String(e[3]), a, d]] : []
+}
+
+function addEditedFiles(files: Map<string, FileDiff>, e: Ev) {
+  for (const [path, added, removed] of toolFileDiffs(e)) {
+    const f = files.get(path) ?? [path, 0, 0]
+    f[1] += added; f[2] += removed; files.set(path, f)
+  }
+}
+
+function collectEditedFiles(files: Map<string, FileDiff>, indices: readonly number[], ev: readonly Ev[]) {
+  for (const i of indices) addEditedFiles(files, ev[i])
 }
 
 export function segmentsOf(tuple: Tuples, rangeStart = 0): Seg[] {
@@ -254,10 +289,7 @@ function materializeRows(turn: Tuples, state: TurnState): Seg[] {
         const idx = buf[k], e = ev[idx]
         workEvs[k] = e
         workAt[k] = ts[idx]
-        if (e[0] === "tool" && e[1] === "edit" && e[6] != null && e[8] !== 1 && e[3]) {
-          const f = mergedFiles.get(e[3]) ?? [e[3], 0, 0]
-          f[1] += e[6]; f[2] += e[7] ?? 0; mergedFiles.set(e[3], f)
-        }
+        addEditedFiles(mergedFiles, e)
       }
       const seg: Seg = {
         id: seqs[first] + ":work", t: "work", evs: workEvs, seq: seqs[first], through: ends[first], prompt: state.prompt,
