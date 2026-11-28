@@ -197,7 +197,7 @@ fn render_bwrap(policy: BwrapPolicy<'_>, program: PathBuf, args: Vec<OsString>) 
             a.extend(["--ro-bind".into(), "/dev/null".into(), path.into()]);
         }
     }
-    bwrap_hide_cli(&mut a, policy.hidden);
+    let _ = bwrap_hide_cli(&mut a, policy.hidden);
     if let Some(login) = policy.login {
         bwrap_login(&mut a, login);
     }
@@ -295,41 +295,117 @@ fn pure_compute_hidden_home_paths(user_home: Option<&Path>) -> Vec<PathBuf> {
         .collect()
 }
 
+fn pure_compute_hidden_paths(
+    homes: Option<(&Path, &Path)>,
+    user_home: Option<&Path>,
+) -> Vec<PathBuf> {
+    let mut paths = pure_compute_hidden_home_paths(user_home);
+    if let Some((steve_home, node_home)) = homes {
+        paths.push(steve_home.to_path_buf());
+        paths.push(node_home.to_path_buf());
+    }
+    paths
+}
+
+/// Resolves the step executable to its canonical target when it lives inside a hidden Steve or
+/// sensitive user home directory so Seatbelt never needs `readlink` on a hidden symlink such as
+/// `<STEVE_HOME>/current`, and rolling upgrades cannot change which binary runs.
+pub(super) fn pure_compute_seatbelt_program(
+    homes: Option<(&Path, &Path)>,
+    user_home: Option<&Path>,
+    program: &Path,
+) -> PathBuf {
+    let real = super::canonical_path(program);
+    let hidden = pure_compute_hidden_paths(homes, user_home);
+    let mut roots = Vec::with_capacity(hidden.len() * 2);
+    for h in hidden {
+        let canonical = super::canonical_path(&h);
+        roots.push(h);
+        roots.push(canonical);
+    }
+    if roots
+        .iter()
+        .any(|r| program.starts_with(r) || real.starts_with(r))
+    {
+        real
+    } else {
+        program.to_path_buf()
+    }
+}
+
+fn seatbelt_allow_executable(program: &Path) -> String {
+    let real = super::canonical_path(program);
+    let mut s = String::new();
+    let mut seen_meta = std::collections::HashSet::new();
+    let mut seen_exec = std::collections::HashSet::new();
+    for cand in [program, real.as_path()] {
+        let cs = cand.to_string_lossy();
+        if cs.is_empty() || cs.contains(['"', '\\']) || cs.chars().any(char::is_control) {
+            continue;
+        }
+        for parent in cand.ancestors().skip(1) {
+            let ps = parent.to_string_lossy();
+            if ps.is_empty() || ps.contains(['"', '\\']) || ps.chars().any(char::is_control) {
+                continue;
+            }
+            if seen_meta.insert(ps.clone().into_owned()) {
+                s.push_str(&format!("(allow file-read-metadata (literal \"{ps}\"))\n"));
+            }
+        }
+        if seen_exec.insert(cs.clone().into_owned()) {
+            s.push_str(&format!(
+                "(allow file-read* file-map-executable process-exec (literal \"{cs}\"))\n"
+            ));
+        }
+    }
+    s
+}
+
 /// macOS Seatbelt profile for pure-compute subprocesses (`--workflow-step`):
 /// denies all network access, denies all filesystem writes (except `/dev/null`), denies
-/// `process-fork`, hides Steve's control plane (when provided), and hides sensitive home dirs.
+/// `process-fork`, hides Steve's control plane (when provided) and sensitive home dirs, and
+/// optionally allows reading, mapping, and executing the exact step `program` literal.
 pub fn pure_compute_seatbelt_profile(
     homes: Option<(&Path, &Path)>,
     user_home: Option<&Path>,
+    program: Option<&Path>,
 ) -> Option<String> {
     let control = match homes {
         Some((steve, node)) => Some(super::control::control_rules(steve, node)?),
         None => None,
     };
     Some(pure_compute_seatbelt_with_rules(
+        homes,
         control.as_deref(),
         user_home,
+        program,
     ))
 }
 
 pub(super) fn pure_compute_seatbelt_with_rules(
+    homes: Option<(&Path, &Path)>,
     control_rules: Option<&str>,
     user_home: Option<&Path>,
+    program: Option<&Path>,
 ) -> String {
     let mut s = String::from(
         "(version 1)\n(allow default)\n(deny network*)\n(deny file-write*)\n(allow file-write* (literal \"/dev/null\"))\n(deny process-fork)\n",
     );
-    let hidden = pure_compute_hidden_home_paths(user_home);
+    let hidden = pure_compute_hidden_paths(homes, user_home);
     s.push_str(&seatbelt_hide_cli(&hidden));
     if let Some(rules) = control_rules {
         s.push_str(rules);
+    }
+    if let Some(prog) = program {
+        s.push_str(&seatbelt_allow_executable(prog));
     }
     s
 }
 
 /// Linux Bubblewrap arguments for pure-compute subprocesses (`--workflow-step`):
 /// unshares network/IPC/PID/UTS namespaces, mounts `/` strictly read-only, masks Steve's control
-/// plane and sensitive user home directories with empty `tmpfs`, and chdirs into an empty read-only
+/// plane and sensitive user home directories with empty `tmpfs`, bind-mounts only the launched step
+/// executable read-only if it resides inside a masked directory, and chdirs into an empty read-only
 /// temporary directory.
 pub fn pure_compute_bwrap_args(
     plan: Option<&BwrapPlan>,
@@ -352,19 +428,42 @@ pub fn pure_compute_bwrap_args(
         "--proc".into(),
         "/proc".into(),
     ];
+    let mut masked_roots = Vec::new();
     if let Some(p) = plan {
         for path in &p.masked {
             a.extend(["--tmpfs".into(), path.into()]);
+            masked_roots.push(path.clone());
         }
         for path in p.hidden_dirs.iter().filter(|d| d.is_dir()) {
             a.extend(["--tmpfs".into(), path.into()]);
+            masked_roots.push(path.clone());
         }
         for path in &p.hidden_files {
             a.extend(["--ro-bind".into(), "/dev/null".into(), path.into()]);
+            masked_roots.push(path.clone());
         }
     }
     let hidden = pure_compute_hidden_home_paths(user_home);
-    bwrap_hide_cli(&mut a, &hidden);
+    masked_roots.extend(bwrap_hide_cli(&mut a, &hidden));
+    let real_program = super::canonical_path(&program);
+    let is_masked = |p: &Path| {
+        let canon = super::canonical_path(p);
+        masked_roots
+            .iter()
+            .any(|m| p.starts_with(m) || canon.starts_with(m))
+    };
+    let exec_program = if is_masked(&real_program) {
+        a.extend([
+            "--ro-bind".into(),
+            real_program.clone().into(),
+            real_program.clone().into(),
+        ]);
+        real_program
+    } else if is_masked(&program) {
+        real_program
+    } else {
+        program
+    };
     let cwd_real = std::fs::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
     a.extend([
         "--ro-bind".into(),
@@ -373,7 +472,7 @@ pub fn pure_compute_bwrap_args(
         "--chdir".into(),
         cwd_real.into(),
         "--".into(),
-        program.into(),
+        exec_program.into(),
     ]);
     a.extend(args);
     a
@@ -468,15 +567,19 @@ pub(super) fn seatbelt_hide_cli(paths: &[PathBuf]) -> String {
     s
 }
 
-pub(super) fn bwrap_hide_cli(a: &mut Vec<OsString>, paths: &[PathBuf]) {
+pub(super) fn bwrap_hide_cli(a: &mut Vec<OsString>, paths: &[PathBuf]) -> Vec<PathBuf> {
+    let mut masked = Vec::new();
     for p in paths {
         let real = std::fs::canonicalize(p).unwrap_or_else(|_| p.clone());
         if real.is_dir() {
-            a.extend(["--tmpfs".into(), real.into()]);
+            a.extend(["--tmpfs".into(), real.clone().into()]);
+            masked.push(real);
         } else if real.is_file() {
-            a.extend(["--ro-bind".into(), "/dev/null".into(), real.into()]);
+            a.extend(["--ro-bind".into(), "/dev/null".into(), real.clone().into()]);
+            masked.push(real);
         }
     }
+    masked
 }
 
 /// Seatbelt rules for [`Places`]: no write anywhere, then each place again (both as named and

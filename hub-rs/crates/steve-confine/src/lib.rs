@@ -62,8 +62,12 @@ pub struct Confine {
 enum Backend {
     /// Runs go unconfined: why.
     Off(String),
-    /// macOS: the rules to append to a profile.
-    Seatbelt(String),
+    /// macOS: the rules to append to a profile, plus the optional Steve/Node homes they protect.
+    Seatbelt {
+        rules: String,
+        steve_home: Option<PathBuf>,
+        node_home: Option<PathBuf>,
+    },
     /// Linux: what to hide and seal is listed again for each run (a name prefix matches the files
     /// there now).
     Bwrap {
@@ -85,7 +89,7 @@ impl Confine {
         };
         match &c.sandbox {
             Backend::Off(why) => tracing::warn!("node: runs are not confined: {why}"),
-            Backend::Seatbelt(_) => {
+            Backend::Seatbelt { .. } => {
                 tracing::info!("node: runs are confined (seatbelt, level {level})")
             }
             Backend::Bwrap { .. } => {
@@ -157,7 +161,7 @@ impl Confine {
     pub fn state(&self) -> Result<&'static str, String> {
         match &self.sandbox {
             Backend::Off(why) => Err(why.clone()),
-            Backend::Seatbelt(_) => Ok("seatbelt"),
+            Backend::Seatbelt { .. } => Ok("seatbelt"),
             Backend::Bwrap { .. } => Ok("bubblewrap"),
         }
     }
@@ -165,7 +169,7 @@ impl Confine {
     /// The seatbelt rules, to append to a profile a run already has (a job's or research's own).
     pub fn seatbelt_rules(&self) -> Option<&str> {
         match &self.sandbox {
-            Backend::Seatbelt(r) => Some(r),
+            Backend::Seatbelt { rules, .. } => Some(rules),
             _ => None,
         }
     }
@@ -174,7 +178,7 @@ impl Confine {
     /// in place without making the rest of the directory writable. Bubblewrap's store
     /// mount masks other entries, so keep that mount for non-owner sessions only.
     pub fn opens_principal_login_store(&self, hide_cli_creds: bool) -> bool {
-        hide_cli_creds || matches!(self.sandbox, Backend::Seatbelt(_))
+        hide_cli_creds || matches!(self.sandbox, Backend::Seatbelt { .. })
     }
 
     /// `program args` run in the sandbox; `readable`: directories it may read although they are
@@ -232,7 +236,7 @@ impl Confine {
         };
         match &self.sandbox {
             Backend::Off(_) => (program, args),
-            Backend::Seatbelt(rules) => {
+            Backend::Seatbelt { rules, .. } => {
                 let profile = profile::seatbelt_run(
                     rules,
                     writes.as_ref(),
@@ -745,10 +749,21 @@ impl Sandbox {
             .tempdir()?;
         let user_home = std::env::var_os("HOME").map(PathBuf::from);
         let (wrapped_program, wrapped_args) = match sandbox.map(|s| &s.0.sandbox) {
-            Some(Backend::Seatbelt(rules)) => {
-                let profile =
-                    profile::pure_compute_seatbelt_with_rules(Some(rules), user_home.as_deref());
-                let mut a = vec!["-p".into(), profile.into(), program.into()];
+            Some(Backend::Seatbelt {
+                rules,
+                steve_home,
+                node_home,
+            }) => {
+                let homes = steve_home.as_deref().zip(node_home.as_deref());
+                let exec_program =
+                    profile::pure_compute_seatbelt_program(homes, user_home.as_deref(), &program);
+                let profile = profile::pure_compute_seatbelt_with_rules(
+                    homes,
+                    Some(rules),
+                    user_home.as_deref(),
+                    Some(exec_program.as_path()),
+                );
+                let mut a = vec!["-p".into(), profile.into(), exec_program.into()];
                 a.extend(args);
                 (PathBuf::from(SANDBOX_EXEC), a)
             }
@@ -771,9 +786,18 @@ impl Sandbox {
             None => match standalone_pure_compute_backend() {
                 #[cfg(target_os = "macos")]
                 Some(StandalonePureBackend::Seatbelt) => {
-                    let profile =
-                        profile::pure_compute_seatbelt_with_rules(None, user_home.as_deref());
-                    let mut a = vec!["-p".into(), profile.into(), program.into()];
+                    let exec_program = profile::pure_compute_seatbelt_program(
+                        None,
+                        user_home.as_deref(),
+                        &program,
+                    );
+                    let profile = profile::pure_compute_seatbelt_with_rules(
+                        None,
+                        None,
+                        user_home.as_deref(),
+                        Some(exec_program.as_path()),
+                    );
+                    let mut a = vec!["-p".into(), profile.into(), exec_program.into()];
                     a.extend(args);
                     (PathBuf::from(SANDBOX_EXEC), a)
                 }
@@ -1242,7 +1266,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let custom_path = dir.path().display().to_string();
         let synthetic_sandbox = Sandbox(Confine {
-            sandbox: Backend::Seatbelt(String::new()),
+            sandbox: Backend::Seatbelt {
+                rules: String::new(),
+                steve_home: None,
+                node_home: None,
+            },
             files: false,
             env: Some(std::sync::Arc::new(vec![(
                 OsString::from("PATH"),
@@ -1454,10 +1482,11 @@ mod tests {
         };
         let c = Confine {
             // The tempdir normally permits writes. Simulate a store outside it.
-            sandbox: Backend::Seatbelt(format!(
-                "(deny file-write* (subpath \"{}\"))\n",
-                store.display()
-            )),
+            sandbox: Backend::Seatbelt {
+                rules: format!("(deny file-write* (subpath \"{}\"))\n", store.display()),
+                steve_home: None,
+                node_home: None,
+            },
             files: true,
             env: None,
         };
@@ -1563,9 +1592,11 @@ fn pre_extraction_node_profiles_are_byte_identical() {
     // Captured by nextest from the old implementations at c8af7504. Only fixture
     // path parameters become $STEVE_HOME / $ROOT; all policy bytes and argument order are kept.
     let c = Confine {
-        sandbox: Backend::Seatbelt(
-            seatbelt_rules(Path::new("/fixture/steve"), Path::new("/fixture/node")).unwrap(),
-        ),
+        sandbox: Backend::Seatbelt {
+            rules: seatbelt_rules(Path::new("/fixture/steve"), Path::new("/fixture/node")).unwrap(),
+            steve_home: Some(PathBuf::from("/fixture/steve")),
+            node_home: Some(PathBuf::from("/fixture/node")),
+        },
         files: false,
         env: None,
     };
@@ -1822,7 +1853,7 @@ async fn review_08_pure_compute_confinement_enforces_ro_nonet_empty_cwd_and_rlim
     std::fs::write(steve_home.join("signing/key"), "secret").unwrap();
 
     // 1. Seatbelt policy must deny network, deny writes (except /dev/null), deny fork, and hide Steve/user secrets.
-    let sb = pure_compute_seatbelt_profile(Some((&steve_home, &node_home)), Some(&user_home))
+    let sb = pure_compute_seatbelt_profile(Some((&steve_home, &node_home)), Some(&user_home), None)
         .expect("pure-compute seatbelt profile");
     assert!(sb.contains("(deny network*)"), "{sb}");
     assert!(sb.contains("(deny file-write*)"), "{sb}");
@@ -1936,4 +1967,295 @@ async fn review_08_pure_compute_confinement_enforces_ro_nonet_empty_cwd_and_rlim
         !write_status.success(),
         "writing a file inside pure-compute sandbox must fail, got {write_status:?}"
     );
+}
+
+#[cfg(test)]
+#[test]
+fn pure_compute_policy_allows_installed_step_binary_while_denying_rest_of_steve_home() {
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let user_home = root.join("user");
+    let steve_home = user_home.join(".steve");
+    let node_home = steve_home.join("data/node");
+    let rel_bin = steve_home.join("releases/0.15.0/bin");
+    let real_hub = rel_bin.join("steve-hub");
+    let real_node = rel_bin.join("steve-node");
+    let empty_cwd = root.join("empty-cwd");
+    std::fs::create_dir_all(&rel_bin).unwrap();
+    std::fs::create_dir_all(steve_home.join("signing")).unwrap();
+    std::fs::create_dir_all(node_home.join("secrets")).unwrap();
+    std::fs::create_dir_all(&empty_cwd).unwrap();
+    std::fs::write(&real_hub, "hub-bin").unwrap();
+    std::fs::write(&real_node, "node-bin").unwrap();
+    std::fs::write(steve_home.join("steve.env"), "SECRET=1").unwrap();
+    std::os::unix::fs::symlink("releases/0.15.0", steve_home.join("current")).unwrap();
+    let sym_hub = steve_home.join("current/bin/steve-hub");
+
+    // 1. Installed Hub under $HOME/.steve: Seatbelt resolves current->releases and appends literal allow after denies.
+    let exec_prog = profile::pure_compute_seatbelt_program(
+        Some((&steve_home, &node_home)),
+        Some(&user_home),
+        &sym_hub,
+    );
+    assert_eq!(exec_prog, real_hub);
+    let sb = pure_compute_seatbelt_profile(
+        Some((&steve_home, &node_home)),
+        Some(&user_home),
+        Some(&exec_prog),
+    )
+    .expect("pure-compute seatbelt profile");
+    let deny_home = format!(
+        "(deny file-read* file-write* (literal \"{}\") (subpath \"{}\"))",
+        steve_home.display(),
+        steve_home.display()
+    );
+    let deny_pos = sb
+        .find(&deny_home)
+        .expect("steve_home must be denied wholesale");
+    let sealed_releases_pos = sb
+        .find(&format!("(subpath \"{}/releases\")", steve_home.display()))
+        .expect("control rules seal releases");
+    let allow_exec = format!(
+        "(allow file-read* file-map-executable process-exec (literal \"{}\"))",
+        real_hub.display()
+    );
+    let allow_pos = sb
+        .find(&allow_exec)
+        .expect("installed binary literal allow missing");
+    assert!(
+        allow_pos > deny_pos && allow_pos > sealed_releases_pos,
+        "{sb}"
+    );
+    assert!(
+        sb.contains(&format!(
+            "(allow file-read-metadata (literal \"{}\"))",
+            rel_bin.display()
+        )),
+        "{sb}"
+    );
+    assert!(
+        !sb.contains(&format!("(subpath \"{}\"))\n", rel_bin.display())),
+        "{sb}"
+    );
+    assert!(
+        !sb.contains(&real_node.display().to_string()),
+        "sibling binary must not appear in policy: {sb}"
+    );
+    assert!(
+        !sb[allow_pos..].contains("steve.env"),
+        "steve.env must not appear in allow rules: {sb}"
+    );
+    assert!(!sb[allow_pos..].contains("file-write*"), "{sb}");
+
+    // 2. Linux Bubblewrap: masks steve_home and $HOME/.steve first, then ro-binds only the real executable file.
+    let plan = bwrap_plan(&steve_home, &node_home);
+    let bwrap_args = pure_compute_bwrap_args(
+        Some(&plan),
+        Some(&user_home),
+        &empty_cwd,
+        sym_hub.clone(),
+        vec!["--workflow-step".into()],
+    );
+    let args: Vec<String> = bwrap_args
+        .iter()
+        .map(|s| s.to_string_lossy().into_owned())
+        .collect();
+    let last_tmpfs = args
+        .windows(2)
+        .rposition(|w| w[0] == "--tmpfs" && w[1] == steve_home.to_string_lossy())
+        .expect("--tmpfs steve_home missing");
+    let ro_bind_idx = args
+        .windows(3)
+        .position(|w| {
+            w[0] == "--ro-bind"
+                && w[1] == real_hub.to_string_lossy()
+                && w[2] == real_hub.to_string_lossy()
+        })
+        .expect("--ro-bind for installed binary missing");
+    let chdir_idx = args
+        .iter()
+        .position(|s| s == "--chdir")
+        .expect("--chdir missing");
+    let dash_idx = args
+        .iter()
+        .position(|s| s == "--")
+        .expect("-- separator missing");
+    assert!(
+        last_tmpfs < ro_bind_idx && ro_bind_idx < chdir_idx,
+        "{args:?}"
+    );
+    assert_eq!(args[dash_idx + 1], real_hub.to_string_lossy());
+    assert_eq!(args[dash_idx + 2], "--workflow-step");
+    assert!(
+        !args
+            .iter()
+            .any(|a| a.contains("steve-node") || a.ends_with("/bin"))
+    );
+
+    // 3. Custom STEVE_HOME outside $HOME is also denied wholesale on Seatbelt and masked on bwrap before allowing the binary.
+    let custom_steve = root.join("custom-steve");
+    let custom_node = custom_steve.join("data/node");
+    let custom_bin_dir = custom_steve.join("releases/0.15.0/bin");
+    let custom_real = custom_bin_dir.join("steve-hub");
+    std::fs::create_dir_all(&custom_bin_dir).unwrap();
+    std::fs::create_dir_all(&custom_node).unwrap();
+    std::fs::write(&custom_real, "hub-bin").unwrap();
+    std::os::unix::fs::symlink("releases/0.15.0", custom_steve.join("current")).unwrap();
+    let custom_sym = custom_steve.join("current/bin/steve-hub");
+
+    let custom_exec = profile::pure_compute_seatbelt_program(
+        Some((&custom_steve, &custom_node)),
+        Some(&user_home),
+        &custom_sym,
+    );
+    assert_eq!(custom_exec, custom_real);
+    let custom_sb = pure_compute_seatbelt_profile(
+        Some((&custom_steve, &custom_node)),
+        Some(&user_home),
+        Some(&custom_exec),
+    )
+    .unwrap();
+    let custom_deny = format!(
+        "(deny file-read* file-write* (literal \"{}\") (subpath \"{}\"))",
+        custom_steve.display(),
+        custom_steve.display()
+    );
+    let custom_allow = format!(
+        "(allow file-read* file-map-executable process-exec (literal \"{}\"))",
+        custom_real.display()
+    );
+    assert!(
+        custom_sb.find(&custom_deny).unwrap() < custom_sb.find(&custom_allow).unwrap(),
+        "{custom_sb}"
+    );
+    let custom_plan = bwrap_plan(&custom_steve, &custom_node);
+    let custom_bwrap: Vec<String> = pure_compute_bwrap_args(
+        Some(&custom_plan),
+        Some(&user_home),
+        &empty_cwd,
+        custom_sym,
+        vec![],
+    )
+    .into_iter()
+    .map(|s| s.to_string_lossy().into_owned())
+    .collect();
+    let custom_tmpfs = custom_bwrap
+        .windows(2)
+        .position(|w| w[0] == "--tmpfs" && w[1] == custom_steve.to_string_lossy())
+        .expect("custom steve_home tmpfs missing");
+    let custom_bind = custom_bwrap
+        .windows(3)
+        .position(|w| {
+            w[0] == "--ro-bind"
+                && w[1] == custom_real.to_string_lossy()
+                && w[2] == custom_real.to_string_lossy()
+        })
+        .expect("custom binary ro-bind missing");
+    assert!(custom_tmpfs < custom_bind, "{custom_bwrap:?}");
+
+    // 4. Programs outside hidden roots keep their original path with no extra --ro-bind.
+    assert_eq!(
+        profile::pure_compute_seatbelt_program(
+            Some((&steve_home, &node_home)),
+            Some(&user_home),
+            Path::new("/bin/sh"),
+        ),
+        PathBuf::from("/bin/sh")
+    );
+    let outside_bwrap: Vec<String> = pure_compute_bwrap_args(
+        Some(&plan),
+        Some(&user_home),
+        &empty_cwd,
+        PathBuf::from("/bin/sh"),
+        vec!["-c".into(), "true".into()],
+    )
+    .into_iter()
+    .map(|s| s.to_string_lossy().into_owned())
+    .collect();
+    assert!(
+        !outside_bwrap
+            .windows(3)
+            .any(|w| w[0] == "--ro-bind" && w[1] == "/bin/sh"),
+        "{outside_bwrap:?}"
+    );
+    assert!(outside_bwrap.ends_with(&["--".into(), "/bin/sh".into(), "-c".into(), "true".into()]));
+}
+
+#[cfg(test)]
+#[tokio::test]
+async fn pure_compute_executes_binary_inside_steve_home_while_denying_rest_of_home() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let t = tempfile::tempdir().unwrap();
+    let root = t.path().canonicalize().unwrap();
+    let user_home = root.join("user");
+    let steve_home = user_home.join(".steve");
+    let node_home = steve_home.join("data/node");
+    let rel_bin = steve_home.join("releases/0.15.0/bin");
+    std::fs::create_dir_all(&rel_bin).unwrap();
+    std::fs::create_dir_all(steve_home.join("signing")).unwrap();
+    std::fs::create_dir_all(node_home.join("secrets")).unwrap();
+
+    let env_file = steve_home.join("steve.env");
+    let key_file = steve_home.join("signing/key");
+    let node_secret = node_home.join("secrets/secret");
+    let sibling = rel_bin.join("sibling");
+    std::fs::write(&env_file, "SECRET=1\n").unwrap();
+    std::fs::write(&key_file, "KEY=1\n").unwrap();
+    std::fs::write(&node_secret, "NODE=1\n").unwrap();
+    std::fs::write(&sibling, "SIBLING=1\n").unwrap();
+
+    let real_prog = rel_bin.join("step-prog");
+    std::fs::write(
+        &real_prog,
+        "#!/bin/sh\nfor p in \"$@\"; do\n  if read -r _ 2>/dev/null < \"$p\"; then\n    printf 'LEAK:%s\\n' \"$p\"\n    exit 2\n  fi\ndone\nprintf 'ok\\n'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&real_prog, std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::os::unix::fs::symlink("releases/0.15.0", steve_home.join("current")).unwrap();
+    let sym_prog = steve_home.join("current/bin/step-prog");
+
+    let sandbox = Sandbox::choose(&steve_home, &node_home, Some("1".into()));
+    if !sandbox.is_confined() {
+        eprintln!(
+            "skipped: pure-compute sandbox unavailable here ({:?})",
+            sandbox.state()
+        );
+        return;
+    }
+
+    let limits = PureComputeLimits::for_wall_time(std::time::Duration::from_secs(5));
+    let mut proc = Sandbox::spawn_pure_compute(
+        Some(&sandbox),
+        sym_prog,
+        vec![
+            env_file.into_os_string(),
+            key_file.into_os_string(),
+            node_secret.into_os_string(),
+            sibling.into_os_string(),
+        ],
+        limits,
+    )
+    .unwrap();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let mut stdout = proc.child.stdout.take().unwrap();
+    let mut stderr = proc.child.stderr.take().unwrap();
+    let ((), ()) = tokio::join!(
+        async {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut out).await;
+        },
+        async {
+            let _ = tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut err).await;
+        }
+    );
+    let status = proc.child.wait().await.unwrap();
+    assert!(
+        status.success(),
+        "step-prog inside steve_home must succeed under {:?}; status={status:?} stdout={} stderr={}",
+        sandbox.state(),
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&err),
+    );
+    assert_eq!(out, b"ok\n");
 }

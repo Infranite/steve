@@ -54,6 +54,7 @@ export default {
   /* the label of each option a module's decision carries as an id (decision-options.ts) */
   option: {
     chan_message: { send_draft: "发这条草稿", instruct: "告诉它怎么回", verbatim: "按原文发", to_item: "转事项", done: "不用管", yes: "批准发出", no: "不发", rewrite: "改写后再看", retry: "重新发送", discard: "不发了", sent: "已经发出了" },
+    wf_run: { retry: "重试这一步", revise: "修改脚本", cancel: "取消工作流", single_session: "改为单会话执行", add_budget: "增加预算" },
   },
   /* what became of an approved release */
   rel: {
@@ -121,6 +122,7 @@ export default {
     release: { no: "没有批准发布" },
     no_executor: { assign_bot: "已指定执行 Bot 并开工", confirm_proposal: "已新建 Bot 并开工", later: "已交给 Steve 自己做，后续无人可接的事项将由 Steve 直接执行" },
     chan_message: { yes: "已批准，稍后发出", no: "不发出，这条已关闭", rewrite: "改写好后会再给你看", send_draft: "先查有没有不该说的，没问题就稍后发出；有问题会再给你看", instruct: "好，按你说的起草，写好后给你看", verbatim: "已批准，稍后按原文发出", to_item: "正在转成事项", done: "好，这条不用管", retry: "正在重新发送", discard: "不发了，这条已关闭", sent: "已记为发出" },
+    wf_run: { retry: "已安排重试工作流步骤", revise: "已交回修改脚本", cancel: "已取消工作流", single_session: "已切换为单会话执行", add_budget: "已增加工作流预算并继续" },
     any: { wait: "已安排等待配额恢复", pass: "已验收，事项完成", rework: "已发回返工", yes: "已确认", no: "已处理", continue: "已让它继续", delivered: "已确认交付并验收", look: "已暂停，等你处理", tosteve: "已交给 Steve", drop: "已放弃", deny: "已拒绝" },
     confirmYes: "已确认",
     confirmNo: "已记下：不对",

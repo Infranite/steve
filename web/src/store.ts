@@ -1317,6 +1317,7 @@ const DECIDED_BY_SUBJECT: Record<string, readonly string[] | ((c: string) => str
   release: ["no"],
   no_executor: ["assign_bot", "confirm_proposal", "later"],
   chan_message: OPTION_IDS.chan_message,
+  wf_run: OPTION_IDS.wf_run,
 }
 const DECIDED_ANY = ["pass", "rework", "yes", "no", "continue", "delivered", "look", "tosteve", "drop", "deny"]
 function decidedText(w: Wait, c: string, bot: string | null) {

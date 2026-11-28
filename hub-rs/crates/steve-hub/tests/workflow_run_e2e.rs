@@ -2780,6 +2780,118 @@ async fn review_10_infra_faults_retry_bounded_and_distinguish_from_script_faults
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn non_retryable_infra_fault_pauses_immediately_without_retry_option() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use steve_workflow_api::{WorkflowFault, WorkflowFaultCode};
+
+    struct FixedFaultExecutor {
+        fault: WorkflowFault,
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl WorkflowStepExecutor for FixedFaultExecutor {
+        async fn execute(&self, _: &StepInput) -> StepFrame {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            StepFrame::Failed {
+                fault: self.fault.clone(),
+                emitted_calls: vec![],
+                logs: vec![],
+            }
+        }
+    }
+
+    for fault in [
+        WorkflowFault::new(WorkflowFaultCode::SandboxDenied, "sandbox denied"),
+        WorkflowFault::non_retryable(WorkflowFaultCode::SubprocessFailed, "enoent"),
+        WorkflowFault::new(WorkflowFaultCode::ProtocolError, "protocol skew"),
+    ] {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let env = Env::with_executor(Arc::new(FixedFaultExecutor {
+            fault: fault.clone(),
+            calls: calls.clone(),
+        }));
+        let (_p, coord) = env.create_parent(None);
+        let snap = env
+            .core
+            .tool_workflow_run(
+                &coord,
+                json!({ "action": "submit", "script": "export default async function () { return 1; }" }),
+            )
+            .await
+            .unwrap();
+        let snap = serde_json::to_value(snap).unwrap();
+        assert_eq!(snap["run"]["status"], "paused", "{fault:?}: {snap}");
+        assert_eq!(
+            snap["run"]["pause_reason_code"],
+            WfPauseReason::InfrastructureFault.as_str(),
+            "{fault:?}: {snap}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "non-retryable fault {fault:?} must not auto-retry"
+        );
+        let dec_id = snap["decision_id"].as_str().unwrap().to_owned();
+        let dec = env.store.decisions().get(&dec_id).unwrap().unwrap();
+        assert_eq!(
+            dec.options,
+            vec!["revise", "cancel", "single_session"],
+            "non-retryable fault {fault:?} must not offer retry"
+        );
+        let err = env
+            .core
+            .decision_command(
+                &env.owner(),
+                &dec_id,
+                Some(dec.revision),
+                DecisionCommand::Resolve {
+                    choice: "retry".into(),
+                    text: String::new(),
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(
+                err,
+                steve_core::CoreError::Module(_) | steve_core::CoreError::Status(400, _)
+            ),
+            "resolving disallowed retry option must be rejected, got {err:?}"
+        );
+        assert_eq!(
+            env.store.decisions().get(&dec_id).unwrap().unwrap().status,
+            DecisionStatus::Open,
+            "rejected retry attempt must leave decision open"
+        );
+    }
+
+    // Retryable infrastructure fault (Timeout) still offers "retry" once automatic retries are exhausted.
+    let calls = Arc::new(AtomicUsize::new(0));
+    let env = Env::with_executor(Arc::new(FixedFaultExecutor {
+        fault: WorkflowFault::new(WorkflowFaultCode::Timeout, "step timed out"),
+        calls: calls.clone(),
+    }));
+    let (_p, coord) = env.create_parent(None);
+    let snap = env
+        .core
+        .tool_workflow_run(
+            &coord,
+            json!({ "action": "submit", "script": "export default async function () { return 1; }" }),
+        )
+        .await
+        .unwrap();
+    let snap = serde_json::to_value(snap).unwrap();
+    assert_eq!(snap["run"]["status"], "paused");
+    assert!(calls.load(Ordering::SeqCst) > 1);
+    let dec_id = snap["decision_id"].as_str().unwrap().to_owned();
+    let dec = env.store.decisions().get(&dec_id).unwrap().unwrap();
+    assert_eq!(
+        dec.options,
+        vec!["retry", "revise", "cancel", "single_session"]
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn review_12_corrupt_options_json_errors_instead_of_silently_defaulting() {
     let env = Env::new(false);
     let (_parent_id, coord) = env.create_parent(None);

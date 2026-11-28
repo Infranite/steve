@@ -649,3 +649,90 @@ async fn review_08_step_runner_executes_under_sandbox_confinement() {
         "confined workflow step must execute cleanly, got {frame:?}"
     );
 }
+
+#[tokio::test]
+async fn installed_hub_binary_inside_steve_home_runs_workflow_step_under_confinement() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let steve_home = root.join("user/.steve");
+    let node_home = steve_home.join("data/node");
+    let rel_bin = steve_home.join("releases/0.15.0/bin");
+    std::fs::create_dir_all(&rel_bin).unwrap();
+    std::fs::create_dir_all(steve_home.join("signing")).unwrap();
+    std::fs::create_dir_all(&node_home).unwrap();
+    std::fs::write(steve_home.join("steve.env"), "SECRET=1\n").unwrap();
+    std::fs::write(steve_home.join("signing/key"), "KEY=1\n").unwrap();
+    std::fs::write(rel_bin.join("sibling"), "SIBLING=1\n").unwrap();
+
+    let src_bin = PathBuf::from(env!("CARGO_BIN_EXE_steve-hub"));
+    let installed_real = rel_bin.join("steve-hub");
+    if std::fs::hard_link(&src_bin, &installed_real).is_err() {
+        std::fs::copy(&src_bin, &installed_real).unwrap();
+        let out = std::process::Command::new(&installed_real)
+            .arg("--build-info")
+            .output()
+            .expect("warm copied steve-hub binary");
+        assert!(out.status.success());
+    }
+    std::os::unix::fs::symlink("releases/0.15.0", steve_home.join("current")).unwrap();
+    let installed_sym = steve_home.join("current/bin/steve-hub");
+
+    let sandbox = steve_confine::Sandbox::open(&steve_home, &node_home);
+    for bin in [installed_sym, installed_real] {
+        let r = StepRunner::with_sandbox(bin.clone(), sandbox.clone());
+        let frame = r
+            .execute(&step(
+                "export default async function () { return { installed: true, cycle: state.cycle }; }",
+            ))
+            .await;
+        assert!(
+            matches!(frame, StepFrame::Completed { ref result, .. } if *result == json!({ "installed": true, "cycle": 1 })),
+            "installed workflow step binary {} must succeed under confinement ({:?}), got {frame:?}",
+            bin.display(),
+            sandbox.state(),
+        );
+    }
+}
+
+#[tokio::test]
+async fn missing_and_non_executable_step_binary_return_non_retryable_fault() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = tempfile::tempdir().unwrap();
+    let steve_home = dir.path().join("steve");
+    let node_home = steve_home.join("data/node");
+    std::fs::create_dir_all(&node_home).unwrap();
+    let sandbox = steve_confine::Sandbox::open(&steve_home, &node_home);
+
+    let missing = dir.path().join("no-such-steve-hub");
+    let frame_missing = StepRunner::with_sandbox(missing, sandbox.clone())
+        .execute(&step("export default async function () { return 1; }"))
+        .await;
+    let StepFrame::Failed {
+        fault: f_missing, ..
+    } = frame_missing
+    else {
+        panic!("expected Failed for missing binary, got {frame_missing:?}");
+    };
+    assert!(
+        !f_missing.is_retryable(),
+        "missing binary must not be retryable: {f_missing:?}"
+    );
+
+    let non_exec = dir.path().join("not-executable");
+    std::fs::write(&non_exec, "#!/bin/sh\nexit 0\n").unwrap();
+    std::fs::set_permissions(&non_exec, std::fs::Permissions::from_mode(0o644)).unwrap();
+    let frame_non_exec = StepRunner::with_sandbox(non_exec, sandbox)
+        .execute(&step("export default async function () { return 1; }"))
+        .await;
+    let StepFrame::Failed {
+        fault: f_non_exec, ..
+    } = frame_non_exec
+    else {
+        panic!("expected Failed for non-executable binary, got {frame_non_exec:?}");
+    };
+    assert!(
+        !f_non_exec.is_retryable(),
+        "non-executable binary must not be retryable: {f_non_exec:?}"
+    );
+}

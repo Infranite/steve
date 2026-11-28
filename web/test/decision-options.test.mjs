@@ -58,7 +58,29 @@ test("a message handed over to you: send the draft, tell it how to reply, send y
 
 test("options of other subjects stay words of their own", () => {
   assert.equal(hasOptionIds("chan_message"), true)
+  assert.equal(hasOptionIds("wf_run"), true)
   for (const s of ["design_implementation", "flow_step", "toString", "__proto__", ""]) assert.equal(hasOptionIds(s), false, s)
   assert.equal(optionKey("flow_step", "done"), undefined)
   assert.equal(optionKey("chan_message", "answer"), undefined)
+})
+
+test("every WfDecisionChoice in workflow_run.rs has a label in zh-CN and en", () => {
+  const src = readFileSync(new URL("../../hub-rs/crates/steve-core/src/workflow_run.rs", import.meta.url), "utf8")
+  const block = /impl WfDecisionChoice \{[\s\S]*?pub const fn as_str\(self\) -> &'static str \{([\s\S]*?)\n    \}/.exec(src)
+  assert.ok(block, "found WfDecisionChoice::as_str")
+  const ids = [...block[1].matchAll(/Self::\w+\s*=>\s*"([^"]+)"/g)].map((m) => m[1])
+  assert.ok(ids.length >= 5, `found WfDecisionChoice variants: ${ids}`)
+  for (const id of ids) {
+    const key = optionKey("wf_run", id)
+    assert.ok(key, `wf_run option "${id}" is listed in decision-options.ts`)
+    for (const [lang, l] of [["zh-CN", zh], ["en", en]]) {
+      const s = label(l, key)
+      assert.equal(typeof s, "string", `${lang} ${key}`)
+      assert.ok(s.trim() && s !== id, `${lang} ${key} is words, not the id: ${s}`)
+      const decidedKey = `core:decided.wf_run.${id}`
+      const decidedStr = label(l, decidedKey)
+      assert.equal(typeof decidedStr, "string", `${lang} ${decidedKey}`)
+      assert.ok(decidedStr.trim(), `${lang} ${decidedKey}`)
+    }
+  }
 })
