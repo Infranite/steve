@@ -299,9 +299,13 @@ async fn probe_adapters(cfg: &AcpConfig, cwd: &Path) -> HashMap<String, Probe> {
         .into_iter()
         .filter(|id| cfg.adapter_properties(id).probe_initialize)
         .collect();
-    // the scratch sessions' directory: one of the Node's own, the same every time
+    // the scratch sessions' directory: one of the Node's own, the same every time.
+    // Never recreate a retired/removed Node home via create_dir_all; probe() falls back to temp_dir
+    // when this directory is absent.
     let cwd = cwd.join("probe");
-    let _ = std::fs::create_dir_all(&cwd);
+    if cwd.parent().is_some_and(Path::is_dir) {
+        let _ = std::fs::create_dir(&cwd);
+    }
     let mut set = tokio::task::JoinSet::new();
     for id in ids {
         let cfg = cfg.clone();
@@ -1192,6 +1196,35 @@ exec /bin/sh -c "$script"
             calls(),
             2,
             "forget() must invalidate cached node runtime probe"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_adapters_does_not_recreate_missing_home_directories() {
+        let root = tempfile::tempdir().unwrap();
+        let steve_home = root.path().join("retired-steve-home");
+        let node_home = steve_home.join("data/node");
+        let cfg = AcpConfig {
+            adapters: HashMap::from([("pi".into(), steve_home.join("adapters/pi"))]),
+            declared: HashMap::new(),
+            node: PathBuf::from("/usr/bin/false"),
+            claude_executable: PathBuf::from("/usr/bin/false"),
+            claude_config_dir: None,
+            steve_home: steve_home.clone(),
+            codex_home: steve_home.join("codex"),
+            user_home: root.path().to_path_buf(),
+            version: "test".into(),
+        };
+
+        let result = probe_adapters(&cfg, &node_home).await;
+        assert_eq!(result["pi"].status, ProbeStatus::AdapterMissing);
+        assert!(
+            !steve_home.exists(),
+            "probe_adapters must not recreate missing steve_home"
+        );
+        assert!(
+            !node_home.exists(),
+            "probe_adapters must not recreate missing node_home"
         );
     }
 }

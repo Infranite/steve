@@ -935,6 +935,7 @@ impl Probe {
 pub async fn probe(cfg: &crate::AcpConfig, id: &str, cwd: &Path, timeout: Duration) -> Probe {
     let _prefix = match cfg
         .adapter_prefix(id)
+        .filter(|h| crate::managed::dir(h).is_dir())
         .map(|h| crate::managed::prefix_lock(&h, false))
         .transpose()
     {
@@ -2334,6 +2335,39 @@ rl.on("line", (line) => {{
             .insert("unbuilt".into(), dir.path().join("nope/agent.js"));
         let p = probe(&c, "unbuilt", dir.path(), Duration::from_millis(300)).await;
         assert_eq!(p.status, ProbeStatus::AdapterMissing, "{p:?}");
+    }
+
+    #[tokio::test]
+    async fn probe_missing_managed_adapter_does_not_recreate_steve_home() {
+        let dir = tempfile::tempdir().unwrap();
+        let retired_home = dir.path().join("retired-steve-home");
+        let mut c = cfg(dir.path());
+        c.steve_home = retired_home.clone();
+        c.adapters.insert(
+            "pi".into(),
+            crate::managed::command(&retired_home, "pi").unwrap(),
+        );
+        let p = probe(&c, "pi", &retired_home, Duration::from_secs(5)).await;
+        assert_eq!(p.status, ProbeStatus::AdapterMissing, "{p:?}");
+        assert!(
+            !retired_home.exists(),
+            "probe must not recreate retired STEVE_HOME when acquiring shared prefix lock"
+        );
+    }
+
+    #[tokio::test]
+    async fn probe_respects_existing_exclusive_prefix_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut c = cfg(dir.path());
+        c.steve_home = dir.path().to_path_buf();
+        let cmd = crate::managed::command(dir.path(), "pi").unwrap();
+        std::fs::create_dir_all(cmd.parent().unwrap()).unwrap();
+        std::fs::write(&cmd, "#!/bin/sh\nexit 0\n").unwrap();
+        c.adapters.insert("pi".into(), cmd);
+
+        let _exclusive = crate::managed::prefix_lock(dir.path(), true).unwrap();
+        let p = probe(&c, "pi", dir.path(), Duration::from_secs(5)).await;
+        assert_eq!(p.status, ProbeStatus::InitializeFailed, "{p:?}");
     }
 }
 

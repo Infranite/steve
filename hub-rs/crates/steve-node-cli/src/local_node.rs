@@ -48,23 +48,72 @@ fn data_dir_from_env(steve_home: &Path) -> PathBuf {
     canonicalize_path(&steve_home.join("data"))
 }
 
-fn retired(home: &Path, executable: &Path) -> bool {
-    if let Some(missing) = [home, executable]
-        .into_iter()
-        .find(|path| matches!(path.try_exists(), Ok(false)))
-    {
-        tracing::info!(path = %missing.display(), "the local Node's installation is gone");
+#[derive(Clone, Debug)]
+struct WatchedPath {
+    path: PathBuf,
+    #[cfg(unix)]
+    identity: Option<(u64, u64)>,
+}
+
+impl WatchedPath {
+    fn capture(path: PathBuf) -> Self {
+        #[cfg(unix)]
+        let identity = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&path).ok().map(|m| (m.dev(), m.ino()))
+        };
+        Self {
+            path,
+            #[cfg(unix)]
+            identity,
+        }
+    }
+
+    fn intact(&self) -> bool {
+        match std::fs::metadata(&self.path) {
+            Ok(meta) => {
+                #[cfg(unix)]
+                if let Some(id) = self.identity {
+                    use std::os::unix::fs::MetadataExt;
+                    return (meta.dev(), meta.ino()) == id;
+                }
+                let _ = meta;
+                true
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            #[cfg(unix)]
+            Err(e) if e.raw_os_error() == Some(libc::ENOTDIR) => false,
+            Err(_) => true,
+        }
+    }
+}
+
+fn path_missing(path: &Path) -> bool {
+    matches!(path.try_exists(), Ok(false))
+}
+
+fn retired(home: &WatchedPath, node: &LocalNode, executable: &Path) -> bool {
+    if !home.intact() {
+        tracing::info!(path = %home.path.display(), "the local Node's home is gone or replaced");
+        return true;
+    }
+    if !node.home_intact() {
+        tracing::info!("the local Node's lock file is gone or replaced");
+        return true;
+    }
+    if path_missing(executable) {
+        tracing::info!(path = %executable.display(), "the local Node's executable is gone");
         return true;
     }
     false
 }
 
-async fn wait_for_retirement(home: &Path, executable: &Path) {
+async fn wait_for_retirement(home: WatchedPath, node: LocalNode, executable: &Path) {
     let mut tick = tokio::time::interval(INSTALLATION_CHECK);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     loop {
         tick.tick().await;
-        if retired(home, executable) {
+        if retired(&home, &node, executable) {
             return;
         }
     }
@@ -120,9 +169,11 @@ pub async fn run() -> Result<()> {
     let steve_home = steve_home_from_env()?;
     let executable = std::env::current_exe().context("the local Node's executable")?;
     let executable = executable.canonicalize().unwrap_or(executable);
-    if retired(&steve_home, &executable) {
+    if path_missing(&steve_home) || path_missing(&executable) {
+        tracing::info!("the local Node's installation is gone");
         return Ok(());
     }
+    let watched_home = WatchedPath::capture(steve_home.clone());
     let data_dir = data_dir_from_env(&steve_home);
     let node_home = data_dir.join("node");
     let link: LocalServiceLink = serde_json::from_slice(
@@ -181,17 +232,92 @@ pub async fn run() -> Result<()> {
         version: Some(version),
     };
     std::fs::write(node_home.join(LOCAL_SERVICE_PID_FILE), pid_record.format())?;
+    let retirement_node = node.clone();
     let r = crate::dial::serve_until_stopped(
         node,
         Some(&node_home),
         &pairing,
         &id,
         &steve_node_wire::tls::Trust::LoopbackPlaintext,
-        wait_for_retirement(&steve_home, &executable),
+        wait_for_retirement(watched_home, retirement_node, &executable),
     )
     .await;
     if read_pid(&node_home) == Some(std::process::id()) {
         let _ = std::fs::remove_file(node_home.join(LOCAL_SERVICE_PID_FILE));
     }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_node(steve_home: &Path, node_home: &Path) -> LocalNode {
+        LocalNode::open(NodeConfig {
+            ceiling: PolicyCeiling::unlimited(),
+            node: NodeId::new(NODE_ID).unwrap(),
+            home: node_home.to_path_buf(),
+            acp: steve_acp::AcpConfig {
+                adapters: Default::default(),
+                declared: Default::default(),
+                node: PathBuf::from("/usr/bin/false"),
+                claude_executable: PathBuf::from("/usr/bin/false"),
+                claude_config_dir: None,
+                steve_home: steve_home.to_path_buf(),
+                codex_home: steve_home.join("codex"),
+                user_home: steve_home.to_path_buf(),
+                version: "0.14.0".into(),
+            },
+            roots: vec![],
+            capacity: Capacity {
+                sessions: 1,
+                jobs: 0,
+                execs: 0,
+            },
+            storage: Storage::default(),
+        })
+        .unwrap()
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn retired_detects_missing_and_recreated_home_lock_and_executable() {
+        let tmp = tempfile::tempdir().unwrap();
+        let steve_home = tmp.path().join("steve");
+        let node_home = steve_home.join("data/node");
+        std::fs::create_dir_all(&node_home).unwrap();
+        let exe = tmp.path().join("steve-node");
+        std::fs::write(&exe, b"bin").unwrap();
+
+        let watched = WatchedPath::capture(steve_home.clone());
+        let node = test_node(&steve_home, &node_home);
+        assert!(!retired(&watched, &node, &exe));
+
+        // 1. Renaming STEVE_HOME and recreating an empty directory at the old path must retire.
+        let moved_home = tmp.path().join("retired-steve");
+        std::fs::rename(&steve_home, &moved_home).unwrap();
+        assert!(retired(&watched, &node, &exe));
+        std::fs::create_dir_all(&steve_home).unwrap();
+        assert!(retired(&watched, &node, &exe));
+
+        // Restore original STEVE_HOME inode and verify retirement clears again.
+        std::fs::remove_dir_all(&steve_home).unwrap();
+        std::fs::rename(&moved_home, &steve_home).unwrap();
+        assert!(!retired(&watched, &node, &exe));
+
+        // 2. Replacing node.lock triggers retirement via node.home_intact().
+        let moved_lock = node_home.join("node.lock.moved");
+        std::fs::rename(node_home.join("node.lock"), &moved_lock).unwrap();
+        assert!(retired(&watched, &node, &exe));
+        std::fs::write(node_home.join("node.lock"), "").unwrap();
+        assert!(retired(&watched, &node, &exe));
+
+        // Restore original lock inode and verify executable removal triggers retirement.
+        std::fs::rename(&moved_lock, node_home.join("node.lock")).unwrap();
+        assert!(!retired(&watched, &node, &exe));
+        std::fs::remove_file(&exe).unwrap();
+        assert!(retired(&watched, &node, &exe));
+
+        node.shutdown().await;
+    }
 }

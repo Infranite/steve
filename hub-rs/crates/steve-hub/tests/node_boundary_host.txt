@@ -28,9 +28,9 @@ Dir	steve-toolchains/src/lib.rs	2
 Fs	steve-acp/src/adapter/claude_code.rs	2
 Fs	steve-acp/src/adapter/codex.rs	4
 Fs	steve-acp/src/adapter/history.rs	2
-Fs	steve-acp/src/adapters.rs	6
+Fs	steve-acp/src/adapters.rs	7
 Fs	steve-acp/src/config.rs	10
-Fs	steve-acp/src/managed.rs	7
+Fs	steve-acp/src/managed.rs	9
 Fs	steve-acp/src/rollout.rs	2
 Fs	steve-acp/src/state_dir.rs	1
 Fs	steve-acp/src/transcript.rs	9
