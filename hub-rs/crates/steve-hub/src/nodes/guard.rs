@@ -230,7 +230,7 @@ impl EventSink for GuardedSink {
         l.fresh().await?;
         let bytes = serde_json::to_vec(&batch).map(|v| v.len()).unwrap_or(0);
         if !take_event_bytes(l.node.as_str(), bytes) {
-            return Err(Error::later(
+            return Err(Error::new(
                 Code::Exhausted,
                 "this node is sending events faster than the hub takes them",
             ));

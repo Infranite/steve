@@ -1852,10 +1852,12 @@ impl ExecutionControl for FakeNode {
             let n = serde_json::to_vec(e).map(|v| v.len()).unwrap_or(usize::MAX);
             if used.saturating_add(n) > max_bytes as usize {
                 if events.is_empty() {
+                    // Match LocalNode replay: the persisted event will not shrink on an identical retry.
                     return Err(Error::new(
                         Code::Exhausted,
                         "the next event does not fit in max_bytes",
-                    ));
+                    )
+                    .retry(Retry::Never));
                 }
                 break;
             }

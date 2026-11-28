@@ -936,9 +936,13 @@ async fn wait_for_idle_boundary(
             });
         }
         if inner.retiring.load(Ordering::SeqCst) {
-            return Err(failed(
-                Code::Busy,
-                "Node is being removed before the queued upgrade could start",
+            // Queued upgrade aborted because the Node is being removed; do not auto-retry.
+            return Err(failed_error(
+                Error::new(
+                    Code::Busy,
+                    "Node is being removed before the queued upgrade could start",
+                )
+                .retry(Retry::Never),
             ));
         }
         let acquired = {
@@ -1492,10 +1496,10 @@ fn succeeded() -> Observed {
     }
 }
 
-fn failed(code: Code, detail: impl Into<String>) -> Observed {
+fn failed_error(error: Error) -> Observed {
     Observed::Finished {
         outcome: Outcome::Failed,
         result: None,
-        error: Some(Error::new(code, detail)),
+        error: Some(error),
     }
 }

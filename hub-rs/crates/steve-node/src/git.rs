@@ -777,7 +777,8 @@ pub(crate) fn rebase(
     );
     if !tracked.is_empty() {
         let lines: Vec<&str> = tracked.lines().take(10).collect();
-        return Err(Error::new(Code::Busy, lines.join("\n")));
+        // Uncommitted tracked changes need user or agent cleanup; retrying rebase blindly will not clear them.
+        return Err(Error::new(Code::Busy, lines.join("\n")).retry(Retry::Never));
     }
     if g.test(&["merge-base", "--is-ancestor", &onto, "HEAD"])? {
         return Ok(before);
@@ -923,7 +924,8 @@ fn read(dir: &Path, args: &[&str]) -> ApiResult<Out> {
             Error::new(Code::Stale, "git took too long")
         }
         steve_runtime::process::CommandError::OutputLimitExceeded { .. } => {
-            Error::new(Code::Exhausted, "git printed too much")
+            // Output exceeds fixed READ_CAP; repeating the same git read on the same state fails identically.
+            Error::new(Code::Exhausted, "git printed too much").retry(Retry::Never)
         }
         other => Error::new(Code::Internal, format!("git: {other}")),
     })?;

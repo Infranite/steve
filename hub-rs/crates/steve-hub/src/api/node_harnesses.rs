@@ -613,10 +613,14 @@ pub async fn install(
         .map_err(|_| {
             ::metrics::counter!("steve_hub_harness_installs_total", "outcome" => "rejected")
                 .increment(1);
-            ApiError::Contract(steve_types::Error::new(
-                steve_types::Code::Unavailable,
-                "Node harness installation request timed out",
-            ))
+            // RPC timed out after dispatch with a per-request operation ID; outcome on Node is unknown.
+            ApiError::Contract(
+                steve_types::Error::new(
+                    steve_types::Code::Unavailable,
+                    "Node harness installation request timed out",
+                )
+                .retry(steve_types::Retry::Never),
+            )
         })?
         .map_err(|e| {
             ::metrics::counter!("steve_hub_harness_installs_total", "outcome" => "rejected")
@@ -628,6 +632,10 @@ pub async fn install(
                 _ => steve_types::Code::Invalid,
             };
             let mut contract = steve_types::Error::new(code, e.safe_detail);
+            if e.code == Code::OutcomeUnknown || e.retry == steve_types::Retry::Never {
+                // Never upgrade an uncertain or non-retryable Node error to Retry::Later when remapping codes.
+                contract.retry = steve_types::Retry::Never;
+            }
             contract.reason = e.reason;
             contract.params = e.params;
             ApiError::Contract(contract)

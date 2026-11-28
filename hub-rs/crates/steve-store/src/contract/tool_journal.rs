@@ -286,6 +286,7 @@ mod tests {
             offline,
             ToolResult::Failed {
                 error: Error::new(Code::Unavailable, "node away")
+                    .retry(Retry::Never)
                     .with_param("operation", "op_offline")
                     .with_param("state", "unknown")
             }

@@ -742,6 +742,7 @@ async fn an_oversized_answer_names_its_call() {
     let node = Conn::spawn(n.sink, n.stream, 1, Arc::new(Nothing), opts("n"));
     let e = node.call("tool.call", json!({}), None).await.unwrap_err();
     assert_eq!(e.code, Code::Exhausted);
+    assert_eq!(e.retry, Retry::Never);
     assert!(
         e.safe_detail
             .starts_with("the answer to tool.call request ")

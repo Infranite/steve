@@ -833,6 +833,7 @@ async fn a_retiring_node_takes_no_new_work_and_cancels_what_runs() {
         .await
         .unwrap_err();
     assert_eq!(e.code, Code::Busy, "{e}");
+    assert_eq!(e.retry, Retry::Never);
     assert_eq!(n.cancel_running("removing").await.unwrap(), 1);
     t.wait_for("the end", |t| !t.ended().is_empty()).await;
     assert_eq!(t.ended()[0].outcome, Outcome::Cancelled);

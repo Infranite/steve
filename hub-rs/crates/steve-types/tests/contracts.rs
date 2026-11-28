@@ -230,3 +230,48 @@ fn reason_error_body_matches_golden_bytes() {
         body
     );
 }
+
+#[test]
+fn error_new_uses_default_retry_for_every_code() {
+    use Code::*;
+    use std::collections::BTreeSet;
+
+    let all = [
+        Invalid,
+        Unauthenticated,
+        Forbidden,
+        NotFound,
+        Conflict,
+        Stale,
+        Gap,
+        TooLarge,
+        NotConfigured,
+        Unsupported,
+        Busy,
+        RateLimited,
+        Exhausted,
+        Unavailable,
+        Timeout,
+        OutcomeUnknown,
+        Incompatible,
+        Internal,
+    ];
+    let mut seen = BTreeSet::new();
+    for code in all {
+        // Exhaustive match guarantees new Code variants cannot skip this contract test.
+        match code {
+            Invalid | Unauthenticated | Forbidden | NotFound | Conflict | Stale | Gap
+            | TooLarge | NotConfigured | Unsupported | Busy | RateLimited | Exhausted
+            | Unavailable | Timeout | OutcomeUnknown | Incompatible | Internal => {}
+        }
+        assert!(
+            seen.insert(code.as_str()),
+            "duplicate code: {}",
+            code.as_str()
+        );
+        let err = Error::new(code, "detail");
+        assert_eq!(err.code, code);
+        assert_eq!(err.retry, code.default_retry(), "{}", code.as_str());
+    }
+    assert_eq!(seen.len(), all.len());
+}

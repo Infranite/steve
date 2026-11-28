@@ -5,7 +5,7 @@ use std::pin::Pin;
 use futures_util::{Sink, Stream};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use steve_node_api::{Code, Error};
+use steve_node_api::{Code, Error, Retry};
 
 // Local scheduling policy; these limits may evolve with the ordinary protocol.
 pub const MAX_FRAME: usize = 288 * 1024;
@@ -80,6 +80,7 @@ impl Envelope {
             MAX_FRAME
         };
         if text.len() > cap {
+            // Frame size is deterministic for this payload; resending the identical envelope fails the same way.
             return Err(Error::new(
                 Code::Exhausted,
                 format!(
@@ -87,7 +88,8 @@ impl Envelope {
                     self.subject(),
                     text.len()
                 ),
-            ));
+            )
+            .retry(Retry::Never));
         }
         Ok(text)
     }
@@ -164,7 +166,9 @@ mod tests {
         assert!(Envelope::decode("{not json").is_none());
         assert!(Envelope::decode(&"x".repeat(MAX_FRAME + 1)).is_none());
         let big = Envelope::ctl("c", "hello", 0, Value::String("y".repeat(CONTROL_CAP)));
-        assert_eq!(big.encode().unwrap_err().code, Code::Exhausted);
+        let big_err = big.encode().unwrap_err();
+        assert_eq!(big_err.code, Code::Exhausted);
+        assert_eq!(big_err.retry, Retry::Never);
         let mut raw = big.clone();
         raw.t = Kind::Req;
         let text = raw.encode().unwrap().replace("\"req\"", "\"ctl\"");
@@ -176,6 +180,7 @@ mod tests {
         huge.p = Value::String("z".repeat(MAX_FRAME));
         let err = huge.encode().unwrap_err();
         assert_eq!(err.code, Code::Exhausted);
+        assert_eq!(err.retry, Retry::Never);
         assert!(
             err.safe_detail.starts_with("request turn.start is "),
             "{}",
@@ -186,6 +191,8 @@ mod tests {
         huge.m = String::new();
         huge.re = Some("n_4".into());
         let err = huge.encode().unwrap_err();
+        assert_eq!(err.code, Code::Exhausted);
+        assert_eq!(err.retry, Retry::Never);
         assert!(
             err.safe_detail.starts_with("the answer to request n_4 is "),
             "{}",

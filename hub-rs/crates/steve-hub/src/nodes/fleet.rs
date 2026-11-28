@@ -58,7 +58,7 @@ struct NoRuntime;
 #[async_trait]
 impl EventSink for NoRuntime {
     async fn commit(&self, _: EventBatch) -> ApiResult<EventAck> {
-        Err(Error::later(
+        Err(Error::new(
             Code::Unavailable,
             "no coordinator for this node yet",
         ))
@@ -340,7 +340,7 @@ impl NodeFleet {
                 }
                 // the Hub has not finished starting: refused for now, the Node calls again
                 None => {
-                    return Arc::new(NoTools(Error::later(
+                    return Arc::new(NoTools(Error::new(
                         Code::Unavailable,
                         "the Hub's tools are not ready yet",
                     )));

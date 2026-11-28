@@ -145,6 +145,7 @@ impl StdioMcpHost {
             Ok(McpStdioCallResponse { result })
         };
         tokio::time::timeout(CALL_WAIT, fut).await.map_err(|_| {
+            // Stdio MCP tools/call was already dispatched and may have side effects; do not auto-retry on timeout.
             Error::new(
                 Code::Timeout,
                 format!(
@@ -152,6 +153,7 @@ impl StdioMcpHost {
                     CALL_WAIT.as_secs()
                 ),
             )
+            .retry(Retry::Never)
         })?
     }
 
@@ -251,6 +253,7 @@ impl StdioMcpHost {
                     .take(server.operation.clone(), secret_id.clone())
                     .await
                     .map_err(|e| {
+                        // Preserve the upstream secret-fetch retry classification when wrapping the detail.
                         Error::new(
                             e.code,
                             format!(
@@ -258,6 +261,7 @@ impl StdioMcpHost {
                                 server.name, e.safe_detail
                             ),
                         )
+                        .retry(e.retry)
                     })?;
                 let val =
                     Zeroizing::new(String::from_utf8(bytes.expose().to_vec()).map_err(|_| {

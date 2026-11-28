@@ -587,7 +587,7 @@ async fn an_exhausted_refusal_with_retry_never_rejects_immediately() {
     let h = hub();
     h.node.refuse(
         "start_turn",
-        Some(Error::new(Code::Exhausted, "permanent exhausted fixture")),
+        Some(Error::new(Code::Exhausted, "permanent exhausted fixture").retry(Retry::Never)),
     );
     h.bind();
     h.rt.prompt(S, "hello", "user", &[]).unwrap();

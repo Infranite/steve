@@ -1482,10 +1482,12 @@ impl Tx<'_> {
         for s in rows {
             if used + s.len() > max_bytes as usize {
                 if events.is_empty() {
+                    // The persisted event size is fixed; retrying replay with the same max_bytes cannot succeed.
                     return Err(Error::new(
                         Code::Exhausted,
                         "the next event does not fit in max_bytes",
-                    ));
+                    )
+                    .retry(Retry::Never));
                 }
                 break;
             }
@@ -1726,10 +1728,12 @@ impl Tx<'_> {
         started: Option<u64>,
     ) -> ApiResult<()> {
         if self.proc_of(session)?.is_some() {
+            // Prior process group is not confirmed gone; require explicit reconciliation rather than blind retry.
             return Err(Error::new(
                 Code::Busy,
                 "a harness of this session was not confirmed gone",
-            ));
+            )
+            .retry(Retry::Never));
         }
         self.c()
             .execute(
