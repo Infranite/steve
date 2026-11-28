@@ -4,9 +4,9 @@ import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, 
 import { Button } from "@/components/ui/button"
 import { Input } from "@/components/ui/input"
 import { laneOf } from "@/item-lanes"
-import { archive, bulk, closedSt, deleteItem, DOMAIN_CATS, getItems, isKind, itemDisplayState, itemDisplayStatus, itemOf, kindTags, st, tag, useShellStore, type Item } from "@/store"
+import { archive, bulk, closedSt, deleteItem, DOMAIN_CATS, getItems, isKind, itemDisplayState, itemDisplayStatus, itemOf, kindOf, kindTags, st, tag, useShellStore, type Item } from "@/store"
 import { BotName, Chips, Empty, go, Group, KindTag, openSheet, Page, SectionLabel, Segmented, StatusDot } from "@/ui"
-import { Count, ItemRow, Select, selected } from "@/view-shared"
+import { Count, ItemRow, itemShowsPlan, Select, selected } from "@/view-shared"
 import { t as tr, useT } from "@/i18n"
 import { cn } from "cn"
 import { PlusIcon, SearchIcon } from "lucide-react"
@@ -56,15 +56,16 @@ export function ItemsView() {
   const pick = selecting ? (id: string) => () => { selected.has(id) ? selected.delete(id) : selected.add(id); r() } : () => undefined
   const ids = [...selected]
   const done = () => { selected.clear(); selecting = false; r() }
-  /* the project and bot columns only when the visible items differ in them */
+  /* the project, bot, kind and plan columns only when the visible items carry them (across all groups) */
   const multiProj = new Set(xs.map((i) => i.project).filter(Boolean)).size > 1, multiBot = new Set(xs.map((i) => i.b).filter(Boolean)).size > 1
+  const showKind = xs.some((i) => !!kindOf(i)), showPlan = xs.some(itemShowsPlan)
   const rowOf = (i: Item) => {
     if (arch) {
-      return <div key={i.id} className="flex items-center"><div className="min-w-0 flex-1"><ItemRow i={i} proj={multiProj} bot={multiBot} /></div>
-        <Button size="xs" variant="ghost" className="text-muted-foreground" onClick={() => archive([i.id], false)} data-unarchive={i.id}>{t("views:items.restore")}</Button>
-        <Button size="xs" variant="ghost" className="text-destructive" onClick={() => setConfirmDel(i.id)} data-delete-item={i.id}>{t("common:action.delete")}</Button></div>
+      return <div key={i.id} className="flex items-center"><div className="min-w-0 flex-1"><ItemRow i={i} proj={multiProj} bot={multiBot} kind={showKind} plan={showPlan} /></div>
+        <Button size="xs" variant="ghost" className="shrink-0 text-muted-foreground" onClick={() => archive([i.id], false)} data-unarchive={i.id}>{t("views:items.restore")}</Button>
+        <Button size="xs" variant="ghost" className="shrink-0 text-destructive" onClick={() => setConfirmDel(i.id)} data-delete-item={i.id}>{t("common:action.delete")}</Button></div>
     }
-    return <ItemRow key={i.id} i={i} pick={pick(i.id)} proj={multiProj} bot={multiBot} />
+    return <ItemRow key={i.id} i={i} pick={pick(i.id)} proj={multiProj} bot={multiBot} kind={showKind} plan={showPlan} />
   }
   const runCount = open.filter((l) => l === "running").length, waitCount = open.filter((l) => l === "needs").length
   const subText = arch ? t("views:items.subArch") : t("views:items.sub", { run: runCount, wait: waitCount })

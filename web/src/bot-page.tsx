@@ -19,9 +19,9 @@ import { api } from "@/api"
 import { stats } from "@/api/stats"
 import { useHubQuery } from "@/data/use-hub-query"
 import { fmtMs, fmtN, fmtPct, fmtUsd } from "@/stats/format"
-import { st, closedSt, saveBot, toast, type Item } from "@/store"
+import { st, closedSt, kindOf, saveBot, toast, type Item } from "@/store"
 import { Section, Panel, Card, Note, Segmented, Loading, Fact, Figure } from "@/ui"
-import { ItemRowExport as ItemRow } from "@/view-shared"
+import { itemShowsPlan, ItemRowExport as ItemRow } from "@/view-shared"
 import { foldedDiff, diffCounts } from "@/lib/line-diff"
 
 export type BotTab = "概览" | "设置" | "对外身份" | "能力" | "系统提示词" | "定时与流程" | "记忆"
@@ -60,6 +60,7 @@ export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) =>
   if (!b) return null
   const s = d.data ?? null
   const { open, list, any } = recentItems(k, getItems())
+  const showKind = list.some((i) => !!kindOf(i)), showPlan = list.some(itemShowsPlan), showProj = list.some((i) => !!i.project)
   /* a Bot with no history: nothing it was given, no turn in the statistics */
   const fresh = !any && !!s && s.agents.turns === 0 && s.throughput.done === 0
   const promptText = b.prompt == null ? t("manage:ov.promptAuto") : t("manage:ov.promptCustom", { count: b.prompt.length })
@@ -96,7 +97,7 @@ export function BotOverview({ k, go, labels }: { k: string; go: (tab: BotTab) =>
 
       {!fresh && (
         <Section label={t("manage:ov.items")} right={open.length > 0 ? <span className="type-footnote font-normal text-muted-foreground">{t("manage:ov.running", { count: open.length })}</span> : undefined}>
-          {list.length ? <Panel data-bot-items>{list.map((i) => <ItemRow key={i.id} i={i} bot={false} />)}</Panel>
+          {list.length ? <Panel data-bot-items>{list.map((i) => <ItemRow key={i.id} i={i} bot={false} proj={showProj} kind={showKind} plan={showPlan} />)}</Panel>
             : <div className="rounded-xl bg-muted/60 px-4 py-3.5 type-callout text-muted-foreground">{t("manage:ov.noItems")}</div>}
         </Section>
       )}

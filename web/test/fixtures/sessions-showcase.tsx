@@ -7,15 +7,18 @@ import type { DecisionView, ItemView, SessionView } from "../../src/gen"
 import { SidebarProvider, SidebarInset } from "../../src/components/ui/sidebar"
 import { TooltipProvider } from "../../src/components/ui/tooltip"
 import { setLang } from "../../src/i18n"
+import { resetAppearance, setAppearance } from "../../src/themes"
 import { refresh, useStore } from "../../src/store"
 import { SessionsView } from "../../src/sessions-list"
 import { fixtureProject, fixtureRawBot, fixtureShell, seedDecisionViews, seedItemViews, seedSessionViews } from "./view-data"
 import { decisionView, itemView, sessionView } from "./wire-views.ts"
 
 /* the 会话 list with a realistic spread: live, waiting, ended, imported and unlinked conversations across a week, on
- * several models and two bots. ?dark · ?en · ?narrow is left to the viewport */
+ * several models and two bots. ?dark · ?en · ?large · ?sysmono · ?narrow is left to the viewport */
 const q = new URLSearchParams(location.search)
 document.documentElement.classList.toggle("dark", q.has("dark"))
+document.documentElement.classList.toggle("font-large", q.has("large"))
+if (q.has("sysmono")) setAppearance({ mono: "system-mono" }); else resetAppearance()
 if (q.has("en")) void setLang("en")
 const now = Date.now(), H = 3_600_000
 const titles = ["重设计多 Bot 协作区的信息展示", "修复完全放开后工具仍反复请求审批", "独立审查权限切换及隔离安全", "修复协作工作流状态检测与异常卡误报", "独立审查状态判定及回归覆盖", "统一工作状态判定与异常恢复", "整合协作区与关系图待确认设计", "统一执行体完整边界并修复关闭权限状态", "独立审查协作区与关系图设计", "修正执行证据、暂停结果与周期身份", "修订协作区与关系图统一设计", "补齐会话页的搜索高亮", "迁移旧版通知到信号中心", "Apple 客户端的同步策略", "整理事项列表的工具栏"]

@@ -335,3 +335,26 @@ details[open]::details-content { height: auto; }
   content-visibility: auto;
   contain-intrinsic-block-size: auto 0px;
 }
+
+/* ItemRow fixed right-side metadata tracks: scale with --type-scale, widen English timestamps ("Yesterday 11:47"),
+ * and progressively hide secondary columns by the row's inline width (Items 1040/762, Project/Bot 720, mobile 390). */
+[data-item-row] { container-type: inline-size; container-name: item-row; }
+[data-item-col="kind"] { width: calc(3.75rem * var(--type-scale)); }
+[data-item-col="project"] { width: calc(6.5rem * var(--type-scale)); }
+[data-item-col="plan"] { width: calc(4.75rem * var(--type-scale)); }
+[data-item-col="exec"] { width: calc(5.25rem * var(--type-scale)); }
+[data-item-col="time"] { width: calc(4.75rem * var(--type-scale)); }
+:lang(en) [data-item-col="time"] { width: calc(6.75rem * var(--type-scale)); }
+@container item-row (max-width: 779.98px) {
+  [data-item-col="kind"], [data-item-col="project"] { display: none; }
+}
+@container item-row (max-width: 639.98px) {
+  [data-item-col="plan"], [data-item-closed-now] { display: none; }
+}
+@container item-row (max-width: 479.98px) {
+  [data-item-col="exec"] { display: none; }
+}
+@media (width >= 40rem) {
+  [data-session-time] { width: calc(4.75rem * var(--type-scale)); }
+  :lang(en) [data-session-time] { width: calc(6.75rem * var(--type-scale)); }
+}
