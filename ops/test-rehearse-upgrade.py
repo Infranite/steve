@@ -12,6 +12,8 @@ from pathlib import Path
 import plistlib
 import shutil
 import signal
+import socket
+import socketserver
 import subprocess
 import sys
 import tarfile
@@ -22,6 +24,27 @@ import unittest
 from unittest.mock import patch
 
 OPS = Path(__file__).resolve().parent
+TEST_SERVER_POLL_INTERVAL_SECS = 0.05
+
+
+class LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+    """Loopback HTTP server that skips reverse-DNS socket.getfqdn() in server_bind()."""
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
+def _python_shebang() -> str:
+    exe = sys.executable
+    if exe and " " not in exe and "\t" not in exe and len(exe) <= 100:
+        return f"#!{exe}"
+    return "#!/usr/bin/env python3"
 
 
 def load_module():
@@ -36,18 +59,23 @@ def load_module():
 REH = load_module()
 
 FAKE_HUB_CODE = r'''#!/usr/bin/env python3
+from __future__ import annotations
+
 import functools
 import http.server
 import json
 import os
 from pathlib import Path
 import plistlib
+import select
 import shutil
 import signal
+import socketserver
 import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 
 BUNDLE = Path(__file__).resolve().parents[1]
@@ -58,11 +86,115 @@ TARGET = os.environ.get("FAKE_TARGET", "aarch64-apple-darwin")
 LEGACY_POLICY = bool(MANIFEST.get("fake_legacy_policy", False))
 HAS_LEGACY_OPS = (BUNDLE / "ops/run.sh").is_file()
 PID_LOG_ENV_VARS = ("FAKE_REHEARSAL_PID_LOG", "STEVE_TEST_PID_LOG")
+READY_FD_ENV_VAR = "FAKE_HUB_READY_FD"
+READY_WAIT_TIMEOUT_SECS = 15.0
+SERVER_POLL_INTERVAL_SECS = 0.05
+MAIN_STOP_WAIT_SECS = 0.2
+READY_PIPE_READ_BYTES = 4096
+DIAGNOSTIC_TAIL_CHARS = 2000
+THREAD_START_WAIT_SECS = 5.0
+THREAD_JOIN_WAIT_SECS = 3.0
 NODE_BOOT_DELAY_SECS = 0.2
 SUPERVISOR_POLL_SECS = 0.2
 PROC_TERM_WAIT_SECS = 3.0
 PROC_KILL_WAIT_SECS = 2.0
 PID_POLL_INTERVAL_SECS = 0.1
+
+
+class LoopbackHTTPServer(http.server.ThreadingHTTPServer):
+    """Loopback HTTP server that skips reverse-DNS socket.getfqdn() in server_bind()."""
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)
+        host, port = self.server_address[:2]
+        self.server_name = host
+        self.server_port = port
+
+
+def take_ready_fd() -> int | None:
+    raw = os.environ.pop(READY_FD_ENV_VAR, "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def signal_ready(ready_fd: int | None, payload: dict) -> None:
+    if ready_fd is None:
+        return
+    try:
+        data = (json.dumps(payload) + "\n").encode("utf-8")
+        view = memoryview(data)
+        while view:
+            written = os.write(ready_fd, view)
+            if written <= 0:
+                break
+            view = view[written:]
+    except OSError:
+        pass
+    finally:
+        try:
+            os.close(ready_fd)
+        except OSError:
+            pass
+
+
+def wait_for_ready_pipe(ready_r: int, proc: subprocess.Popen, log_path: Path, role: str) -> dict:
+    deadline = time.monotonic() + READY_WAIT_TIMEOUT_SECS
+    chunks: list[bytes] = []
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            readable, _, _ = select.select([ready_r], [], [], remaining)
+            if not readable:
+                break
+            chunk = os.read(ready_r, READY_PIPE_READ_BYTES)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if b"\n" in chunk:
+                break
+    finally:
+        try:
+            os.close(ready_r)
+        except OSError:
+            pass
+
+    raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
+    if raw:
+        line = raw.splitlines()[0]
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{role} emitted invalid readiness JSON: {raw!r}") from exc
+        if isinstance(payload, dict) and payload.get("ready") is True:
+            return payload
+        raise RuntimeError(f"{role} reported startup error: {payload!r}")
+
+    if proc.poll() is None:
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            pass
+    tail = ""
+    if log_path.is_file():
+        tail = log_path.read_text(encoding="utf-8", errors="replace")[-DIAGNOSTIC_TAIL_CHARS:]
+    if time.monotonic() >= deadline and proc.poll() is None:
+        raise RuntimeError(f"{role} (pid={proc.pid}) timed out waiting for readiness signal\n{tail}")
+    raise RuntimeError(f"{role} (pid={proc.pid}) exited before ready (code={proc.returncode})\n{tail}")
+
+
+def atomic_write_json(path: Path, payload: dict) -> None:
+    tmp = path.with_suffix(f".{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(payload), encoding="utf-8")
+    os.replace(tmp, path)
 
 
 def record_pid(role: str, pid: int) -> None:
@@ -229,6 +361,7 @@ def start_detached_hub(home: Path, bundle: Path, label: str | None = None, super
     log_dir = home / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
+    env.pop(READY_FD_ENV_VAR, None)
     env.update(parse_env(home / "steve.env"))
     env["STEVE_HOME"] = str(home)
     env["STEVE_WEB_DIR"] = str(home / "web/current") if (home / "web/current").exists() else str(bundle / "web/dist")
@@ -237,23 +370,58 @@ def start_detached_hub(home: Path, bundle: Path, label: str | None = None, super
     args = [str(bundle / "bin/steve-hub")]
     if supervise:
         args.append("--supervise")
-    with (log_dir / "hub.log").open("a", encoding="utf-8") as log_f:
-        proc = subprocess.Popen(
-            args,
-            cwd=str(home),
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=log_f,
-            stderr=log_f,
-            start_new_session=True,
-        )
-    record_pid("fake-supervisor" if supervise else "fake-hub", proc.pid)
+    log_path = log_dir / "hub.log"
+    role = "fake-supervisor" if supervise else "fake-hub"
     pid_name = "fake-supervisor.pid" if supervise else "fake-hub.pid"
-    (home / pid_name).write_text(f"{proc.pid}\n", encoding="utf-8")
-    return proc
+    pid_file = home / pid_name
+    ready_r, ready_w = os.pipe()
+    env[READY_FD_ENV_VAR] = str(ready_w)
+    proc: subprocess.Popen | None = None
+    ready_r_owned = True
+    try:
+        try:
+            with log_path.open("a", encoding="utf-8") as log_f:
+                proc = subprocess.Popen(
+                    args,
+                    cwd=str(home),
+                    env=env,
+                    stdin=subprocess.DEVNULL,
+                    stdout=log_f,
+                    stderr=log_f,
+                    pass_fds=(ready_w,),
+                    start_new_session=True,
+                )
+        finally:
+            try:
+                os.close(ready_w)
+            except OSError:
+                pass
+        record_pid(role, proc.pid)
+        pid_file.write_text(f"{proc.pid}\n", encoding="utf-8")
+        ready_r_owned = False
+        wait_for_ready_pipe(ready_r, proc, log_path, role)
+        return proc
+    except Exception:
+        if ready_r_owned:
+            try:
+                os.close(ready_r)
+            except OSError:
+                pass
+        stop_proc(proc, pid_file)
+        raise
 
 
 def serve_hub(home: Path, supervise: bool = False) -> int:
+    ready_fd = take_ready_fd()
+    ready_signaled = False
+
+    def _emit_ready(payload: dict) -> None:
+        nonlocal ready_signaled
+        if ready_signaled:
+            return
+        ready_signaled = True
+        signal_ready(ready_fd, payload)
+
     record_pid("fake-supervisor" if supervise else "fake-hub", os.getpid())
     env_map = parse_env(home / "steve.env")
     port = int(os.environ.get("STEVE_PORT") or env_map["STEVE_PORT"])
@@ -266,9 +434,7 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
     if supervise:
         stop_flag = threading.Event()
         hub_lock = threading.Lock()
-        hub_state: dict[str, subprocess.Popen | None] = {
-            "proc": start_detached_hub(home, BUNDLE, supervise=False)
-        }
+        hub_state: dict[str, subprocess.Popen | None] = {"proc": None}
 
         def _stop_supervisor(*_args):
             stop_flag.set()
@@ -310,22 +476,60 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
                                     prev_unit.write_text(unit.read_text(encoding="utf-8"), encoding="utf-8")
                                     unit.write_text(f"[Service]\nExecStart={home}/current/bin/steve-hub --supervise\n", encoding="utf-8")
                                 if not stop_flag.is_set():
-                                    hub_state["proc"] = start_detached_hub(home, target, supervise=False)
-                                    op["phase"] = "succeeded"
-                                    op_file.write_text(json.dumps(op), encoding="utf-8")
+                                    try:
+                                        hub_state["proc"] = start_detached_hub(home, target, supervise=False)
+                                    except Exception as exc:
+                                        op["phase"] = "failed"
+                                        op["error"] = str(exc)
+                                    else:
+                                        op["phase"] = "succeeded"
+                                    atomic_write_json(op_file, op)
                 stop_flag.wait(SUPERVISOR_POLL_SECS)
 
         watcher = threading.Thread(target=_watch_updates, daemon=True)
-        watcher.start()
-        while not stop_flag.is_set():
-            stop_flag.wait(SUPERVISOR_POLL_SECS)
-        watcher.join(timeout=5.0)
-        with hub_lock:
-            cur_proc = hub_state["proc"]
-            hub_state["proc"] = None
-        stop_proc(cur_proc, home / "fake-hub.pid")
-        stop_pid_file(home / "fake-hub.pid")
-        stop_pid_file(home / "data/node/service.pid")
+        try:
+            child_proc = start_detached_hub(home, BUNDLE, supervise=False)
+            with hub_lock:
+                hub_state["proc"] = child_proc
+            watcher.start()
+            print(
+                f"fake-supervisor ready pid={os.getpid()} hub_pid={child_proc.pid} version={VERSION}",
+                file=sys.stderr,
+                flush=True,
+            )
+            _emit_ready({
+                "ready": True,
+                "role": "fake-supervisor",
+                "pid": os.getpid(),
+                "hub_pid": child_proc.pid,
+                "version": VERSION,
+            })
+            while not stop_flag.is_set():
+                stop_flag.wait(SUPERVISOR_POLL_SECS)
+        except BaseException as exc:
+            if not ready_signaled:
+                traceback.print_exc(file=sys.stderr)
+                _emit_ready({
+                    "ready": False,
+                    "role": "fake-supervisor",
+                    "error": f"{type(exc).__name__}: {exc}",
+                })
+            raise
+        finally:
+            stop_flag.set()
+            if watcher.is_alive():
+                watcher.join(timeout=THREAD_JOIN_WAIT_SECS)
+            with hub_lock:
+                cur_proc = hub_state["proc"]
+                hub_state["proc"] = None
+            stop_proc(cur_proc, home / "fake-hub.pid")
+            stop_pid_file(home / "fake-hub.pid")
+            stop_pid_file(home / "data/node/service.pid")
+            if ready_fd is not None and not ready_signaled:
+                try:
+                    os.close(ready_fd)
+                except OSError:
+                    pass
         return 0
 
     node_lock = threading.Lock()
@@ -509,25 +713,36 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
         def log_message(self, *_args):
             pass
 
-    api_srv = http.server.ThreadingHTTPServer(("127.0.0.1", port), ApiHandler)
-    api_srv.daemon_threads = True
-    web_srv = http.server.ThreadingHTTPServer(("127.0.0.1", web_port), WebHandler)
-    web_srv.daemon_threads = True
     stop_evt = threading.Event()
 
     def _shutdown(*_args):
-        if stop_evt.is_set():
-            return
         stop_evt.set()
-        threading.Thread(target=api_srv.shutdown, daemon=True).start()
-        threading.Thread(target=web_srv.shutdown, daemon=True).start()
 
     signal.signal(signal.SIGTERM, _shutdown)
     signal.signal(signal.SIGINT, _shutdown)
-    threading.Thread(target=web_srv.serve_forever, daemon=True).start()
+
+    api_srv: LoopbackHTTPServer | None = None
+    web_srv: LoopbackHTTPServer | None = None
+    api_thread: threading.Thread | None = None
+    web_thread: threading.Thread | None = None
     boot_thread: threading.Thread | None = None
+
+    def _serve_loop(srv: LoopbackHTTPServer, started_evt: threading.Event) -> None:
+        started_evt.set()
+        srv.serve_forever(poll_interval=SERVER_POLL_INTERVAL_SECS)
+
     try:
-        if not no_resume and not supervise:
+        api_srv = LoopbackHTTPServer(("127.0.0.1", port), ApiHandler)
+        web_srv = LoopbackHTTPServer(("127.0.0.1", web_port), WebHandler)
+        web_started = threading.Event()
+        api_started = threading.Event()
+        web_thread = threading.Thread(target=_serve_loop, args=(web_srv, web_started), daemon=True)
+        api_thread = threading.Thread(target=_serve_loop, args=(api_srv, api_started), daemon=True)
+        web_thread.start()
+        api_thread.start()
+        if not web_started.wait(THREAD_START_WAIT_SECS) or not api_started.wait(THREAD_START_WAIT_SECS):
+            raise RuntimeError("fake-hub server thread failed to start")
+        if not no_resume:
             def _boot_node() -> None:
                 if stop_evt.wait(NODE_BOOT_DELAY_SECS):
                     return
@@ -541,11 +756,42 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
 
             boot_thread = threading.Thread(target=_boot_node, daemon=True)
             boot_thread.start()
-        api_srv.serve_forever()
+        print(
+            f"fake-hub ready pid={os.getpid()} version={VERSION} api=127.0.0.1:{port} web=127.0.0.1:{web_port}",
+            file=sys.stderr,
+            flush=True,
+        )
+        _emit_ready({
+            "ready": True,
+            "role": "fake-hub",
+            "pid": os.getpid(),
+            "version": VERSION,
+            "port": port,
+            "web_port": web_port,
+        })
+        while not stop_evt.is_set():
+            stop_evt.wait(MAIN_STOP_WAIT_SECS)
+    except BaseException as exc:
+        if not ready_signaled:
+            traceback.print_exc(file=sys.stderr)
+            _emit_ready({
+                "ready": False,
+                "role": "fake-hub",
+                "error": f"{type(exc).__name__}: {exc}",
+            })
+        raise
     finally:
         stop_evt.set()
-        api_srv.server_close()
-        web_srv.server_close()
+        if api_thread is not None and api_srv is not None:
+            api_srv.shutdown()
+            api_thread.join(timeout=THREAD_JOIN_WAIT_SECS)
+        if web_thread is not None and web_srv is not None:
+            web_srv.shutdown()
+            web_thread.join(timeout=THREAD_JOIN_WAIT_SECS)
+        if api_srv is not None:
+            api_srv.server_close()
+        if web_srv is not None:
+            web_srv.server_close()
         with node_lock:
             node_state["closed"] = True
             node_proc = node_state["proc"]
@@ -553,6 +799,11 @@ def serve_hub(home: Path, supervise: bool = False) -> int:
         if boot_thread is not None:
             boot_thread.join(timeout=2.0)
         stop_proc(node_proc, home / "data/node/service.pid")
+        if ready_fd is not None and not ready_signaled:
+            try:
+                os.close(ready_fd)
+            except OSError:
+                pass
     return 0
 
 
@@ -622,7 +873,11 @@ def main() -> int:
             (home / "logs/release/macos-upgrade-fake.json").write_text(
                 json.dumps({"ok": True, "version": cand_ver}), encoding="utf-8"
             )
-            start_detached_hub(home, staged, label=label)
+            try:
+                start_detached_hub(home, staged, label=label)
+            except Exception as exc:
+                print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)
+                return 1
             print(json.dumps({
                 "ok": True,
                 "version": cand_ver,
@@ -654,7 +909,11 @@ def main() -> int:
                 prev_plist_p.unlink()
                 restored_from_backup = True
             journal_p.unlink(missing_ok=True)
-            start_detached_hub(home, prev, label=label)
+            try:
+                start_detached_hub(home, prev, label=label)
+            except Exception as exc:
+                print(json.dumps({"ok": False, "error": str(exc)}), file=sys.stderr)
+                return 1
             print(json.dumps({
                 "ok": True,
                 "version": journal["previous_manifest"]["version"],
@@ -687,10 +946,13 @@ if __name__ == "__main__":
 '''
 
 FAKE_CLI_CODE = r'''#!/usr/bin/env python3
+from __future__ import annotations
+
 import json
 import os
 from pathlib import Path
 import plistlib
+import select
 import shutil
 import signal
 import subprocess
@@ -706,9 +968,88 @@ BROKEN_SETUP = bool(MANIFEST.get("fake_broken_setup", False))
 HAS_LEGACY_OPS = (BUNDLE / "ops/run.sh").is_file()
 IS_LINUX = TARGET.endswith("unknown-linux-gnu")
 PID_LOG_ENV_VARS = ("FAKE_REHEARSAL_PID_LOG", "STEVE_TEST_PID_LOG")
+READY_FD_ENV_VAR = "FAKE_HUB_READY_FD"
+READY_WAIT_TIMEOUT_SECS = 15.0
+READY_PIPE_READ_BYTES = 4096
+DIAGNOSTIC_TAIL_CHARS = 2000
 PROC_TERM_WAIT_SECS = 3.0
 PROC_KILL_WAIT_SECS = 2.0
 PID_POLL_INTERVAL_SECS = 0.1
+
+
+def stop_proc(proc: subprocess.Popen | None, pid_file: Path | None = None) -> None:
+    if proc is None:
+        return
+    if proc.poll() is None:
+        try:
+            proc.terminate()
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=PROC_TERM_WAIT_SECS)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            try:
+                proc.wait(timeout=PROC_KILL_WAIT_SECS)
+            except subprocess.TimeoutExpired:
+                pass
+    if pid_file is not None and pid_file.is_file():
+        try:
+            lines = pid_file.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        if lines and lines[0].strip() == str(proc.pid):
+            pid_file.unlink(missing_ok=True)
+
+
+def wait_for_ready_pipe(ready_r: int, proc: subprocess.Popen, log_path: Path, role: str) -> dict:
+    deadline = time.monotonic() + READY_WAIT_TIMEOUT_SECS
+    chunks: list[bytes] = []
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            readable, _, _ = select.select([ready_r], [], [], remaining)
+            if not readable:
+                break
+            chunk = os.read(ready_r, READY_PIPE_READ_BYTES)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if b"\n" in chunk:
+                break
+    finally:
+        try:
+            os.close(ready_r)
+        except OSError:
+            pass
+
+    raw = b"".join(chunks).decode("utf-8", errors="replace").strip()
+    if raw:
+        line = raw.splitlines()[0]
+        try:
+            payload = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"{role} emitted invalid readiness JSON: {raw!r}") from exc
+        if isinstance(payload, dict) and payload.get("ready") is True:
+            return payload
+        raise RuntimeError(f"{role} reported startup error: {payload!r}")
+
+    if proc.poll() is None:
+        try:
+            proc.wait(timeout=2.0)
+        except subprocess.TimeoutExpired:
+            pass
+    tail = ""
+    if log_path.is_file():
+        tail = log_path.read_text(encoding="utf-8", errors="replace")[-DIAGNOSTIC_TAIL_CHARS:]
+    if time.monotonic() >= deadline and proc.poll() is None:
+        raise RuntimeError(f"{role} (pid={proc.pid}) timed out waiting for readiness signal\n{tail}")
+    raise RuntimeError(f"{role} (pid={proc.pid}) exited before ready (code={proc.returncode})\n{tail}")
 
 
 def record_pid(role: str, pid: int) -> None:
@@ -859,6 +1200,7 @@ def main() -> int:
         if action == "start":
             if running_pid(pid_file) is None:
                 env = os.environ.copy()
+                env.pop(READY_FD_ENV_VAR, None)
                 env.update(parse_env(home / "steve.env"))
                 env["STEVE_HOME"] = str(home)
                 env["STEVE_WEB_DIR"] = str(home / "web/current")
@@ -867,18 +1209,48 @@ def main() -> int:
                 hub_args = [str((home / "current/bin/steve-hub").resolve())]
                 if IS_LINUX:
                     hub_args.append("--supervise")
-                with (home / "logs/hub.log").open("a", encoding="utf-8") as lf:
-                    proc = subprocess.Popen(
-                        hub_args,
-                        cwd=str(home),
-                        env=env,
-                        stdin=subprocess.DEVNULL,
-                        stdout=lf,
-                        stderr=lf,
-                        start_new_session=True,
+                log_path = home / "logs/hub.log"
+                role = "fake-supervisor" if IS_LINUX else "fake-hub"
+                ready_r, ready_w = os.pipe()
+                env[READY_FD_ENV_VAR] = str(ready_w)
+                proc: subprocess.Popen | None = None
+                ready_r_owned = True
+                try:
+                    try:
+                        with log_path.open("a", encoding="utf-8") as lf:
+                            proc = subprocess.Popen(
+                                hub_args,
+                                cwd=str(home),
+                                env=env,
+                                stdin=subprocess.DEVNULL,
+                                stdout=lf,
+                                stderr=lf,
+                                pass_fds=(ready_w,),
+                                start_new_session=True,
+                            )
+                    finally:
+                        try:
+                            os.close(ready_w)
+                        except OSError:
+                            pass
+                    record_pid(role, proc.pid)
+                    pid_file.write_text(f"{proc.pid}\n", encoding="utf-8")
+                    ready_r_owned = False
+                    ready_info = wait_for_ready_pipe(ready_r, proc, log_path, role)
+                except Exception as exc:
+                    if ready_r_owned:
+                        try:
+                            os.close(ready_r)
+                        except OSError:
+                            pass
+                    stop_proc(proc, pid_file)
+                    print(
+                        json.dumps({"ok": False, "started": False, "label": label, "error": str(exc)}),
+                        file=sys.stderr,
                     )
-                record_pid("fake-supervisor" if IS_LINUX else "fake-hub", proc.pid)
-                pid_file.write_text(f"{proc.pid}\n", encoding="utf-8")
+                    return 1
+                print(json.dumps({"ok": True, "started": True, "label": label, "ready": ready_info}))
+                return 0
             print(json.dumps({"ok": True, "started": True, "label": label}))
             return 0
         if action == "stop":
@@ -909,6 +1281,8 @@ if __name__ == "__main__":
 '''
 
 FAKE_NODE_CODE = r'''#!/usr/bin/env python3
+from __future__ import annotations
+
 import errno
 import json
 import os
@@ -1037,13 +1411,18 @@ def make_fake_bundle(
     )
     (root / "web/dist/release.json").write_text(json.dumps({"version": version, "commit": commit}), encoding="utf-8")
 
+    shebang = _python_shebang()
     hub = root / "bin/steve-hub"
-    hub.write_text(FAKE_HUB_CODE.replace('TARGET = os.environ.get("FAKE_TARGET", "aarch64-apple-darwin")', f'TARGET = {target!r}'), encoding="utf-8")
+    hub_code = (
+        FAKE_HUB_CODE.replace("#!/usr/bin/env python3", shebang, 1)
+        .replace('TARGET = os.environ.get("FAKE_TARGET", "aarch64-apple-darwin")', f'TARGET = {target!r}')
+    )
+    hub.write_text(hub_code, encoding="utf-8")
     hub.chmod(0o755)
 
     node = root / "bin/steve-node"
     node_code = (
-        FAKE_NODE_CODE.replace("#!/usr/bin/env python3", f"#!{sys.executable}", 1)
+        FAKE_NODE_CODE.replace("#!/usr/bin/env python3", shebang, 1)
         .replace('"__FAKE_VERSION__"', repr(version))
         .replace('"__FAKE_COMMIT__"', repr(commit))
         .replace('"__FAKE_TARGET__"', repr(target))
@@ -1062,7 +1441,11 @@ def make_fake_bundle(
 
     if include_cli:
         cli = root / "bin/steve"
-        cli.write_text(FAKE_CLI_CODE.replace('TARGET = os.environ.get("FAKE_TARGET", "aarch64-apple-darwin")', f'TARGET = {target!r}'), encoding="utf-8")
+        cli_code = (
+            FAKE_CLI_CODE.replace("#!/usr/bin/env python3", shebang, 1)
+            .replace('TARGET = os.environ.get("FAKE_TARGET", "aarch64-apple-darwin")', f'TARGET = {target!r}')
+        )
+        cli.write_text(cli_code, encoding="utf-8")
         cli.chmod(0o755)
 
     if legacy_ops:
@@ -1373,7 +1756,13 @@ class RehearseUpgradeTests(unittest.TestCase):
         self.assertFalse(report["passed"])
         self.assertTrue(report["cleanup_ok"])
         self.assertTrue(report["operator_untouched"])
+        by_name = {s["name"]: s for s in report["steps"]}
+        self.assertEqual(by_name["start_previous"]["status"], "pass")
+        self.assertEqual(by_name["seed_data"]["status"], "pass")
+        self.assertEqual(by_name["upgrade_pass1"]["status"], "fail")
+        self.assertIn("injected upgrade boom", by_name["upgrade_pass1"]["summary"])
         self.assertIn("hub_log_tail", report.get("diagnostics", {}))
+        self.assertIn("fake-hub ready", report["diagnostics"]["hub_log_tail"])
         self.assertEqual(list(work_dir.iterdir()), [])
         self.assertEqual(list((self.fake_home / "Library/LaunchAgents").glob("*rehearsal*")), [])
         self._assert_no_recorded_processes_alive(min_nodes=1, min_hubs=1)
@@ -1537,9 +1926,12 @@ class RehearseUpgradeTests(unittest.TestCase):
             def log_message(self, *_args):
                 pass
 
-        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), LegacyHandler)
-        server.daemon_threads = True
-        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        server = LoopbackHTTPServer(("127.0.0.1", 0), LegacyHandler)
+        thread = threading.Thread(
+            target=server.serve_forever,
+            kwargs={"poll_interval": TEST_SERVER_POLL_INTERVAL_SECS},
+            daemon=True,
+        )
         thread.start()
         runner = None
         try:
@@ -1748,6 +2140,218 @@ class RehearseUpgradeTests(unittest.TestCase):
                     pass
 
         self._assert_no_recorded_processes_alive(min_nodes=1)
+
+    def test_loopback_server_skips_reverse_dns_and_hub_signals_readiness(self) -> None:
+        # (a) In-process LoopbackHTTPServer never calls socket.getfqdn / socket.gethostbyaddr.
+        class OkHandler(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Length", "2")
+                self.end_headers()
+                self.wfile.write(b"ok")
+
+            def log_message(self, *_args):
+                pass
+
+        with (
+            patch.object(socket, "getfqdn", side_effect=AssertionError("reverse DNS forbidden on loopback")),
+            patch.object(socket, "gethostbyaddr", side_effect=AssertionError("reverse DNS forbidden on loopback")),
+        ):
+            srv = LoopbackHTTPServer(("127.0.0.1", 0), OkHandler)
+            thread = threading.Thread(
+                target=srv.serve_forever,
+                kwargs={"poll_interval": TEST_SERVER_POLL_INTERVAL_SECS},
+                daemon=True,
+            )
+            thread.start()
+            try:
+                with REH.loopback_opener().open(f"http://127.0.0.1:{srv.server_port}/", timeout=5) as resp:
+                    self.assertEqual(resp.status, 200)
+                    self.assertEqual(resp.read(), b"ok")
+            finally:
+                srv.shutdown()
+                srv.server_close()
+                thread.join(timeout=5)
+
+        # (b) Subprocess fake Hub starts under blocked reverse DNS and signals real readiness.
+        poison_dir = self.root / "poison-py"
+        poison_dir.mkdir(parents=True)
+        poison_marker = self.root / "poison-pids.log"
+        (poison_dir / "sitecustomize.py").write_text(
+            f"""import os
+import socket
+
+with open({str(poison_marker)!r}, "a", encoding="utf-8") as _f:
+    _f.write(f"{{os.getpid()}}\\n")
+
+
+def _fail_reverse_dns(*_args, **_kwargs):
+    raise RuntimeError("simulated macOS-15 reverse DNS hang")
+
+
+socket.getfqdn = _fail_reverse_dns
+socket.gethostbyaddr = _fail_reverse_dns
+""",
+            encoding="utf-8",
+        )
+
+        bundle = make_fake_bundle(
+            self.root / "ready-bundle",
+            version="0.15.0",
+            commit="d" * 40,
+            target="aarch64-apple-darwin",
+            include_cli=True,
+        )
+        cli = bundle / "bin/steve"
+        home = self.root / "ready-home"
+        vault_dir = self.root / "ready-vault"
+        label = "io.github.infranite.steve-rehearsal-test-ready"
+        port = REH.allocate_port_block()
+
+        env = REH.clean_subprocess_env({
+            "HOME": str(self.fake_home),
+            "FAKE_REHEARSAL_PID_LOG": str(self.pid_log),
+        })
+        env["PYTHONPATH"] = (
+            f"{poison_dir}{os.pathsep}{env['PYTHONPATH']}" if env.get("PYTHONPATH") else str(poison_dir)
+        )
+
+        subprocess.run(
+            [
+                str(cli),
+                "setup",
+                "hub",
+                "--home",
+                str(home),
+                "--listen",
+                f"127.0.0.1:{port}",
+                "--label",
+                label,
+                "--vault-dir",
+                str(vault_dir),
+                "--adapters",
+                "none",
+            ],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+
+        try:
+            start_proc = subprocess.run(
+                [str(cli), "hub", "start", "--home", str(home), "--label", label, "--json"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=10,
+                check=True,
+            )
+            start_info = json.loads(start_proc.stdout)
+            self.assertTrue(start_info["ok"])
+            self.assertTrue(start_info["started"])
+            self.assertTrue(start_info["ready"]["ready"])
+            self.assertEqual(start_info["ready"]["port"], port)
+
+            # Ready immediately with zero sleep or healthz retry loop.
+            client = REH.HubClient(f"http://127.0.0.1:{port}", f"http://127.0.0.1:{port + 1}")
+            api_status, api_body = client.raw_get(f"http://127.0.0.1:{port}/healthz")
+            web_status, web_body = client.raw_get(f"http://127.0.0.1:{port + 1}/")
+            self.assertEqual(api_status, 200)
+            self.assertEqual(json.loads(api_body.decode("utf-8"))["version"], "0.15.0")
+            self.assertEqual(web_status, 200)
+            self.assertIn("0.15.0", web_body.decode("utf-8"))
+
+            hub_pid = start_info["ready"]["pid"]
+            self.assertIn(str(hub_pid), poison_marker.read_text(encoding="utf-8").splitlines())
+        finally:
+            subprocess.run(
+                [str(cli), "hub", "stop", "--home", str(home), "--label", label, "--json"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            subprocess.run(
+                [str(cli), "hub", "uninstall", "--home", str(home), "--label", label, "--json"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+        # (c) Startup bind failure fails fast via readiness pipe instead of hanging 30s.
+        busy_port = REH.allocate_port_block()
+        fail_home = self.root / "fail-home"
+        fail_vault = self.root / "fail-vault"
+        fail_label = "io.github.infranite.steve-rehearsal-test-fail"
+        subprocess.run(
+            [
+                str(cli),
+                "setup",
+                "hub",
+                "--home",
+                str(fail_home),
+                "--listen",
+                f"127.0.0.1:{busy_port}",
+                "--label",
+                fail_label,
+                "--vault-dir",
+                str(fail_vault),
+                "--adapters",
+                "none",
+            ],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=True,
+        )
+
+        occupied = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        try:
+            occupied.bind(("127.0.0.1", busy_port))
+            occupied.listen(1)
+            started = time.monotonic()
+            fail_proc = subprocess.run(
+                [str(cli), "hub", "start", "--home", str(fail_home), "--label", fail_label, "--json"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+            elapsed = time.monotonic() - started
+        finally:
+            occupied.close()
+            subprocess.run(
+                [str(cli), "hub", "uninstall", "--home", str(fail_home), "--label", fail_label, "--json"],
+                env=env,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                check=False,
+            )
+
+        self.assertNotEqual(fail_proc.returncode, 0)
+        self.assertLess(elapsed, 5.0)
+        self.assertTrue(
+            "startup error" in fail_proc.stderr
+            or "Address already in use" in fail_proc.stderr
+            or '"ok": false' in fail_proc.stderr,
+            msg=fail_proc.stderr,
+        )
+        self._assert_no_recorded_processes_alive(min_hubs=2)
 
 
 if __name__ == "__main__":
