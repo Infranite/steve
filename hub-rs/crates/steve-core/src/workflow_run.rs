@@ -1189,7 +1189,7 @@ impl Core {
                 .record(elapsed.as_secs_f64());
 
             if let StepFrame::Failed { ref fault, .. } = frame
-                && fault.code.class() == WorkflowFaultClass::Infrastructure
+                && fault.is_retryable()
                 && infra_retries < MAX_STEP_INFRA_RETRIES
             {
                 infra_retries += 1;
@@ -2276,26 +2276,24 @@ impl Tx<'_> {
         match frame {
             StepFrame::Failed { fault, .. } => {
                 let code = fault.code.as_str().to_owned();
-                let (reason, options): (WfPauseReason, &[WfDecisionChoice]) =
-                    match fault.code.class() {
-                        WorkflowFaultClass::Infrastructure => (
-                            WfPauseReason::InfrastructureFault,
-                            &[
-                                WfDecisionChoice::Retry,
-                                WfDecisionChoice::Revise,
-                                WfDecisionChoice::Cancel,
-                                WfDecisionChoice::SingleSession,
-                            ],
-                        ),
-                        WorkflowFaultClass::Script => (
-                            WfPauseReason::ScriptFault,
-                            &[
-                                WfDecisionChoice::Revise,
-                                WfDecisionChoice::Cancel,
-                                WfDecisionChoice::SingleSession,
-                            ],
-                        ),
-                    };
+                let reason = match fault.code.class() {
+                    WorkflowFaultClass::Infrastructure => WfPauseReason::InfrastructureFault,
+                    WorkflowFaultClass::Script => WfPauseReason::ScriptFault,
+                };
+                let options: &[WfDecisionChoice] = if fault.is_retryable() {
+                    &[
+                        WfDecisionChoice::Retry,
+                        WfDecisionChoice::Revise,
+                        WfDecisionChoice::Cancel,
+                        WfDecisionChoice::SingleSession,
+                    ]
+                } else {
+                    &[
+                        WfDecisionChoice::Revise,
+                        WfDecisionChoice::Cancel,
+                        WfDecisionChoice::SingleSession,
+                    ]
+                };
                 let _dec_id = self.pause_and_open_decision(
                     &current.id,
                     reason,
@@ -2445,7 +2443,6 @@ impl Tx<'_> {
                         spec.seq_no
                     ),
                     &[
-                        WfDecisionChoice::Retry,
                         WfDecisionChoice::Revise,
                         WfDecisionChoice::Cancel,
                         WfDecisionChoice::SingleSession,
@@ -2466,7 +2463,6 @@ impl Tx<'_> {
                             "authoritative CallIdentity verification failed at seq {idx}: {err}"
                         ),
                         &[
-                            WfDecisionChoice::Retry,
                             WfDecisionChoice::Revise,
                             WfDecisionChoice::Cancel,
                             WfDecisionChoice::SingleSession,
@@ -2495,7 +2491,6 @@ impl Tx<'_> {
                             spec.identity.identity_hash
                         ),
                         &[
-                            WfDecisionChoice::Retry,
                             WfDecisionChoice::Revise,
                             WfDecisionChoice::Cancel,
                             WfDecisionChoice::SingleSession,
@@ -2513,7 +2508,6 @@ impl Tx<'_> {
                     },
                     format!("malformed partial CallSpec at seq {idx}"),
                     &[
-                        WfDecisionChoice::Retry,
                         WfDecisionChoice::Revise,
                         WfDecisionChoice::Cancel,
                         WfDecisionChoice::SingleSession,
@@ -3148,6 +3142,12 @@ impl Tx<'_> {
                 format!("wf_invalid_decision_choice: {}", cx.choice),
             ));
         };
+        if !d.options.is_empty() && !d.options.iter().any(|opt| opt == choice.as_str()) {
+            return Err(CoreError::Status(
+                400,
+                format!("wf_decision_choice_not_allowed: {}", choice.as_str()),
+            ));
+        }
         let text = cx.text.trim();
 
         match choice {

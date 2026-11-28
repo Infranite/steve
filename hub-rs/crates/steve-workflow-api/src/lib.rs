@@ -260,4 +260,37 @@ mod tests {
         }));
         assert_eq!(eff, EffectiveLimits::default());
     }
+
+    #[test]
+    fn workflow_fault_retryability_and_wire_compat() {
+        assert_eq!(
+            WorkflowFaultCode::SandboxDenied.class(),
+            WorkflowFaultClass::Infrastructure
+        );
+        assert_eq!(WorkflowFaultCode::SandboxDenied.as_str(), "sandbox_denied");
+        assert!(!WorkflowFaultCode::SandboxDenied.is_retryable());
+        assert!(!WorkflowFaultCode::ProtocolError.is_retryable());
+        assert!(!WorkflowFaultCode::SyntaxError.is_retryable());
+        assert!(WorkflowFaultCode::Timeout.is_retryable());
+        assert!(WorkflowFaultCode::SubprocessFailed.is_retryable());
+
+        let default_fault = WorkflowFault::new(WorkflowFaultCode::SubprocessFailed, "transient");
+        assert!(default_fault.is_retryable());
+        let json_default = serde_json::to_value(&default_fault).unwrap();
+        assert!(json_default.get("retryable").is_none());
+        let decoded_default: WorkflowFault = serde_json::from_value(json_default).unwrap();
+        assert_eq!(decoded_default, default_fault);
+        assert!(decoded_default.is_retryable());
+
+        let non_retry = WorkflowFault::non_retryable(WorkflowFaultCode::SubprocessFailed, "enoent");
+        assert!(!non_retry.is_retryable());
+        let json_non_retry = serde_json::to_value(&non_retry).unwrap();
+        assert_eq!(json_non_retry["retryable"], false);
+        let decoded_non_retry: WorkflowFault = serde_json::from_value(json_non_retry).unwrap();
+        assert_eq!(decoded_non_retry, non_retry);
+        assert!(!decoded_non_retry.is_retryable());
+
+        let sandbox_fault = WorkflowFault::new(WorkflowFaultCode::SandboxDenied, "eperm");
+        assert!(!sandbox_fault.is_retryable());
+    }
 }

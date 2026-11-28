@@ -385,15 +385,16 @@ pub enum WorkflowFaultCode {
     UnsafeInteger,
     UnsupportedValue,
     SubprocessFailed,
+    SandboxDenied,
     ProtocolError,
 }
 
 impl WorkflowFaultCode {
-    /// Classifies whether this fault is an infrastructure failure (eligible for bounded automatic
-    /// retry) or a deterministic script/contract fault (pauses immediately for revision).
+    /// Classifies whether this fault is an infrastructure failure or a deterministic
+    /// script/contract fault.
     pub const fn class(self) -> WorkflowFaultClass {
         match self {
-            Self::Timeout | Self::SubprocessFailed | Self::ProtocolError => {
+            Self::Timeout | Self::SubprocessFailed | Self::SandboxDenied | Self::ProtocolError => {
                 WorkflowFaultClass::Infrastructure
             }
             Self::SyntaxError
@@ -417,6 +418,11 @@ impl WorkflowFaultCode {
             | Self::UnsafeInteger
             | Self::UnsupportedValue => WorkflowFaultClass::Script,
         }
+    }
+
+    /// Whether retrying the exact same step without modifying the script or Hub could succeed.
+    pub const fn is_retryable(self) -> bool {
+        matches!(self, Self::Timeout | Self::SubprocessFailed)
     }
 
     pub const fn as_str(self) -> &'static str {
@@ -443,6 +449,7 @@ impl WorkflowFaultCode {
             Self::UnsafeInteger => "unsafe_integer",
             Self::UnsupportedValue => "unsupported_value",
             Self::SubprocessFailed => "subprocess_failed",
+            Self::SandboxDenied => "sandbox_denied",
             Self::ProtocolError => "protocol_error",
         }
     }
@@ -454,6 +461,10 @@ impl WorkflowFaultCode {
 pub struct WorkflowFault {
     pub code: WorkflowFaultCode,
     pub detail: String,
+    /// Whether retrying the exact same step without changing the script or Hub could succeed.
+    /// Defaults to [`WorkflowFaultCode::is_retryable`] when omitted on the wire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retryable: Option<bool>,
 }
 
 impl WorkflowFault {
@@ -461,6 +472,22 @@ impl WorkflowFault {
         Self {
             code,
             detail: detail.into(),
+            retryable: None,
+        }
+    }
+
+    pub fn non_retryable(code: WorkflowFaultCode, detail: impl Into<String>) -> Self {
+        Self {
+            code,
+            detail: detail.into(),
+            retryable: Some(false),
+        }
+    }
+
+    pub const fn is_retryable(&self) -> bool {
+        match self.retryable {
+            Some(v) => v,
+            None => self.code.is_retryable(),
         }
     }
 }

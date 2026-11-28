@@ -45,6 +45,7 @@ export default {
   moduleChoice: { done: "Got it", to_item: "Made into an item", retry: "Retry", drop: "Drop this run", continue_once: "Double the budget and continue", stop: "Stop", once: "Approve once", grant_1h: "Allow for 1 hour", grant_8h: "Allow for 8 hours", grant_24h: "Allow for 24 hours", deny: "Deny", pause: "Pause receiving", reauth: "Re-authorize", send: "Send", no: "Don't send" },
   option: {
     chan_message: { send_draft: "Send this draft", instruct: "Tell it how to reply", verbatim: "Send as written", to_item: "Make it an item", done: "Leave it", yes: "Approve and send", no: "Don't send", rewrite: "Rewrite, then show me", retry: "Send again", discard: "Don't send it", sent: "It went out" },
+    wf_run: { retry: "Retry this step", revise: "Revise script", cancel: "Cancel workflow", single_session: "Run as single session", add_budget: "Add budget" },
   },
   rel: {
     releasing: "Approved, releasing now. You'll be notified when it's done",
@@ -105,6 +106,7 @@ export default {
     release: { no: "Release not approved" },
     no_executor: { assign_bot: "Assigned the Bot and started work", confirm_proposal: "Created the Bot and started work", later: "Handed to Steve; future items with no eligible Bot will run on Steve directly" },
     chan_message: { yes: "Approved, will be sent shortly", no: "Not sent, this one is closed", rewrite: "Rewriting it; you'll see it again", send_draft: "Checked first; sent shortly if nothing may leak, otherwise shown to you again", instruct: "OK, drafting it your way; you'll see it first", verbatim: "Approved, your words go out shortly", to_item: "Making it an item", done: "OK, leaving this one", retry: "Sending it again", discard: "Not sent, this one is closed", sent: "Marked as sent" },
+    wf_run: { retry: "Retrying workflow step", revise: "Waiting for a revised script", cancel: "Workflow cancelled", single_session: "Switched to single-session execution", add_budget: "Added workflow budget and resumed" },
     any: { wait: "Waiting for quota recovery", pass: "Accepted, item done", rework: "Sent back for rework", yes: "Confirmed", no: "Handled", continue: "Let it continue", delivered: "Delivery confirmed and accepted", look: "Paused, waiting for you", tosteve: "Handed to Steve", drop: "Dropped", deny: "Denied" },
     confirmYes: "Confirmed",
     confirmNo: "Noted: not right",

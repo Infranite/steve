@@ -32,7 +32,7 @@ fn try_backend(backend: &Backend, full: bool) -> Result<(), String> {
         .wrap("/usr/bin/true".into(), vec![], &[])
     } else {
         match backend {
-            Backend::Seatbelt(_) => (
+            Backend::Seatbelt { .. } => (
                 SANDBOX_EXEC.into(),
                 vec![
                     "-p".into(),
@@ -56,7 +56,11 @@ pub(super) fn detect(homes: Option<(&Path, &Path)>) -> Result<Backend, String> {
                 .ok_or_else(|| "a Steve path cannot be written in a profile".to_owned())?,
             None => String::new(),
         };
-        let backend = Backend::Seatbelt(rules);
+        let backend = Backend::Seatbelt {
+            rules,
+            steve_home: homes.map(|(s, _)| s.to_path_buf()),
+            node_home: homes.map(|(_, n)| n.to_path_buf()),
+        };
         try_backend(&backend, homes.is_some())?;
         return Ok(backend);
     }

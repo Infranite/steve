@@ -250,6 +250,10 @@ impl StepRunner {
         };
 
         let rlimits = steve_confine::PureComputeLimits::for_wall_time(wall_time);
+        let confined = self
+            .sandbox
+            .as_ref()
+            .is_some_and(steve_confine::Sandbox::is_confined);
         let mut proc = match steve_confine::Sandbox::spawn_pure_compute(
             self.sandbox.as_ref(),
             self.binary.clone(),
@@ -258,13 +262,7 @@ impl StepRunner {
         ) {
             Ok(p) => p,
             Err(e) => {
-                return failed_frame(
-                    WorkflowFaultCode::SubprocessFailed,
-                    format!(
-                        "failed to spawn confined workflow step subprocess {}: {e}",
-                        self.binary.display()
-                    ),
-                );
+                return failed_fault(classify_spawn_error(confined, &e, &self.binary));
             }
         };
 
@@ -345,16 +343,15 @@ impl StepRunner {
             ),
             Err(AsyncFrameError::EmptyEof) => {
                 let stderr_text = read_stderr_briefly(stderr).await;
+                let status_opt = status.as_ref().ok().copied();
                 let status_desc = match status {
                     Ok(s) => format!("{s}"),
                     Err(e) => format!("wait error: {e}"),
                 };
-                failed_frame(
-                    WorkflowFaultCode::SubprocessFailed,
-                    format!(
-                        "workflow step subprocess exited ({status_desc}) with empty stdout; stderr: {stderr_text}"
-                    ),
-                )
+                let detail = format!(
+                    "workflow step subprocess exited ({status_desc}) with empty stdout; stderr: {stderr_text}"
+                );
+                failed_fault(classify_empty_eof_fault(status_opt, &stderr_text, detail))
             }
             Err(AsyncFrameError::Io(e)) => {
                 let stderr_text = read_stderr_briefly(stderr).await;
@@ -457,9 +454,182 @@ async fn reap_child(
 }
 
 fn failed_frame(code: WorkflowFaultCode, detail: String) -> StepFrame {
+    failed_fault(WorkflowFault::new(code, detail))
+}
+
+fn failed_fault(fault: WorkflowFault) -> StepFrame {
     StepFrame::Failed {
-        fault: WorkflowFault::new(code, detail),
+        fault,
         emitted_calls: Vec::new(),
         logs: Vec::new(),
+    }
+}
+
+fn classify_spawn_error(confined: bool, err: &std::io::Error, binary: &Path) -> WorkflowFault {
+    let detail = format!(
+        "failed to spawn confined workflow step subprocess {}: {err}",
+        binary.display()
+    );
+    if err.kind() == std::io::ErrorKind::PermissionDenied && confined {
+        return WorkflowFault::new(WorkflowFaultCode::SandboxDenied, detail);
+    }
+    let permanent = matches!(
+        err.kind(),
+        std::io::ErrorKind::PermissionDenied
+            | std::io::ErrorKind::NotFound
+            | std::io::ErrorKind::InvalidInput
+            | std::io::ErrorKind::IsADirectory
+            | std::io::ErrorKind::NotADirectory
+    ) || err.raw_os_error() == Some(libc::ENOEXEC);
+    if permanent {
+        WorkflowFault::non_retryable(WorkflowFaultCode::SubprocessFailed, detail)
+    } else {
+        WorkflowFault::new(WorkflowFaultCode::SubprocessFailed, detail)
+    }
+}
+
+fn classify_empty_eof_fault(
+    status: Option<std::process::ExitStatus>,
+    stderr: &str,
+    detail: String,
+) -> WorkflowFault {
+    let transient_exhaustion = stderr.contains("Cannot allocate memory")
+        || stderr.contains("Resource temporarily unavailable");
+    if transient_exhaustion {
+        return WorkflowFault::new(WorkflowFaultCode::SubprocessFailed, detail);
+    }
+    let exit_code = status.and_then(|s| s.code());
+    let sandbox_denied = stderr.contains("sandbox-exec:")
+        || stderr.contains("bwrap:")
+        || (exit_code == Some(71)
+            && (stderr.contains("Operation not permitted")
+                || stderr.contains("Permission denied")));
+    if sandbox_denied {
+        return WorkflowFault::new(WorkflowFaultCode::SandboxDenied, detail);
+    }
+    let permanent_exec_failure = matches!(exit_code, Some(65 | 126 | 127))
+        || [
+            "Operation not permitted",
+            "Permission denied",
+            "No such file or directory",
+            "Exec format error",
+            "Library not loaded",
+            "cannot open shared object file",
+        ]
+        .iter()
+        .any(|needle| stderr.contains(needle));
+    if permanent_exec_failure {
+        WorkflowFault::non_retryable(WorkflowFaultCode::SubprocessFailed, detail)
+    } else {
+        WorkflowFault::new(WorkflowFaultCode::SubprocessFailed, detail)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::os::unix::process::ExitStatusExt;
+
+    use super::*;
+
+    fn status_with_code(code: i32) -> std::process::ExitStatus {
+        std::process::ExitStatus::from_raw(code << 8)
+    }
+
+    #[test]
+    fn classify_spawn_error_marks_permanent_and_sandbox_faults_non_retryable() {
+        let bin = Path::new("/tmp/steve-hub");
+
+        let eperm_confined = classify_spawn_error(
+            true,
+            &std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            bin,
+        );
+        assert_eq!(eperm_confined.code, WorkflowFaultCode::SandboxDenied);
+        assert!(!eperm_confined.is_retryable());
+
+        let eperm_unconfined = classify_spawn_error(
+            false,
+            &std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            bin,
+        );
+        assert_eq!(eperm_unconfined.code, WorkflowFaultCode::SubprocessFailed);
+        assert!(!eperm_unconfined.is_retryable());
+
+        for err in [
+            std::io::Error::from(std::io::ErrorKind::NotFound),
+            std::io::Error::from(std::io::ErrorKind::InvalidInput),
+            std::io::Error::from_raw_os_error(libc::ENOEXEC),
+        ] {
+            let f = classify_spawn_error(true, &err, bin);
+            assert_eq!(f.code, WorkflowFaultCode::SubprocessFailed);
+            assert!(!f.is_retryable(), "expected non-retryable for {err:?}");
+        }
+
+        let transient = classify_spawn_error(
+            true,
+            &std::io::Error::from(std::io::ErrorKind::WouldBlock),
+            bin,
+        );
+        assert_eq!(transient.code, WorkflowFaultCode::SubprocessFailed);
+        assert!(transient.is_retryable());
+    }
+
+    #[test]
+    fn classify_empty_eof_fault_distinguishes_sandbox_permanent_and_transient_failures() {
+        let sandbox_macos = classify_empty_eof_fault(
+            Some(status_with_code(71)),
+            "sandbox-exec: execvp() of '<STEVE_HOME>/current/bin/steve-hub' failed: Operation not permitted",
+            "detail".into(),
+        );
+        assert_eq!(sandbox_macos.code, WorkflowFaultCode::SandboxDenied);
+        assert!(!sandbox_macos.is_retryable());
+
+        let sandbox_linux = classify_empty_eof_fault(
+            Some(status_with_code(1)),
+            "bwrap: execvp /opt/steve/current/bin/steve-hub: No such file or directory",
+            "detail".into(),
+        );
+        assert_eq!(sandbox_linux.code, WorkflowFaultCode::SandboxDenied);
+        assert!(!sandbox_linux.is_retryable());
+
+        let bwrap_bind = classify_empty_eof_fault(
+            Some(status_with_code(1)),
+            "bwrap: Can't bind mount /tmp/x on /tmp/x: Permission denied",
+            "detail".into(),
+        );
+        assert_eq!(bwrap_bind.code, WorkflowFaultCode::SandboxDenied);
+        assert!(!bwrap_bind.is_retryable());
+
+        let not_exec = classify_empty_eof_fault(
+            Some(status_with_code(126)),
+            "Permission denied",
+            "detail".into(),
+        );
+        assert_eq!(not_exec.code, WorkflowFaultCode::SubprocessFailed);
+        assert!(!not_exec.is_retryable());
+
+        let missing_lib = classify_empty_eof_fault(
+            Some(status_with_code(127)),
+            "dyld: Library not loaded: @rpath/libfoo.dylib",
+            "detail".into(),
+        );
+        assert_eq!(missing_lib.code, WorkflowFaultCode::SubprocessFailed);
+        assert!(!missing_lib.is_retryable());
+
+        let oom_fork = classify_empty_eof_fault(
+            Some(status_with_code(1)),
+            "bwrap: Cannot allocate memory",
+            "detail".into(),
+        );
+        assert_eq!(oom_fork.code, WorkflowFaultCode::SubprocessFailed);
+        assert!(oom_fork.is_retryable());
+
+        let sig_kill = classify_empty_eof_fault(
+            Some(std::process::ExitStatus::from_raw(9)),
+            "",
+            "detail".into(),
+        );
+        assert_eq!(sig_kill.code, WorkflowFaultCode::SubprocessFailed);
+        assert!(sig_kill.is_retryable());
     }
 }

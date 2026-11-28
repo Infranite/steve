@@ -5,6 +5,7 @@
  * Hub defines for these subjects against this list and both languages, so a new option can't show up as its raw id. */
 export const OPTION_IDS = {
   chan_message: ["send_draft", "instruct", "verbatim", "to_item", "done", "yes", "no", "rewrite", "retry", "discard", "sent"],
+  wf_run: ["retry", "revise", "cancel", "single_session", "add_budget"],
 } as const satisfies Record<string, readonly string[]>
 
 /** the subject's options are ids with labels of their own */
