@@ -2,8 +2,16 @@ import assert from "node:assert/strict"
 import { readdirSync, readFileSync } from "node:fs"
 import test from "node:test"
 import { fileURLToPath } from "node:url"
+import { BOT_ACCESSORIES } from "../src/steve-mascot/accessories.ts"
 import { CueChoreographer } from "../src/steve-mascot/choreographer.ts"
-import { STEVE_PALETTE, TIMING, resolveOpticalTier } from "../src/steve-mascot/constants.ts"
+import {
+  ACCESSORY_MIN_SIZE_PX,
+  BOT_ROUND_PRESETS,
+  STEVE_PALETTE,
+  TIMING,
+  resolveBotPalette,
+  resolveOpticalTier,
+} from "../src/steve-mascot/constants.ts"
 import { compileFrame } from "../src/steve-mascot/frame.ts"
 import { LifeLayer } from "../src/steve-mascot/life.ts"
 import { PhysicsRig } from "../src/steve-mascot/physics.ts"
@@ -206,6 +214,117 @@ test("PhysicsRig converges and reports settled for zero-CPU dormancy, and LifeLa
     ["head-tilt", "look-around", "yawn", "wink", "hum-note", "sip-coffee"].includes(behavior),
     `unexpected idle behavior: ${behavior}`,
   )
+})
+
+test("ordinary Bots share the charcoal family while staying distinct from Steve and each other by color & roundness", () => {
+  clearStaticCache()
+  const colors = ["#7aa7c7", "#8c7ae6", "#5fb39a", "#e0a458", "#d9777f", "#6c7a89", "#3d4a5c", "#b08968", "#ffff00", "#000000"]
+
+  const parseRgb = (hex) => [
+    Number.parseInt(hex.slice(1, 3), 16),
+    Number.parseInt(hex.slice(3, 5), 16),
+    Number.parseInt(hex.slice(5, 7), 16),
+  ]
+  const lum = (hex) => {
+    const [r, g, b] = parseRgb(hex).map((v) => {
+      const u = v / 255
+      return u <= 0.03928 ? u / 12.92 : Math.pow((u + 0.055) / 1.055, 2.4)
+    })
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+  }
+  const contrast = (a, b) => {
+    const la = lum(a)
+    const lb = lum(b)
+    return (Math.max(la, lb) + 0.05) / (Math.min(la, lb) + 0.05)
+  }
+
+  for (const hex of colors) {
+    for (const theme of ["light", "dark"]) {
+      const pal = resolveBotPalette(hex, theme)
+      assert.notEqual(pal.ink, STEVE_PALETTE[theme].ink, `${hex} ${theme}: Bot stays distinct from Steve monochrome`)
+      assert.ok(
+        contrast(pal.ink, pal.paper) >= 4.4,
+        `${hex} ${theme}: giant cutout eyes maintain >= 4.4:1 contrast (got ${contrast(pal.ink, pal.paper).toFixed(2)})`,
+      )
+    }
+  }
+
+  // Distinct roundness values produce distinct silhouette paths and unique clipPath IDs
+  const byRound = new Map()
+  for (const round of BOT_ROUND_PRESETS) {
+    const svg = renderStaticSvg({
+      appearance: { kind: "bot", id: `bot_${round}`, color: "#8c7ae6", round },
+      size: 64,
+      theme: "light",
+    })
+    assert.match(svg, /data-mascot-avatar="static"/)
+    assert.match(svg, /data-mascot-kind="bot"/)
+    assert.doesNotMatch(svg, /data-steve-avatar/)
+    const clipBody = svg.match(/<clipPath id="[^"]+"><path d="([^"]+)"/)?.[1]
+    assert.ok(clipBody, `round=${round}: has clipPath body`)
+    for (const [prevRound, prevBody] of byRound) {
+      assert.notEqual(clipBody, prevBody, `round ${round} contour differs from round ${prevRound}`)
+    }
+    byRound.set(round, clipBody)
+  }
+  assert.equal(BOT_ACCESSORIES.length, 10)
+  assert.equal(ACCESSORY_MIN_SIZE_PX, 27)
+})
+
+test("all 10 Bot accessories render cleanly at >= 27px, omit at <= 26px, stay cache-isolated, and never appear on Steve", () => {
+  clearStaticCache()
+
+  const bare64 = renderStaticSvg({
+    appearance: { kind: "bot", id: "bot_bare", color: "#7aa7c7", round: 45, accessory: null },
+    size: 64,
+    theme: "light",
+  })
+  assert.doesNotMatch(bare64, /data-mascot-accessory=/)
+
+  for (const accessory of BOT_ACCESSORIES) {
+    for (const theme of ["light", "dark"]) {
+      // Compact (32px) and full (64px) render the accessory
+      for (const size of [32, 64]) {
+        const svg = renderStaticSvg({
+          appearance: { kind: "bot", id: "bot_acc", color: "#8c7ae6", round: 45, accessory },
+          size,
+          theme,
+        })
+        assert.match(svg, new RegExp(`data-mascot-accessory="${accessory}"`), `${accessory} ${size}px ${theme} renders`)
+        if (size === 64 && theme === "light") {
+          assert.notEqual(svg, bare64, `${accessory} changes rendered SVG markup`)
+        }
+      }
+      // Micro (16px) and mini (24px) omit the accessory for optical clarity
+      for (const size of [16, 24]) {
+        const svg = renderStaticSvg({
+          appearance: { kind: "bot", id: "bot_acc", color: "#8c7ae6", round: 45, accessory },
+          size,
+          theme,
+        })
+        assert.doesNotMatch(svg, /data-mascot-accessory=/, `${accessory} omitted at ${size}px ${theme}`)
+      }
+    }
+  }
+
+  // Steve never renders accessories at any size
+  for (const size of [16, 24, 32, 64, 240]) {
+    const steveSvg = renderStaticSvg({ appearance: { kind: "steve" }, size, theme: "light" })
+    assert.doesNotMatch(steveSvg, /data-mascot-accessory=/)
+  }
+
+  // Changing Bot body color must not alter fixed accessory fill/stroke colors
+  const beretBlue = renderStaticSvg({
+    appearance: { kind: "bot", id: "same", color: "#7aa7c7", round: 45, accessory: "beret" },
+    size: 64,
+    theme: "light",
+  })
+  const beretAmber = renderStaticSvg({
+    appearance: { kind: "bot", id: "same", color: "#e0a458", round: 45, accessory: "beret" },
+    size: 64,
+    theme: "light",
+  })
+  assert.ok(beretBlue.includes("#c73e50") && beretAmber.includes("#c73e50"), "beret color stays fixed regardless of Bot body color")
 })
 
 test("steve-mascot module contains zero traces of exploratory schemes, beads, or protocol adapters", () => {

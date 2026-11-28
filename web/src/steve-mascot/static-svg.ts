@@ -5,16 +5,23 @@
 
 import { CHARCOAL_FILTER, GEOMETRY, TIMING, resolveOpticalTier } from "./constants.ts"
 import { compileFrame } from "./frame.ts"
-import { hashString } from "./geometry.ts"
+import { clamp, hashString } from "./geometry.ts"
 import { getMotionClip } from "./motions.ts"
 import { PhysicsRig } from "./physics.ts"
-import type { CompiledFrame, SustainedState, ThemeMode } from "./types.ts"
+import type { CompiledFrame, MascotAppearance, SustainedState, ThemeMode } from "./types.ts"
 
 export interface StaticSteveOptions {
+  readonly appearance?: MascotAppearance
   readonly size?: number
   readonly theme?: ThemeMode
   readonly state?: SustainedState
   readonly noCache?: boolean
+}
+
+/** Deterministic brushstroke fingerprint seed per character. */
+export function appearanceSeed(appearance: MascotAppearance): number {
+  if (appearance.kind === "steve") return TIMING.steveSeed
+  return (hashString(appearance.id || appearance.color) % 997) + 31
 }
 
 const staticCache = new Map<string, string>()
@@ -35,12 +42,21 @@ function esc(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;")
 }
 
-function serializeFrameToSvg(frame: CompiledFrame, size: number, idPrefix: string): string {
+function serializeFrameToSvg(
+  frame: CompiledFrame,
+  appearance: MascotAppearance,
+  size: number,
+  idPrefix: string,
+): string {
   const vh = frame.viewHalf
   const c = frame.colors
   const l = frame.layers
   const sw = frame.strokeWidthScale
   const filterScale = frame.tier === "compact" ? CHARCOAL_FILTER.scaleCompact : CHARCOAL_FILTER.scaleFull
+  const accFilterScale =
+    frame.tier === "compact" ? CHARCOAL_FILTER.accessoryScaleCompact : CHARCOAL_FILTER.accessoryScaleFull
+  const hasAcc =
+    frame.accessoryBack.length > 0 || frame.accessoryBody.length > 0 || frame.accessoryFace.length > 0
 
   const defsParts: string[] = []
   if (frame.enableToothFilter) {
@@ -50,6 +66,14 @@ function serializeFrameToSvg(frame: CompiledFrame, size: number, idPrefix: strin
         `<feDisplacementMap in="SourceGraphic" in2="n" scale="${filterScale}" xChannelSelector="R" yChannelSelector="G"/>` +
         `</filter>`,
     )
+    if (hasAcc) {
+      defsParts.push(
+        `<filter id="${idPrefix}-at" filterUnits="userSpaceOnUse" x="-64" y="-64" width="128" height="128">` +
+          `<feTurbulence type="fractalNoise" baseFrequency="${CHARCOAL_FILTER.baseFrequency}" numOctaves="${CHARCOAL_FILTER.numOctaves}" seed="7" result="n"/>` +
+          `<feDisplacementMap in="SourceGraphic" in2="n" scale="${accFilterScale}" xChannelSelector="R" yChannelSelector="G"/>` +
+          `</filter>`,
+      )
+    }
   }
   defsParts.push(`<clipPath id="${idPrefix}-cl"><path d="${esc(frame.cleanBodyPath)}"/></clipPath>`)
 
@@ -123,30 +147,48 @@ function serializeFrameToSvg(frame: CompiledFrame, size: number, idPrefix: strin
       .join("")
   const fxBackHtml = renderFxList(frame.fxBack)
   const fxFrontHtml = renderFxList(frame.fxFront)
+  const accBackHtml = renderFxList(frame.accessoryBack)
+  const accBodyHtml = renderFxList(frame.accessoryBody)
+  const accFaceHtml = renderFxList(frame.accessoryFace)
   const bodyFilterAttr = frame.enableToothFilter ? ` filter="url(#${idPrefix}-bt)"` : ""
+  const accFilterAttr = frame.enableToothFilter && hasAcc ? ` filter="url(#${idPrefix}-at)"` : ""
+
+  const kindAttr =
+    appearance.kind === "steve"
+      ? ` data-steve-avatar="static" data-mascot-kind="steve"`
+      : ` data-mascot-avatar="static" data-mascot-kind="bot"`
+  const accAttr = frame.accessory ? ` data-mascot-accessory="${esc(frame.accessory)}"` : ""
 
   return (
-    `<svg xmlns="http://www.w3.org/2000/svg" data-steve-avatar="static" data-steve-theme="${frame.theme}" viewBox="${-vh} ${-vh} ${vh * 2} ${vh * 2}" width="${size}" height="${size}" overflow="visible">` +
+    `<svg xmlns="http://www.w3.org/2000/svg"${kindAttr}${accAttr} data-steve-theme="${frame.theme}" viewBox="${-vh} ${-vh} ${vh * 2} ${vh * 2}" width="${size}" height="${size}" overflow="visible">` +
     `<defs>${defsParts.join("")}</defs>` +
     (floorHtml ? `<g>${floorHtml}</g>` : "") +
     (fxBackHtml ? `<g transform="${esc(frame.fxBackTransform)}">${fxBackHtml}</g>` : "") +
+    (accBackHtml ? `<g transform="${esc(frame.bodyTransform)}"${accFilterAttr}>${accBackHtml}</g>` : "") +
     `<g transform="${esc(frame.bodyTransform)}"${bodyFilterAttr}>${bodyParts.join("")}</g>` +
-    `<g transform="${esc(frame.bodyTransform)}"><g transform="${esc(f.transform)}">${faceParts.join("")}</g></g>` +
+    (accBodyHtml ? `<g transform="${esc(frame.bodyTransform)}"${accFilterAttr}>${accBodyHtml}</g>` : "") +
+    `<g transform="${esc(frame.bodyTransform)}"><g transform="${esc(f.transform)}">${faceParts.join("")}${accFaceHtml ? `<g${accFilterAttr}>${accFaceHtml}</g>` : ""}</g></g>` +
     (fxFrontHtml ? `<g transform="${esc(frame.fxFrontTransform)}">${fxFrontHtml}</g>` : "") +
     `</svg>`
   )
 }
 
 /**
- * Synchronously render a cached static SVG for Steve at any size (16..240px) in Light or Dark mode.
+ * Synchronously render a cached static SVG for Steve or any Bot at any size (16..240px) in Light or Dark mode.
  * Works identically in browsers, SSR, unit tests, and icon generation — zero hidden DOM.
  */
 export function renderStaticSvg(opts?: StaticSteveOptions): string {
+  const appearance: MascotAppearance = opts?.appearance ?? { kind: "steve" }
   const size = opts?.size ?? 32
   const theme: ThemeMode = opts?.theme ?? "light"
   const state: SustainedState = opts?.state ?? "idle"
   const tier = resolveOpticalTier(size)
-  const cacheKey = `${size}|${theme}|${state}`
+  const seed = appearanceSeed(appearance)
+  const appearanceKey =
+    appearance.kind === "steve"
+      ? "steve"
+      : `bot|${appearance.color.trim().toLowerCase()}|${Math.round(clamp(appearance.round, 0, 100))}|${appearance.accessory ?? "none"}|${seed}`
+  const cacheKey = `${appearanceKey}|${size}|${theme}|${state}`
 
   if (!opts?.noCache) {
     const hit = staticCache.get(cacheKey)
@@ -177,6 +219,7 @@ export function renderStaticSvg(opts?: StaticSteveOptions): string {
   })
 
   const frame = compileFrame({
+    appearance,
     theme,
     tier,
     live: false,
@@ -187,13 +230,13 @@ export function renderStaticSvg(opts?: StaticSteveOptions): string {
     blinkAmt: 0,
     boilFrame: 0,
     tSec: 0,
-    seed: TIMING.steveSeed,
+    seed,
     reducedMotion: true,
     activeMotion: false,
   })
 
   const idPrefix = `sm${hashString(cacheKey).toString(36)}`
-  const markup = serializeFrameToSvg(frame, size, idPrefix)
+  const markup = serializeFrameToSvg(frame, appearance, size, idPrefix)
 
   if (!opts?.noCache) {
     if (staticCache.size >= GEOMETRY.maxStaticCacheEntries) {

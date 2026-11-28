@@ -10,11 +10,13 @@ import { onCue, type HeroCue } from "@/bus"
 import { reducedMotion as isReducedMotion } from "@/lib/motion"
 import { SteveMascotController } from "./controller.ts"
 import { renderStaticSvg } from "./static-svg.ts"
-import type { ThemeMode } from "./types.ts"
+import type { MascotAppearance, ThemeMode } from "./types.ts"
 
+export { BOT_ACCESSORIES } from "./accessories.ts"
+export { ACCESSORY_MIN_SIZE_PX, BOT_ROUND_PRESETS, resolveAppearancePalette, resolveBotPalette } from "./constants.ts"
 export { getMascotMetrics } from "./scheduler.ts"
 export { clearStaticCache, getStaticCacheStats, renderAdaptiveFaviconSvg, renderStaticSvg } from "./static-svg.ts"
-export type { MascotMetrics, SustainedState, ThemeMode } from "./types.ts"
+export type { BotAccessory, MascotAppearance, MascotMetrics, SustainedState, ThemeMode } from "./types.ts"
 
 interface EnvSnapshot {
   readonly theme: ThemeMode
@@ -71,11 +73,21 @@ function getServerEnvSnapshot(): EnvSnapshot {
   return { theme: "light", reduced: false }
 }
 
-function LiveSteveMascot({ size, className }: { size: number; className?: string }) {
+const STEVE_APPEARANCE: MascotAppearance = { kind: "steve" }
+
+function LiveSteveMascot({
+  appearance,
+  size,
+  className,
+}: {
+  appearance: MascotAppearance
+  size: number
+  className?: string
+}) {
   const env = useSyncExternalStore(subscribeEnv, getEnvSnapshot, getServerEnvSnapshot)
   const hostRef = useRef<HTMLSpanElement>(null)
   const ctrlRef = useRef<SteveMascotController | null>(null)
-  const initialRef = useRef({ size, theme: env.theme, reduced: env.reduced })
+  const initialRef = useRef({ appearance, size, theme: env.theme, reduced: env.reduced })
 
   useEffect(() => {
     const host = hostRef.current
@@ -83,6 +95,7 @@ function LiveSteveMascot({ size, className }: { size: number; className?: string
     const init = initialRef.current
     const ctrl = new SteveMascotController({
       container: host,
+      appearance: init.appearance,
       size: init.size,
       theme: init.theme,
       reducedMotion: init.reduced,
@@ -93,6 +106,10 @@ function LiveSteveMascot({ size, className }: { size: number; className?: string
       ctrlRef.current = null
     }
   }, [])
+
+  useEffect(() => {
+    ctrlRef.current?.setAppearance(appearance)
+  }, [appearance])
 
   useEffect(() => {
     ctrlRef.current?.setSize(size)
@@ -122,9 +139,17 @@ function LiveSteveMascot({ size, className }: { size: number; className?: string
   )
 }
 
-function StaticSteveMascot({ size, className }: { size: number; className?: string }) {
+function StaticSteveMascot({
+  appearance,
+  size,
+  className,
+}: {
+  appearance: MascotAppearance
+  size: number
+  className?: string
+}) {
   const { theme } = useSyncExternalStore(subscribeEnv, getEnvSnapshot, getServerEnvSnapshot)
-  const markup = renderStaticSvg({ size, theme })
+  const markup = renderStaticSvg({ appearance, size, theme })
   return (
     <span
       aria-hidden
@@ -136,17 +161,19 @@ function StaticSteveMascot({ size, className }: { size: number; className?: stri
 }
 
 export function SteveMascot({
+  appearance = STEVE_APPEARANCE,
   size = 24,
   live = false,
   className,
 }: {
+  appearance?: MascotAppearance
   size?: number
   live?: boolean
   className?: string
 }) {
   return live ? (
-    <LiveSteveMascot size={size} className={className} />
+    <LiveSteveMascot appearance={appearance} size={size} className={className} />
   ) : (
-    <StaticSteveMascot size={size} className={className} />
+    <StaticSteveMascot appearance={appearance} size={size} className={className} />
   )
 }

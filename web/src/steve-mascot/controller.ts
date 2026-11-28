@@ -13,8 +13,9 @@ import { clamp } from "./geometry.ts"
 import { LifeLayer } from "./life.ts"
 import { PhysicsRig, type PhysicsTargets } from "./physics.ts"
 import { scheduler, type ScheduledMascot } from "./scheduler.ts"
+import { appearanceSeed } from "./static-svg.ts"
 import { SteveSvgRenderer } from "./svg-renderer.ts"
-import type { ThemeMode } from "./types.ts"
+import type { MascotAppearance, ThemeMode } from "./types.ts"
 
 let nextUid = 1
 
@@ -26,6 +27,8 @@ export class SteveMascotController implements ScheduledMascot {
   private readonly choreographer: CueChoreographer
   private readonly unregister: () => void
 
+  private appearance: MascotAppearance
+  private seed: number
   private sizePx: number
   private theme: ThemeMode
   private reducedMotion: boolean
@@ -35,29 +38,54 @@ export class SteveMascotController implements ScheduledMascot {
 
   constructor(opts: {
     container: HTMLElement
+    appearance?: MascotAppearance
     size: number
     theme: ThemeMode
     reducedMotion: boolean
   }) {
     this.element = opts.container
+    this.appearance = opts.appearance ?? { kind: "steve" }
+    this.seed = appearanceSeed(this.appearance)
     this.sizePx = opts.size
     this.theme = opts.theme
     this.reducedMotion = opts.reducedMotion
 
     const nowMs = Date.now()
-    this.life = new LifeLayer(TIMING.steveSeed, nowMs)
+    this.life = new LifeLayer(this.seed, nowMs)
     this.choreographer = new CueChoreographer((imp) => {
       if (!this.reducedMotion) this.physics.applyImpulse(imp)
     })
 
     const uid = `sml${nextUid++}`
-    this.renderer = new SteveSvgRenderer(uid, this.sizePx)
+    this.renderer = new SteveSvgRenderer(uid, this.sizePx, this.appearance.kind)
     this.element.replaceChildren(this.renderer.svg)
     this.element.addEventListener("pointerdown", this.handlePointerDown)
 
     this.renderImmediate(nowMs)
     this.unregister = scheduler.register(this)
     this.scheduleNextIdleTimer(nowMs)
+  }
+
+  setAppearance(next: MascotAppearance): void {
+    const prev = this.appearance
+    if (
+      prev.kind === next.kind &&
+      (prev.kind === "steve" ||
+        (next.kind === "bot" &&
+          prev.id === next.id &&
+          prev.color === next.color &&
+          prev.round === next.round &&
+          (prev.accessory ?? null) === (next.accessory ?? null)))
+    ) {
+      return
+    }
+    this.appearance = next
+    this.seed = appearanceSeed(next)
+    if (this.reducedMotion) {
+      this.renderImmediate(Date.now())
+    } else {
+      this.markDirtyAndWake()
+    }
   }
 
   setSize(sizePx: number): void {
@@ -200,6 +228,7 @@ export class SteveMascotController implements ScheduledMascot {
 
     const boilFrame = this.life.getBoilFrame(nowSec, stillMoving, this.reducedMotion)
     const frame = compileFrame({
+      appearance: this.appearance,
       theme: this.theme,
       tier: resolveOpticalTier(this.sizePx),
       live: true,
@@ -210,7 +239,7 @@ export class SteveMascotController implements ScheduledMascot {
       blinkAmt,
       boilFrame,
       tSec: nowSec,
-      seed: TIMING.steveSeed,
+      seed: this.seed,
       reducedMotion: this.reducedMotion,
       activeMotion: stillMoving,
     })
@@ -283,6 +312,7 @@ export class SteveMascotController implements ScheduledMascot {
       faceY: pose.faceOffsetY,
     })
     const frame = compileFrame({
+      appearance: this.appearance,
       theme: this.theme,
       tier: resolveOpticalTier(this.sizePx),
       live: true,
@@ -293,7 +323,7 @@ export class SteveMascotController implements ScheduledMascot {
       blinkAmt: 0,
       boilFrame: 0,
       tSec: nowSec,
-      seed: TIMING.steveSeed,
+      seed: this.seed,
       reducedMotion: this.reducedMotion,
       activeMotion: false,
     })

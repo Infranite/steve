@@ -23,7 +23,7 @@ import type {
   UpgradeCapability,
   UsageAttribution,
 } from "./gen"
-import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotProposal, PlacementBlocked, MemberIdentity, ThreadLiveSnapshot } from "./gen"
+import type { BusEvent, Envelope, StreamControl, ById, DecisionView, PageOf, Snapshot, ItemView, SessionView, OptionalModules, BotAccessory, BotProposal, PlacementBlocked, MemberIdentity, ThreadLiveSnapshot } from "./gen"
 /* Hub API: raw shapes (as the Hub's store returns them) and calls. store.ts maps them onto the view model. */
 import { lang, t } from "@/i18n"
 import { reasonText } from "./i18n/reason.ts"
@@ -55,7 +55,7 @@ export type RItemDetail = { id: string; source?: [string, string]; cwd?: string 
 export type RQueued = { id: string; session_id?: string; text: string; via: string; created: number; files?: RFile[] }
 export type SendNowResult = { result: "interrupted" | "sent" | "waiting"; reason?: string }
 export type RExecutionSurface = { harness: string; model?: string | null; reasoning_effort?: ReasoningEffort | null }
-export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; owner?: string | null; name: string; role: string; specialties?: string[]; main: boolean; harness: string; model: string | null; reasoning_effort?: ReasoningEffort | null; fallback_surfaces?: RExecutionSurface[]; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; skin?: string | null; round?: number }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
+export type RBot = { selection_validation?: "supported" | "unsupported" | "unknown" | "default"; id: string; owner?: string | null; name: string; role: string; specialties?: string[]; main: boolean; harness: string; model: string | null; reasoning_effort?: ReasoningEffort | null; fallback_surfaces?: RExecutionSurface[]; rules: string; persona: string; proactive: number; accept_mode: string; perm_mode: string; avatar: { color?: string; round?: number; accessory?: BotAccessory | null }; default_project: string | null; prompt: string | null; device: string | null; enabled: boolean; revision: number; updated: number; workspaces: string[] }
 /** GET /sessions/:id/resume: the harness's own session, how to resume it there, and whether its transcript is on the Hub's machine */
 export type RResume = { harness: string; id: string | null; cwd: string; cwd_exists: boolean; command: string | null; fork_command?: string | null; transcript_checked?: boolean; transcript: { path: string; updated: number | null; id: string | null; cwd: string | null; matches: boolean } | null }
 export type RProject = { id: string; workspace_id: string; name: string; description: string; device_id: string; path: string; kind: "git" | "dir"; worktree: boolean; default_bot: string | null; release: { kind: string; cmd: string } | null; archived: boolean; created: number; updated: number }

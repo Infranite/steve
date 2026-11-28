@@ -28,6 +28,7 @@ export class SteveSvgRenderer {
   private lastStyleKey = ""
 
   private bodyDisp: SVGFEDisplacementMapElement
+  private accDisp: SVGFEDisplacementMapElement
   private clipPath: SVGPathElement
   private shadowGroup: SVGGElement
   private shadowLines: SVGPathElement[]
@@ -35,12 +36,18 @@ export class SteveSvgRenderer {
   private fxBackGroup: SVGGElement
   private fxBackPaths: SVGPathElement[]
 
+  private accBackGroup: SVGGElement
+  private accBackPaths: SVGPathElement[]
+
   private bodyRig: SVGGElement
   private washPath: SVGPathElement
   private bodyFillPath: SVGPathElement
   private scribblePath: SVGPathElement
   private stroke1: SVGPathElement
   private stroke2: SVGPathElement
+
+  private accBodyGroup: SVGGElement
+  private accBodyPaths: SVGPathElement[]
 
   private faceRig: SVGGElement
   private faceGroup: SVGGElement
@@ -52,14 +59,17 @@ export class SteveSvgRenderer {
   private arcR: SVGPathElement
   private winkRightArc: SVGPathElement
   private mouth: SVGPathElement
+  private accFaceGroup: SVGGElement
+  private accFacePaths: SVGPathElement[]
 
   private fxFrontGroup: SVGGElement
   private fxFrontPaths: SVGPathElement[]
 
-  constructor(uid: string, sizePx: number) {
+  constructor(uid: string, sizePx: number, kind: "steve" | "bot" = "steve") {
     this.uid = uid
     this.svg = svgEl("svg", {
-      "data-steve-avatar": "live",
+      ...(kind === "steve" ? { "data-steve-avatar": "live" } : { "data-mascot-avatar": "live" }),
+      "data-mascot-kind": kind,
       viewBox: "-48 -48 96 96",
       width: sizePx,
       height: sizePx,
@@ -95,10 +105,36 @@ export class SteveSvgRenderer {
     })
     filter.append(this.bodyDisp)
 
+    const accFilter = svgEl("filter", {
+      id: `${uid}-at`,
+      filterUnits: "userSpaceOnUse",
+      x: -64,
+      y: -64,
+      width: 128,
+      height: 128,
+    })
+    accFilter.append(
+      svgEl("feTurbulence", {
+        type: "fractalNoise",
+        baseFrequency: CHARCOAL_FILTER.baseFrequency,
+        numOctaves: CHARCOAL_FILTER.numOctaves,
+        seed: 7,
+        result: "n",
+      }),
+    )
+    this.accDisp = svgEl("feDisplacementMap", {
+      in: "SourceGraphic",
+      in2: "n",
+      scale: CHARCOAL_FILTER.accessoryScaleFull,
+      xChannelSelector: "R",
+      yChannelSelector: "G",
+    })
+    accFilter.append(this.accDisp)
+
     const clip = svgEl("clipPath", { id: `${uid}-cl` })
     this.clipPath = svgEl("path")
     clip.append(this.clipPath)
-    defs.append(filter, clip)
+    defs.append(filter, accFilter, clip)
     this.svg.append(defs)
 
     this.shadowGroup = svgEl("g")
@@ -111,6 +147,10 @@ export class SteveSvgRenderer {
     this.fxBackGroup = svgEl("g")
     this.fxBackPaths = []
     this.svg.append(this.fxBackGroup)
+
+    this.accBackGroup = svgEl("g")
+    this.accBackPaths = []
+    this.svg.append(this.accBackGroup)
 
     this.bodyRig = svgEl("g")
     this.washPath = svgEl("path", { opacity: 0 })
@@ -140,6 +180,10 @@ export class SteveSvgRenderer {
     this.bodyRig.append(this.washPath, this.bodyFillPath, shadeGroup, this.stroke1, this.stroke2)
     this.svg.append(this.bodyRig)
 
+    this.accBodyGroup = svgEl("g")
+    this.accBodyPaths = []
+    this.svg.append(this.accBodyGroup)
+
     this.faceRig = svgEl("g")
     this.faceGroup = svgEl("g")
     this.blushL = svgEl("path", { fill: "none", "stroke-linecap": "round", "stroke-width": 1.6, opacity: 0 })
@@ -161,6 +205,8 @@ export class SteveSvgRenderer {
       "stroke-width": 2.2,
       opacity: 0,
     })
+    this.accFaceGroup = svgEl("g")
+    this.accFacePaths = []
     this.faceGroup.append(
       this.blushL,
       this.blushR,
@@ -170,6 +216,7 @@ export class SteveSvgRenderer {
       this.arcR,
       this.winkRightArc,
       this.mouth,
+      this.accFaceGroup,
     )
     this.faceRig.append(this.faceGroup)
     this.svg.append(this.faceRig)
@@ -199,9 +246,19 @@ export class SteveSvgRenderer {
         "scale",
         String(tier === "compact" ? CHARCOAL_FILTER.scaleCompact : CHARCOAL_FILTER.scaleFull),
       )
+      this.accDisp.setAttribute(
+        "scale",
+        String(tier === "compact" ? CHARCOAL_FILTER.accessoryScaleCompact : CHARCOAL_FILTER.accessoryScaleFull),
+      )
       this.bodyRig.setAttribute("filter", `url(#${this.uid}-bt)`)
+      this.accBackGroup.setAttribute("filter", `url(#${this.uid}-at)`)
+      this.accBodyGroup.setAttribute("filter", `url(#${this.uid}-at)`)
+      this.accFaceGroup.setAttribute("filter", `url(#${this.uid}-at)`)
     } else {
       this.bodyRig.removeAttribute("filter")
+      this.accBackGroup.removeAttribute("filter")
+      this.accBodyGroup.removeAttribute("filter")
+      this.accFaceGroup.removeAttribute("filter")
     }
 
     this.washPath.setAttribute("fill", colors.wash)
@@ -235,6 +292,8 @@ export class SteveSvgRenderer {
       )
     }
     this.svg.setAttribute("data-steve-theme", frame.theme)
+    if (frame.accessory) this.svg.setAttribute("data-mascot-accessory", frame.accessory)
+    else this.svg.removeAttribute("data-mascot-accessory")
 
     const c = frame.colors
     const l = frame.layers
@@ -315,6 +374,9 @@ export class SteveSvgRenderer {
     this.mouth.setAttribute("fill", f.mouthFilled ? c.paper : "none")
     this.mouth.setAttribute("opacity", f.mouthOpacity.toFixed(2))
 
+    this.syncFxLayer(this.accBackGroup, this.accBackPaths, frame.accessoryBack, frame.bodyTransform, c.accent)
+    this.syncFxLayer(this.accBodyGroup, this.accBodyPaths, frame.accessoryBody, frame.bodyTransform, c.accent)
+    this.syncFxLayer(this.accFaceGroup, this.accFacePaths, frame.accessoryFace, "", c.accent)
     this.syncFxLayer(this.fxBackGroup, this.fxBackPaths, frame.fxBack, frame.fxBackTransform, c.accent)
     this.syncFxLayer(this.fxFrontGroup, this.fxFrontPaths, frame.fxFront, frame.fxFrontTransform, c.accent)
   }

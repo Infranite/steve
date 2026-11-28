@@ -4,9 +4,24 @@
  * theme-only Light/Dark palette switching, zero accessories or orbiters.
  */
 
+import type { BotAccessory } from "../gen/BotAccessory.ts"
+
+export type { BotAccessory }
+
 export type ThemeMode = "light" | "dark"
 
 export type OpticalTier = "micro" | "mini" | "compact" | "full"
+
+/** Visual identity: Steve is always the monochrome classic circle with no accessories; ordinary Bots derive color, roundness, and optional accessory. */
+export type MascotAppearance =
+  | { readonly kind: "steve" }
+  | {
+      readonly kind: "bot"
+      readonly id: string
+      readonly color: string
+      readonly round: number
+      readonly accessory?: BotAccessory | null
+    }
 
 export type SustainedState = "idle" | "listening" | "thinking" | "sleeping"
 
@@ -192,6 +207,10 @@ export interface CompiledFrame {
   readonly enableToothFilter: boolean
   readonly floorTicks: readonly { readonly d: string; readonly opacity: number }[]
   readonly face: CompiledFace
+  readonly accessory: BotAccessory | null
+  readonly accessoryBack: readonly FxStroke[]
+  readonly accessoryBody: readonly FxStroke[]
+  readonly accessoryFace: readonly FxStroke[]
   readonly fxBack: readonly FxStroke[]
   readonly fxBackTransform: string
   readonly fxFront: readonly FxStroke[]

@@ -10,7 +10,7 @@ document.documentElement.classList.toggle("dark", matchMedia("(prefers-color-sch
  * paused (it resumes from the pill), one blocked (it opens on its page), one done (not in the pill).
  * ?none: nothing open, so a phone's header has no pill. */
 const now = Date.now()
-const dev: Bot = { id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, skin: null, workspaces: [] }
+const dev: Bot = { id: "dev", n: "Steve 开发", a: "", role: "", pers: "", pro: 1, h: "Codex", harness: "codex", m: "", model: null, on: true, acc: "manual", ws: "", project: null, perm: "", permMode: "auto", rule: "", prompt: null, routines: [], hue: "", color: "#8b9eac", round: 60, workspaces: [] }
 const item = (id: string, t: string, x: Partial<Item>): Item => fixtureItem({ id, t, phase: "active", ws: "", up: "02:03", acc: "", created: now, updated: now, ...x })
 const ask: Wait = fixtureWait({ type: "ask", q: "迁移要在白天还是晚上做？", since: "3 分钟", decision: "d-1", subject: "action", options: ["白天", "晚上"] })
 st.ready = true

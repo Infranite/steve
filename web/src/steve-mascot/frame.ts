@@ -3,7 +3,8 @@
  * Live DOM rendering and synchronous static SVG export share this single source of truth.
  */
 
-import { GIANT_EYES, GEOMETRY, OPTICAL_TIERS, PROP_TRANSITION, STEVE_PALETTE } from "./constants.ts"
+import { renderBotAccessory } from "./accessories.ts"
+import { GIANT_EYES, GEOMETRY, OPTICAL_TIERS, PROP_TRANSITION, resolveAppearancePalette } from "./constants.ts"
 import { getFxRenderer } from "./fx.ts"
 import {
   buildCharcoalScribble,
@@ -13,7 +14,7 @@ import {
   clamp,
   closedSmoothPath,
   hashNoise,
-  sampleSteveCircle,
+  sampleMascotContour,
 } from "./geometry.ts"
 import type { PhysicsRig } from "./physics.ts"
 import type {
@@ -22,6 +23,7 @@ import type {
   CompiledFrame,
   FxKind,
   FxStroke,
+  MascotAppearance,
   MotionPose,
   OpticalTier,
   PaletteTokens,
@@ -97,6 +99,7 @@ function renderFx(params: {
 }
 
 export function compileFrame(params: {
+  appearance?: MascotAppearance
   theme: ThemeMode
   tier: OpticalTier
   live: boolean
@@ -125,14 +128,16 @@ export function compileFrame(params: {
     reducedMotion,
     activeMotion,
   } = params
+  const appearance: MascotAppearance = params.appearance ?? { kind: "steve" }
   const tierCfg = OPTICAL_TIERS[tier]
-  const colors = STEVE_PALETTE[theme]
+  const colors = resolveAppearancePalette(appearance, theme)
   const frameSeed = boilFrame * 37.7 + params.seed
 
   const bt = physics.getBodyTransform()
   const bodyTransform = `translate(${physics.px.toFixed(2)}, ${(physics.py + 2 + bt.anchorOffsetY).toFixed(2)}) rotate(${physics.rot.toFixed(2)}) scale(${bt.sx.toFixed(3)}, ${bt.sy.toFixed(3)})`
 
-  // 1. Sample classic circle contour
+  // 1. Sample Steve's classic circle or Bot's roundness-derived contour
+  const contourRound = appearance.kind === "bot" ? appearance.round : null
   const basePts: Vec2[] = []
   let minX = Number.POSITIVE_INFINITY
   let maxX = Number.NEGATIVE_INFINITY
@@ -140,7 +145,8 @@ export function compileFrame(params: {
   let maxY = Number.NEGATIVE_INFINITY
   for (let i = 0; i < GEOMETRY.bodySampleCount; i++) {
     const theta = (i / GEOMETRY.bodySampleCount) * Math.PI * 2 - Math.PI / 2
-    const pt = sampleSteveCircle({
+    const pt = sampleMascotContour({
+      round: contourRound,
       theta,
       t: reducedMotion ? 0 : tSec,
       sleepAmt,
@@ -326,6 +332,21 @@ export function compileFrame(params: {
     blushOpacity: showBlush ? pose.blushOpacity : 0,
   }
 
+  // 4b. Optional Bot role accessory (Steve never wears accessories; small <= 26px sizes omit them for optical clarity)
+  const activeAccessory =
+    tierCfg.enableAccessory && appearance.kind === "bot" && appearance.accessory ? appearance.accessory : null
+  const accLayers = activeAccessory
+    ? renderBotAccessory({
+        accessory: activeAccessory,
+        theme,
+        seed: frameSeed,
+        bounds,
+        eyeGap,
+        eyeRx: baseRx,
+        eyeRy: baseRy,
+      })
+    : { back: [], body: [], face: [] }
+
   // 5. Cue FX & stowable props (enabled on live instances and full-size static states)
   const enableFx = live || tier === "full"
   const resolveAttach = (attach: "body" | "stage") =>
@@ -399,6 +420,10 @@ export function compileFrame(params: {
     enableToothFilter: tierCfg.enableToothFilter,
     floorTicks,
     face,
+    accessory: activeAccessory,
+    accessoryBack: accLayers.back,
+    accessoryBody: accLayers.body,
+    accessoryFace: accLayers.face,
     fxBack,
     fxBackTransform,
     fxFront,

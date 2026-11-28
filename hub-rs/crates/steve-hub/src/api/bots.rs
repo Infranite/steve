@@ -19,9 +19,9 @@ use steve_types::ConfigReason;
 #[derive(serde::Deserialize)]
 struct AvatarIn {
     color: Option<String>,
-    #[serde(default)]
-    skin: Patch<String>,
     round: Option<f64>,
+    #[serde(default)]
+    accessory: Patch<String>,
 }
 
 #[derive(serde::Deserialize)]
@@ -73,10 +73,6 @@ struct TextBody {
 
 fn valid_hex_color(s: &str) -> bool {
     s.len() == 7 && s.as_bytes()[0] == b'#' && s.as_bytes()[1..].iter().all(u8::is_ascii_hexdigit)
-}
-
-fn valid_skin(s: &str) -> bool {
-    (3..=4).contains(&s.len()) && s.bytes().all(|b| b.is_ascii_digit())
 }
 
 const ACCEPT: &[&str] = &["inherit", "manual", "auto"];
@@ -258,18 +254,24 @@ fn bot_in(v: &Value, create: bool, harnesses: &[String]) -> Result<Obj, ApiError
                 bad.push("avatar.color".into());
             }
         }
-        if let Some(x) = a.skin.into_option() {
-            if x.as_deref().is_some_and(|s| !valid_skin(s)) {
-                bad.push("avatar.skin".into());
-            } else {
-                av.insert("skin".into(), json!(x));
-            }
-        }
         if let Some(x) = a.round {
             if (0.0..=100.0).contains(&x) {
                 av.insert("round".into(), js_num(x));
             } else {
                 bad.push("avatar.round".into());
+            }
+        }
+        if let Some(x) = a.accessory.into_option() {
+            match x.as_deref() {
+                None | Some("") => {
+                    av.insert("accessory".into(), Value::Null);
+                }
+                Some(raw) => match steve_types::BotAccessory::parse(raw) {
+                    Some(acc) => {
+                        av.insert("accessory".into(), json!(acc));
+                    }
+                    None => bad.push("avatar.accessory".into()),
+                },
             }
         }
         p.insert("avatar".into(), Value::Object(av));
@@ -463,6 +465,78 @@ pub async fn create(
     .await
 }
 
+fn draft_prompt(desc: &str, offered: &[String]) -> String {
+    let model_hint = if offered.is_empty() {
+        "null".to_string()
+    } else {
+        format!(
+            "one of {} or null",
+            serde_json::to_string(offered).unwrap_or_else(|_| "[]".into())
+        )
+    };
+    let accessory_ids: Vec<&str> = steve_types::BotAccessory::ALL
+        .iter()
+        .map(|a| a.as_str())
+        .collect();
+    let accessory_cues: Vec<&str> = steve_types::BotAccessory::ALL
+        .iter()
+        .map(|a| a.prompt_cue())
+        .collect();
+    format!(
+        "Draft a bot for Steve (a personal assistant app) from this description. Reply in Chinese, ONLY JSON: {{\"name\":\"<= 6 chars\",\"role\":\"one line\",\"persona\":\"how it talks\",\"rules\":\"working rules, a few lines\",\"model\":{model_hint},\"accessory\":one of {} or null}}\nAccessory catalog: {}\nPick the single best-matching accessory id for the bot's role (or null if none fits).\nDescription: {}",
+        serde_json::to_string(&accessory_ids).unwrap_or_else(|_| "[]".into()),
+        accessory_cues.join(", "),
+        serde_json::to_string(desc).unwrap_or_default()
+    )
+}
+
+fn draft_fields_from_reply(
+    reply: &str,
+    desc: &str,
+    harness_id: &str,
+    perm_mode: &str,
+) -> Result<Obj, ApiError> {
+    let r = js::first_json(reply)?.unwrap_or_else(|| json!({}));
+    let get = |k: &str| r.get(k).filter(|x| !x.is_null());
+    let name = if js::truthy(r.get("name")) {
+        js::string(&r["name"])
+    } else {
+        steve_i18n::t!("hub.bot.draft_name")
+    };
+    let model = match get("model").map(js::string) {
+        Some(m) if !m.is_empty() => json!(m),
+        _ => Value::Null,
+    };
+    let accessory = get("accessory")
+        .and_then(Value::as_str)
+        .and_then(steve_types::BotAccessory::parse);
+    let mut f = Obj::new();
+    f.insert("name".into(), json!(js::slice(&name, 20)));
+    f.insert(
+        "role".into(),
+        json!(
+            get("role")
+                .map(js::string)
+                .unwrap_or_else(|| js::slice(desc, 40))
+        ),
+    );
+    f.insert(
+        "persona".into(),
+        json!(get("persona").map(js::string).unwrap_or_default()),
+    );
+    f.insert(
+        "rules".into(),
+        json!(get("rules").map(js::string).unwrap_or_else(|| desc.to_string())),
+    );
+    f.insert("model".into(), model);
+    f.insert("harness".into(), json!(harness_id));
+    f.insert("perm_mode".into(), json!(perm_mode));
+    if let Some(acc) = accessory {
+        f.insert("avatar".into(), json!({ "accessory": acc }));
+    }
+    Ok(f)
+}
+
 /// “描述给 Steve，让它起草”: the model fills the bot's fields from one sentence.
 pub async fn draft(
     State(st): State<AppState>,
@@ -494,54 +568,12 @@ pub async fn draft(
         .find(|h| h.id == harness_id)
         .map(|h| h.model_ids())
         .unwrap_or_default();
-    let model_hint = if offered.is_empty() {
-        "null".to_string()
-    } else {
-        format!(
-            "one of {} or null",
-            serde_json::to_string(&offered).unwrap_or_else(|_| "[]".into())
-        )
-    };
-    let prompt = format!(
-        "Draft a bot for Steve (a personal assistant app) from this description. Reply in Chinese, ONLY JSON: {{\"name\":\"<= 6 chars\",\"role\":\"one line\",\"persona\":\"how it talks\",\"rules\":\"working rules, a few lines\",\"model\":{model_hint}}}\nDescription: {}",
-        serde_json::to_string(&desc).unwrap_or_default()
-    );
+    let prompt = draft_prompt(&desc, &offered);
     let reply = st
         .domain
         .claude_print("draft", &c.ws, &prompt, SMART, 90_000)
         .await?;
-    let r = js::first_json(&reply)?.unwrap_or_else(|| json!({}));
-    let get = |k: &str| r.get(k).filter(|x| !x.is_null());
-    let name = if js::truthy(r.get("name")) {
-        js::string(&r["name"])
-    } else {
-        steve_i18n::t!("hub.bot.draft_name")
-    };
-    let model = match get("model").map(js::string) {
-        Some(m) if !m.is_empty() => json!(m),
-        _ => Value::Null,
-    };
-    let mut f = Obj::new();
-    f.insert("name".into(), json!(js::slice(&name, 20)));
-    f.insert(
-        "role".into(),
-        json!(
-            get("role")
-                .map(js::string)
-                .unwrap_or_else(|| js::slice(&desc, 40))
-        ),
-    );
-    f.insert(
-        "persona".into(),
-        json!(get("persona").map(js::string).unwrap_or_default()),
-    );
-    f.insert(
-        "rules".into(),
-        json!(get("rules").map(js::string).unwrap_or_else(|| desc.clone())),
-    );
-    f.insert("model".into(), model);
-    f.insert("harness".into(), json!(harness_id));
-    f.insert("perm_mode".into(), json!(perm_mode));
+    let f = draft_fields_from_reply(&reply, &desc, &harness_id, &perm_mode)?;
     let harnesses = st.domain.bot_harnesses(None).await?;
     st.write(move |w| create_bot_in(w, &c.ws, &c.me, &f, &harnesses))
         .await
@@ -933,27 +965,72 @@ mod tests {
                 "{bad_eff}"
             );
         }
-        let e = bot_in(&json!({"name": "", "proactive": 3, "avatar": {"color": "red", "skin": "12", "round": 101}}), false, &ids()).unwrap_err();
+        let e = bot_in(&json!({"name": "", "proactive": 3, "avatar": {"color": "red", "round": 101, "accessory": "magic_wand"}}), false, &ids()).unwrap_err();
         assert_eq!(
             e,
             ApiError::Invalid(vec![
                 "name".into(),
                 "proactive".into(),
                 "avatar.color".into(),
-                "avatar.skin".into(),
-                "avatar.round".into()
+                "avatar.round".into(),
+                "avatar.accessory".into(),
             ])
         );
         let p = bot_in(
-            &json!({"name": "A", "extra": 1, "model": null, "avatar": {"round": 70.0, "x": 1}}),
+            &json!({"name": "A", "extra": 1, "model": null, "avatar": {"round": 70.0, "accessory": "loupe", "x": 1}}),
             true,
             &ids(),
         )
         .expect("ok");
         assert_eq!(
             serde_json::to_string(&p).unwrap_or_default(),
-            r#"{"name":"A","model":null,"avatar":{"round":70}}"#
+            r#"{"name":"A","model":null,"avatar":{"round":70,"accessory":"loupe"}}"#
         );
+        let cleared = bot_in(
+            &json!({"avatar": {"color": "#8c7ae6", "round": 45, "accessory": null}}),
+            false,
+            &ids(),
+        )
+        .expect("clear accessory ok");
+        assert_eq!(
+            serde_json::to_string(&cleared).unwrap_or_default(),
+            r##"{"avatar":{"color":"#8c7ae6","round":45,"accessory":null}}"##
+        );
+
+        let prompt = draft_prompt("负责前端视觉设计", &[]);
+        for acc in steve_types::BotAccessory::ALL {
+            assert!(
+                prompt.contains(acc.as_str()),
+                "draft prompt lists accessory {}",
+                acc.as_str()
+            );
+        }
+        let drafted_ok = draft_fields_from_reply(
+            r#"{"name":"设计","role":"视觉走查","persona":"简洁","rules":"先看对比度","model":null,"accessory":"beret"}"#,
+            "负责前端视觉设计",
+            "claude-code",
+            "ask",
+        )
+        .expect("valid draft");
+        assert_eq!(drafted_ok["avatar"], json!({ "accessory": "beret" }));
+
+        let drafted_bad = draft_fields_from_reply(
+            r#"{"name":"开发","role":"写代码","persona":"直接","rules":"跑测试","model":null,"accessory":"spaceship"}"#,
+            "负责写代码",
+            "claude-code",
+            "ask",
+        )
+        .expect("invalid accessory ignored cleanly without guessing");
+        assert!(drafted_bad.get("avatar").is_none());
+
+        let drafted_null = draft_fields_from_reply(
+            r#"{"name":"通用","role":"协助","persona":"","rules":"","model":null,"accessory":null}"#,
+            "通用协助",
+            "claude-code",
+            "ask",
+        )
+        .expect("null accessory ok");
+        assert!(drafted_null.get("avatar").is_none());
         assert_eq!(
             bot_in(&json!({}), true, &ids()).unwrap_err(),
             ApiError::Invalid(vec!["name".into()])

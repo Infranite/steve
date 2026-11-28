@@ -374,8 +374,55 @@ fn bot_fields(
             })),
         },
     ];
-    /* the main bot is always on */
+    /* the main bot is always on and keeps its fixed unaccessorized identity */
     if !b.main {
+        let cur_avatar = b.avatar.clone();
+        let cur_acc = b
+            .avatar
+            .accessory
+            .map(|a| a.label_zh())
+            .unwrap_or("无");
+        fs.push(BotField {
+            spec: FieldSpec {
+                key: "avatar".into(),
+                label: "配饰".into(),
+                ty: "enum".into(),
+                values: Some(
+                    std::iter::once("无".to_string())
+                        .chain(
+                            steve_types::BotAccessory::ALL
+                                .iter()
+                                .map(|a| a.label_zh().to_string()),
+                        )
+                        .collect(),
+                ),
+                current: json!(cur_acc),
+            },
+            enc: Some(Box::new(move |v| {
+                let s = jstr(v);
+                let trimmed = s.trim();
+                let next_acc = if trimmed.is_empty() || trimmed == "无" {
+                    None
+                } else {
+                    steve_types::BotAccessory::parse(trimmed).or_else(|| {
+                        steve_types::BotAccessory::ALL
+                            .iter()
+                            .copied()
+                            .find(|a| a.label_zh() == trimmed)
+                    })
+                };
+                let mut next = cur_avatar.clone();
+                next.accessory = next_acc;
+                serde_json::to_value(next).unwrap_or_else(|_| json!({}))
+            })),
+            dec: Some(Box::new(|v| {
+                let acc = v
+                    .get("accessory")
+                    .and_then(Value::as_str)
+                    .and_then(steve_types::BotAccessory::parse);
+                json!(acc.map(|a| a.label_zh()).unwrap_or("无"))
+            })),
+        });
         fs.push(BotField {
             spec: FieldSpec {
                 key: "enabled".into(),
@@ -476,6 +523,7 @@ fn bot_field_shown(key: &str) -> Option<String> {
         "perm_mode" => steve_i18n::t!("core.draft.bot.perm_mode"),
         "default_project" => steve_i18n::t!("core.draft.bot.default_project"),
         "enabled" => steve_i18n::t!("core.draft.bot.enabled"),
+        "avatar" => steve_i18n::t!("core.draft.bot.avatar"),
         "prompt" => steve_i18n::t!("core.draft.bot.prompt"),
         _ => return None,
     })

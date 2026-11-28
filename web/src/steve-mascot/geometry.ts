@@ -86,6 +86,18 @@ function sampleContourAt(contour: readonly Vec2[], u: number): Vec2 {
 }
 
 let cachedCircleContour: readonly Vec2[] | null = null
+const cachedBotContours = new Map<number, readonly Vec2[]>()
+
+function polygonArea(pts: readonly Vec2[]): number {
+  let twice = 0
+  const n = pts.length
+  for (let i = 0; i < n; i++) {
+    const a = pts[i]!
+    const b = pts[(i + 1) % n]!
+    twice += a.x * b.y - b.x * a.y
+  }
+  return Math.abs(twice * 0.5)
+}
 
 function getClassicCircleContour(): readonly Vec2[] {
   if (cachedCircleContour) return cachedCircleContour
@@ -104,19 +116,47 @@ function getClassicCircleContour(): readonly Vec2[] {
   return cachedCircleContour
 }
 
-/** Sample Steve's classic circle silhouette with love-heart, sleep-melt, and shiver morphs. */
-export function sampleSteveCircle(params: {
-  theta: number
-  t: number
-  sleepAmt: number
-  loveAmt: number
-  shiverAmp: number
-  reducedMotion: boolean
-  activeMotion: boolean
-}): Vec2 {
+/**
+ * Optical-area-normalized superellipse contour for ordinary Bots parameterized by `round` (0..100):
+ * 0..15 = crisp architectural square, 45 = Bauhaus squircle, 70 = soft cushion, 95..100 = round.
+ */
+function getBotShapeContour(roundInput: number): readonly Vec2[] {
+  const round = Math.round(clamp(roundInput, 0, 100))
+  const cached = cachedBotContours.get(round)
+  if (cached) return cached
+
+  const exponent = 2.0 + 5.2 * Math.pow(1 - round / 100, 1.35)
+  const raw: Vec2[] = []
+  for (let i = 0; i < 160; i++) {
+    const a = (i / 160) * Math.PI * 2 - Math.PI / 2
+    const c = Math.cos(a)
+    const s = Math.sin(a)
+    const r = 1 / Math.pow(Math.pow(Math.abs(c), exponent) + Math.pow(Math.abs(s), exponent), 1 / exponent)
+    raw.push({ x: c * 32.0 * r, y: s * 31.2 * r })
+  }
+  const area = polygonArea(raw)
+  const scale = area > 1e-3 ? Math.sqrt(GEOMETRY.opticalTargetArea / area) : 1
+  const normalized = resampleClosedByArcLength(
+    raw.map((p) => ({ x: p.x * scale, y: p.y * scale })),
+    192,
+  )
+  cachedBotContours.set(round, normalized)
+  return normalized
+}
+
+function applyContourMorphs(
+  base: Vec2,
+  params: {
+    theta: number
+    t: number
+    sleepAmt: number
+    loveAmt: number
+    shiverAmp: number
+    reducedMotion: boolean
+    activeMotion: boolean
+  },
+): Vec2 {
   const { theta, t, sleepAmt, loveAmt, shiverAmp, reducedMotion, activeMotion } = params
-  const u = (theta + Math.PI / 2) / (Math.PI * 2)
-  const base = sampleContourAt(getClassicCircleContour(), u)
   const s = Math.sin(theta)
   const bottomPad = s > 0 ? Math.pow(s, 2.2) : 0
   let x = base.x
@@ -148,6 +188,22 @@ export function sampleSteveCircle(params: {
   }
 
   return { x, y: y + sleepAmt * 10.5 }
+}
+
+/** Sample Steve's classic circle silhouette or a Bot's roundness-derived contour with organic morphs. */
+export function sampleMascotContour(params: {
+  round: number | null
+  theta: number
+  t: number
+  sleepAmt: number
+  loveAmt: number
+  shiverAmp: number
+  reducedMotion: boolean
+  activeMotion: boolean
+}): Vec2 {
+  const u = (params.theta + Math.PI / 2) / (Math.PI * 2)
+  const contour = params.round === null ? getClassicCircleContour() : getBotShapeContour(params.round)
+  return applyContourMorphs(sampleContourAt(contour, u), params)
 }
 
 function smoothHandWobble(u: number, seed: number): number {

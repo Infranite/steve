@@ -230,7 +230,7 @@ test("ActorAvatar renders person photo/initials, bot robot, system badge, org/te
   assert.match(zhouFeHtml, /data-tooltip-wrap="周明（前端 · 星河） · 人"/)
   assert.match(zhouBeHtml, /data-tooltip-wrap="周明（后端 · 星河） · 人"/)
 
-  // Steve and ordinary Bot route through Robot (Steve renders SteveMascot; other Bots keep agent-robot-avatar)
+  // Steve and ordinary Bots all route through Robot (unified charcoal mascot family)
   const steveHtml = renderToStaticMarkup(React.createElement(ActorAvatarZh, { actorId: "steve", size: 28, live: true }))
   assert.match(steveHtml, /data-actor-kind="bot"/)
   assert.match(steveHtml, /data-robot="steve"/)
