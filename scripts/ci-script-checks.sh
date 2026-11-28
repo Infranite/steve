@@ -17,3 +17,4 @@ python3 scripts/test-nextest-summary.py
 python3 scripts/test-nextest-partitions.py
 python3 scripts/test-skip-rust-jobs.py
 python3 scripts/test-rerun-unacquired.py
+python3 ops/test-rehearse-upgrade.py

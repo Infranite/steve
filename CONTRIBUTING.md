@@ -19,6 +19,7 @@ The full test suite runs in CI, not on your machine: locally, run the checks of 
 python3 scripts/test-public-boundary.py
 python3 scripts/check-public-boundary.py
 python3 ops/test-cut-release.py
+python3 ops/test-rehearse-upgrade.py
 python3 ops/test-check-migration-lock.py
 bash ops/check-migration-lock.sh --offline
 cargo test --locked --manifest-path hub-rs/Cargo.toml -p steve-install
@@ -42,6 +43,8 @@ cp -p "$debug/restic" "$debug/deps/restic"
 ```
 
 On an idle machine, run `python3 ops/bench-backup.py > backup-benchmark.json` to build the release Hub and measure backups and restores of a synthetic 1.5 GB SQLite payload in a disposable installation. The cold pre-upgrade measurement includes repository initialization, which is also reported separately. The other samples cover a pre-upgrade backup in the same repository, a second daily backup with unchanged data, an incremental daily backup after a 10 MB write, a full restore and a database-only restore. Initialization bytes are the size of the new repository files. Backup bytes come from the verified receipts. The timings exclude the build, engine staging, fixture preparation and telemetry readback. A failed run returns a nonzero status and reports any completed samples in the JSON output.
+
+Before cutting a release, run `python3 ops/rehearse-upgrade.py --from <previous-version> --candidate <bundle-or-version>` to rehearse a full upgrade end to end in a disposable home and unique service label without touching `~/.steve` or the default service. On macOS it exercises fresh setup (including the database-initialization workaround for pre-v0.14.0 releases), data and permission-policy seeding, `upgrade-macos`, health/data/permission/local-Node checks, `rollback-macos`, a second `upgrade-macos` pass with permission write checks, `confirm-macos`, and full stop/uninstall cleanup; on Linux it rehearses the systemd supervisor upgrade, manual database-snapshot rollback, re-upgrade, and cleanup. A failure or interrupt still runs uninstall and sandbox cleanup and captures bounded failure diagnostics in the report.
 
 The workspace suite includes the Node boundary guard (`hub-rs/crates/steve-hub/tests/node_boundary.rs`): production code outside the Node crates (`steve-node` and `steve-node-cli`) may start processes or harnesses, list directories, or open, write, create or remove files and directories only at the call sites in `node_boundary.txt`. Each listed rule and file needs a reason in the guard's `RATIONALE` table, and each reason must still have a listed key. A new site fails; a removed site requires shortening the inventory. When the last site for a key disappears, remove its rationale too. Select only the inventory test when rewriting this list, then run the complete Node boundary test binary without BLESS so inventory writes and rationale validation do not race. Diagnostics include source line numbers. Imports count too, so a braced, renamed or glob `use` of a listed item cannot hide a call. This is a text scan of where handles are created or imported, not every place one is passed to.
 
