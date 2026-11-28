@@ -11,6 +11,7 @@ export type { AvatarRef } from "./AvatarRef";
 export type { BackgroundTaskCapability } from "./BackgroundTaskCapability";
 export type { BackupPurpose } from "./BackupPurpose";
 export type { BackupReceipt } from "./BackupReceipt";
+export type { BotAccessory } from "./BotAccessory";
 export type { BotId } from "./BotId";
 export type { BotProposal } from "./BotProposal";
 export type { BusEvent } from "./BusEvent";

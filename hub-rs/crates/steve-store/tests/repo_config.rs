@@ -15,8 +15,8 @@ fn steve(s: &Store) {
         role: Some("你的助手".into()),
         avatar: Some(Avatar {
             color: Some("#7aa7c7".into()),
-            skin: None,
             round: Some(70.into()),
+            accessory: None,
         }),
         ..Default::default()
     };

@@ -18,7 +18,6 @@
     "@tanstack/react-query": "5.108.2",
     "@tanstack/react-virtual": "3.14.26",
     "@xyflow/react": "^12.12.0",
-    "agent-robot-avatar": "^0.7.1",
     "class-variance-authority": "^0.7.1",
     "cn": "^0.5.1",
     "i18next": "26.7.1",

@@ -310,6 +310,8 @@ pub const MIGRATIONS: &[&str] = &[
     include_str!("../migrations/147.sql"),
     // 148: async Steve bot-dispatch jobs (`item_dispatch_jobs`) and cleanup of legacy keyword-scoring placement reasons (#626).
     include_str!("../migrations/148.sql"),
+    // 149: remove retired agent-robot-avatar skin field from bots.avatar JSON (#645).
+    include_str!("../migrations/149.sql"),
 ];
 
 /// 027's item columns and their one-time backfill (applied by `run_pending` when `items.phase` is missing).

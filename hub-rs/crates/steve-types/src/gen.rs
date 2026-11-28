@@ -35,6 +35,7 @@ fn bindings_match() {
         DecisionId,
         MessageId,
         BotId,
+        BotAccessory,
         ProjectId,
         TagId,
         DeviceId,

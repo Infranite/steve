@@ -21,6 +21,7 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSepara
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from "@/components/ui/alert-dialog"
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog"
 import { Robot, Face, AVATAR_COLORS } from "@/robot"
+import { BOT_ACCESSORIES, type BotAccessory } from "@/steve-mascot"
 import { Card as ACard, CardHeader } from "@/components/affect/card-clean"
 import { Badge } from "@/components/affect/badge-clean"
 import { MemoryPanel, type Memory } from "@/components/affect/memory-panel"
@@ -231,33 +232,54 @@ export function NewBotDialog() {
   )
 }
 
-/* ═════════ 头像：Agent Robot Avatar，颜色、头型、皮肤 ═════════ */
-/* skin series: [id, label key under manage:series, first skin, count] */
-const SERIES = [["", "plain", 0, 0], ["glaze", "glaze", 101, 6], ["ice", "ice", 201, 6], ["gummy", "gummy", 301, 12], ["candy", "candy", 401, 6], ["acrylic", "acrylic", 501, 12], ["jelly", "jelly", 601, 12], ["gradient", "gradient", 701, 12], ["frosted", "frosted", 801, 6], ["metal", "metal", 901, 30], ["gem", "gem", 1001, 12], ["wood", "wood", 1101, 6], ["ball", "ball", 1201, 10], ["gloss", "gloss", 1301, 5], ["fabric", "fabric", 1401, 12], ["food", "food", 1501, 12], ["nature", "nature", 1601, 12], ["pattern", "pattern", 1701, 17]] as const
+/* ═════════ 头像：炭笔涂鸦家族，颜色、头型圆度与配饰 ═════════ */
 /* head shapes: [label key under manage:avatar, roundness] */
 const SHAPES = [["shapeSquare", 15], ["shapeRounded", 45], ["shapeSoft", 70], ["shapeRound", 95]] as const
-function AvatarPicker({ look, onChange }: { look: { color: string; round: number; skin: string | null }; onChange: (p: Partial<{ color: string; round: number; skin: string | null }>) => void }) {
+type PickerLook = { color: string; round: number; accessory: BotAccessory | null }
+function AvatarPicker({ id, look, onChange }: { id: string; look: PickerLook; onChange: (p: Partial<PickerLook>) => void }) {
   const t = useT()
-  const cur: string = look.skin ? SERIES.find(([, , a, n]) => +look.skin! >= a && +look.skin! < a + n)?.[0] ?? "" : ""
-  const [series, setSeries] = useState(cur)
-  const sr = SERIES.find((x) => x[0] === series)!
+  const accessoryChoices: readonly (BotAccessory | null)[] = [null, ...BOT_ACCESSORIES]
   return (
     <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:gap-6" data-avatar-picker>
-      <Face look={look} size={88} />
+      <div className="shrink-0 pt-1.5">
+        <Face id={id} look={look} size={88} />
+      </div>
       <div className="flex min-w-0 flex-1 flex-col gap-3">
-        <div className="flex flex-wrap items-center gap-2"><span className="w-10 type-footnote text-muted-foreground">{t("manage:avatar.color")}</span>
-          {AVATAR_COLORS.map(([c, nm]) => <Tooltip key={c}><TooltipTrigger render={<button type="button" aria-label={nm} aria-pressed={look.color === c && !look.skin} data-color={c} onClick={() => onChange({ color: c, skin: null })}
-            className={cn("size-6 rounded-full ring-offset-2 ring-offset-background transition-shadow", look.color === c && !look.skin ? "ring-2 ring-foreground/70" : "hover:ring-2 hover:ring-border")} style={{ background: c }} />} /><TooltipContent>{nm}</TooltipContent></Tooltip>)}
+        <div className="flex flex-wrap items-center gap-2"><span className="w-10 shrink-0 type-footnote text-muted-foreground">{t("manage:avatar.color")}</span>
+          {AVATAR_COLORS.map(([c, nm]) => <Tooltip key={c}><TooltipTrigger render={<button type="button" aria-label={nm} aria-pressed={look.color === c} data-color={c} onClick={() => onChange({ color: c })}
+            className={cn("size-6 rounded-full ring-offset-2 ring-offset-background transition-shadow", look.color === c ? "ring-2 ring-foreground/70" : "hover:ring-2 hover:ring-border")} style={{ background: c }} />} /><TooltipContent>{nm}</TooltipContent></Tooltip>)}
           <label className="relative size-6 cursor-pointer overflow-hidden rounded-full ring-1 ring-border" title={t("manage:avatar.customColor")} style={{ background: "conic-gradient(red, yellow, lime, aqua, blue, magenta, red)" }}>
-            <input type="color" className="absolute inset-0 cursor-pointer opacity-0" value={look.color} onChange={(e) => onChange({ color: e.target.value, skin: null })} data-color-custom /></label>
+            <input type="color" className="absolute inset-0 cursor-pointer opacity-0" value={look.color} onChange={(e) => onChange({ color: e.target.value })} data-color-custom /></label>
         </div>
-        <div className="flex flex-wrap items-center gap-2"><span className="w-10 type-footnote text-muted-foreground">{t("manage:avatar.shape")}</span>
+        <div className="flex flex-wrap items-center gap-2"><span className="w-10 shrink-0 type-footnote text-muted-foreground">{t("manage:avatar.shape")}</span>
           <Strip className="min-w-0"><Segmented size="sm" value={SHAPES.reduce<(typeof SHAPES)[number]>((a, b) => (Math.abs(b[1] - look.round) < Math.abs(a[1] - look.round) ? b : a), SHAPES[0])[0]} onChange={(v) => onChange({ round: SHAPES.find((x) => x[0] === v)![1] })} options={SHAPES.map((x) => [x[0], t(`manage:avatar.${x[0]}`)] as const)} /></Strip>
           <input type="range" min={0} max={100} value={look.round} onChange={(e) => onChange({ round: +e.target.value })} className="w-28 accent-foreground" aria-label={t("manage:avatar.roundness")} data-round /></div>
-        <div className="flex flex-wrap items-center gap-2"><span className="w-10 type-footnote text-muted-foreground">{t("manage:avatar.skin")}</span>
-          <SetSelect testId="skin-series" label={t("manage:avatar.skin")} value={series} onChange={(v) => { setSeries(v); if (!v) onChange({ skin: null }) }} options={SERIES.map(([id, n]) => ({ v: id, l: t(`manage:series.${n}`) }))} /></div>
-        {sr[3] > 0 && <div className="flex flex-wrap gap-1.5 sm:pl-12" data-skins>{Array.from({ length: sr[3] }, (_, n) => String(sr[2] + n)).map((sk) => (
-          <button key={sk} type="button" onClick={() => onChange({ skin: sk })} aria-pressed={look.skin === sk} data-skin={sk} className={cn("rounded-lg p-0.5 transition-colors", look.skin === sk ? "bg-accent ring-1 ring-border" : "hover:bg-accent")}><Face look={{ color: look.color, round: look.round, skin: sk }} size={30} /></button>))}</div>}
+        <div className="flex items-start gap-2"><span className="w-10 shrink-0 pt-2 type-footnote text-muted-foreground">{t("manage:avatar.accessory")}</span>
+          <div className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5" data-accessory-picker>
+            {accessoryChoices.map((acc) => {
+              const key = acc ?? "none"
+              const selected = (look.accessory ?? null) === acc
+              return (
+                <button
+                  key={key}
+                  type="button"
+                  aria-pressed={selected}
+                  data-accessory={key}
+                  onClick={() => onChange({ accessory: acc })}
+                  className={cn(
+                    "inline-flex items-center gap-1.5 rounded-lg border px-2 py-1 type-footnote transition-colors",
+                    selected
+                      ? "border-foreground/70 bg-accent font-medium text-foreground"
+                      : "border-border/80 bg-background text-muted-foreground hover:border-foreground/30 hover:text-foreground",
+                  )}
+                >
+                  <Face id={id} look={{ color: look.color, round: look.round, accessory: acc }} size={28} />
+                  <span>{t(`manage:accessory.${key}`)}</span>
+                </button>
+              )
+            })}
+          </div>
+        </div>
       </div>
     </div>
   )
@@ -331,7 +353,7 @@ export function BotView({ k }: { k: string }) {
   if (lastBot !== k) { lastBot = k; if (botTab !== "设置") botTab = "概览" }
   const runtimes = useRuntimes(!!b)
   if (!b) return <Page title="Bot" back={["#/bots", "Bot"]}><Empty title={t("manage:detail.missing")} sub={t("manage:detail.missingSub")} /></Page>
-  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, specialties: b.specialties?.join("\n") ?? "", pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", reasoningEffort: normalizeEffort(b.reasoningEffort), fallbackSurfaces: b.fallbackSurfaces ?? [], color: b.color, round: b.round, skin: b.skin, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
+  const fm = form && form.k === k ? form : { k, n: b.n, role: b.role, specialties: b.specialties?.join("\n") ?? "", pers: b.pers, pro: PRO[b.pro], rule: b.rule, acc: b.acc, harness: b.harness, model: b.model ?? "", reasoningEffort: normalizeEffort(b.reasoningEffort), fallbackSurfaces: b.fallbackSurfaces ?? [], color: b.color, round: b.round, accessory: b.accessory ?? null, project: b.project ?? "none", permMode: b.permMode, ws: b.workspaces }
   const effort = normalizeEffort(fm.reasoningEffort ?? b.reasoningEffort)
   const runtime = runtimes.find(r => r.id === fm.harness)
   const modeSupported = (fm.permMode === b.permMode && fm.harness === b.harness) || canConfigurePermission(runtime, fm.permMode)
@@ -341,7 +363,7 @@ export function BotView({ k }: { k: string }) {
   const tabs = BOT_TABS.map(([v, l]) => [v, t(`manage:detail.${l}`)] as const)
   const displayName = formatBotName(b.n, b.main)
   const saveAll = async () => {
-    await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, specialties, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort, fallbackSurfaces: fm.fallbackSurfaces ?? [], color: fm.color, round: fm.round, skin: fm.skin, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
+    await saveBot(k, { n: fm.n.trim() || b.n, role: fm.role, specialties, pers: fm.pers, pro: PRO.indexOf(fm.pro), rule: fm.rule, acc: fm.acc, harness: fm.harness, model: fm.model || null, reasoningEffort: effort, fallbackSurfaces: fm.fallbackSurfaces ?? [], color: fm.color, round: fm.round, accessory: fm.accessory ?? null, project: fm.project === "none" ? null : fm.project, permMode: fm.permMode })
     if (!b.main && JSON.stringify([...fm.ws].sort()) !== JSON.stringify([...b.workspaces].sort())) setBotWorkspaces(k, fm.ws)
     setForm(null); botTab = "概览"; r()
   }
@@ -381,7 +403,9 @@ export function BotView({ k }: { k: string }) {
             <>
               <AskSteve key={k} ctx={{ kind: "bot", id: k }} placeholder={t("manage:form.ask", { name: displayName })} />
               <Section label={t("manage:form.identity")}><Card className="flex flex-col gap-5 p-5">
-                <F label={t("manage:form.avatar")} hint={t("manage:form.avatarHint")}><AvatarPicker look={{ color: fm.color, round: fm.round, skin: fm.skin }} onChange={(p) => set(p)} /></F>
+                {b.main
+                  ? <F label={t("manage:form.avatar")}><div className="flex items-center gap-4" data-steve-avatar-preview><Robot k={k} size={72} /></div></F>
+                  : <F label={t("manage:form.avatar")} hint={t("manage:form.avatarHint")}><AvatarPicker id={k} look={{ color: fm.color, round: fm.round, accessory: fm.accessory ?? null }} onChange={(p) => set(p)} /></F>}
                 <F label={t("manage:form.name")} htmlFor="bot-name"><TextField id="bot-name" value={fm.n} onChange={(e) => set({ n: e.target.value })} data-bot-name /></F>
                 <F label={t("manage:form.role")} htmlFor="bot-role" hint={t("manage:form.roleHint")}><TextField id="bot-role" value={fm.role} onChange={(e) => set({ role: e.target.value })} data-bot-role /></F>
                 <F label={t("manage:form.specialties")} htmlFor="bot-specialties" hint={t("manage:form.specialtiesHint")}><TextArea id="bot-specialties" minRows={2} maxRows={6} value={fm.specialties} onChange={(e) => set({ specialties: e.target.value })} /></F>

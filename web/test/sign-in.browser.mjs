@@ -22,17 +22,17 @@ async function open({ lang = "zh-CN", reducedMotion = "no-preference" } = {}) {
   return page
 }
 
-/** where Steve's left eye is drawn, once the live face has rendered it */
+/** where Steve's left eye is drawn, once the live mascot has rendered it */
 async function eyeX(page) {
-  return page.locator("agent-robot-avatar").evaluate((el) => {
-    const r = el.shadowRoot.getElementById("leftEye").getBoundingClientRect()
+  return page.locator('[data-steve-avatar="live"] [data-steve-eye="left"]').evaluate((el) => {
+    const r = el.getBoundingClientRect()
     return r.left + r.width / 2
   })
 }
 
 /** moves the pointer beside the face for a while (the face looks at a fresh pointer only), then reads the eye */
 async function lookFrom(page, side) {
-  const box = await page.locator("agent-robot-avatar").boundingBox()
+  const box = await page.locator('[data-steve-avatar="live"]').boundingBox()
   const cx = box.x + box.width / 2, cy = box.y + box.height / 2
   for (let i = 0; i < 24; i++) {
     await page.mouse.move(cx + side * (55 + (i % 2)), cy + (i % 3))
@@ -42,8 +42,8 @@ async function lookFrom(page, side) {
 }
 
 async function face(page) {
-  await page.locator("agent-robot-avatar").waitFor({ state: "attached" })
-  await page.waitForFunction(() => !!document.querySelector("agent-robot-avatar")?.shadowRoot?.getElementById("leftEye"))
+  await page.locator('[data-steve-avatar="live"]').waitFor({ state: "attached" })
+  await page.locator('[data-steve-avatar="live"] [data-steve-eye="left"]').waitFor({ state: "attached" })
   await page.waitForTimeout(400)
 }
 

@@ -54,6 +54,22 @@ fn perm_label_value(k: &str) -> Value {
         .map(|m| json!(perm_label(m)))
         .unwrap_or(Value::Null)
 }
+/// Prompt label for a Bot's [`steve_types::BotAccessory`].
+fn accessory_label(a: steve_types::BotAccessory) -> &'static str {
+    use steve_types::BotAccessory as A;
+    match a {
+        A::Headphones => "耳机",
+        A::Glasses => "眼镜",
+        A::Loupe => "放大镜",
+        A::Book => "书本",
+        A::Pencil => "铅笔",
+        A::Beret => "贝雷帽",
+        A::Hardhat => "安全帽",
+        A::Wrench => "扳手",
+        A::Net => "捕虫网",
+        A::Chart => "图表",
+    }
+}
 const PRO: [&str; 3] = ["只在必要时", "适中", "积极"];
 
 fn label_of(table: &[(&str, &str)], k: &str) -> Value {
@@ -374,8 +390,48 @@ fn bot_fields(
             })),
         },
     ];
-    /* the main bot is always on */
+    /* the main bot is always on and keeps its fixed unaccessorized identity */
     if !b.main {
+        let cur_avatar = b.avatar.clone();
+        let cur_acc = b.avatar.accessory.map(accessory_label).unwrap_or("无");
+        fs.push(BotField {
+            spec: FieldSpec {
+                key: "avatar".into(),
+                label: "配饰".into(),
+                ty: "enum".into(),
+                values: Some(
+                    std::iter::once("无".to_string())
+                        .chain(
+                            steve_types::BotAccessory::ALL
+                                .iter()
+                                .map(|a| accessory_label(*a).to_string()),
+                        )
+                        .collect(),
+                ),
+                current: json!(cur_acc),
+            },
+            enc: Some(Box::new(move |v| {
+                let s = jstr(v);
+                let trimmed = s.trim();
+                /* "无", an empty value and anything unknown all clear the accessory */
+                let next_acc = steve_types::BotAccessory::parse(trimmed).or_else(|| {
+                    steve_types::BotAccessory::ALL
+                        .iter()
+                        .copied()
+                        .find(|a| accessory_label(*a) == trimmed)
+                });
+                let mut next = cur_avatar.clone();
+                next.accessory = next_acc;
+                json!(next)
+            })),
+            dec: Some(Box::new(|v| {
+                let acc = v
+                    .get("accessory")
+                    .and_then(Value::as_str)
+                    .and_then(steve_types::BotAccessory::parse);
+                json!(acc.map(accessory_label).unwrap_or("无"))
+            })),
+        });
         fs.push(BotField {
             spec: FieldSpec {
                 key: "enabled".into(),
@@ -476,6 +532,7 @@ fn bot_field_shown(key: &str) -> Option<String> {
         "perm_mode" => steve_i18n::t!("core.draft.bot.perm_mode"),
         "default_project" => steve_i18n::t!("core.draft.bot.default_project"),
         "enabled" => steve_i18n::t!("core.draft.bot.enabled"),
+        "avatar" => steve_i18n::t!("core.draft.bot.avatar"),
         "prompt" => steve_i18n::t!("core.draft.bot.prompt"),
         _ => return None,
     })
