@@ -685,3 +685,37 @@ async fn an_external_js_override_still_needs_its_actual_interpreter() {
     assert_eq!(h.setup.unwrap().state, SetupState::Unavailable);
     n.shutdown().await;
 }
+
+#[tokio::test]
+async fn setup_probe_does_not_create_prefix_dirs_and_respects_active_prefix_lock() {
+    let t = Fixture::new();
+    let n = t.node();
+    let req = Requirements {
+        npm: Some(t.dir.path().join("npm")),
+        node_error: None,
+        npm_error: None,
+    };
+
+    let fresh = setup(&n.0, "pi", None, &req).unwrap().unwrap();
+    assert!(fresh.can_install);
+    assert!(
+        !managed::dir(&t.home).exists(),
+        "setup() must not create <STEVE_HOME>/adapters on a read-only check"
+    );
+
+    let running = managed::prefix_lock(&t.home, false).unwrap();
+    let locked = setup(&n.0, "pi", None, &req).unwrap().unwrap();
+    assert!(!locked.can_install);
+    drop(running);
+
+    let retired = t.dir.path().join("retired-steve");
+    std::fs::rename(&t.home, &retired).unwrap();
+    let missing = setup(&n.0, "pi", None, &req).unwrap().unwrap();
+    assert!(missing.can_install);
+    assert!(
+        !t.home.exists(),
+        "setup() must not recreate retired STEVE_HOME"
+    );
+
+    n.shutdown().await;
+}

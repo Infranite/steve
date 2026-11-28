@@ -2058,27 +2058,59 @@ async fn local_service_exits_when_its_home_or_executable_disappears() {
         let (mut hub, lock) = linked_service(&h).await;
         hub.kill_hub_group();
         assert!(matches!(lock.try_lock(), Err(TryLockError::WouldBlock)));
-        let executable = h.service_node_executable();
+        let executable = h.service_node_executable().to_path_buf();
+        let retired_home = h.dir.path().join("retired-home");
         if remove_home {
-            std::fs::rename(h.steve(), h.dir.path().join("retired-home")).unwrap();
+            std::fs::rename(h.steve(), &retired_home).unwrap();
             assert!(executable.exists());
         } else {
-            std::fs::remove_file(executable).unwrap();
+            std::fs::remove_file(&executable).unwrap();
             assert!(h.steve().is_dir());
         }
-        eventually_sync(
-            "the local Node releases its home after being retired",
-            || match lock.try_lock() {
-                Ok(()) => true,
-                Err(TryLockError::WouldBlock) => false,
-                Err(e) => panic!("checking the Node home lock: {e}"),
-            },
-        )
+        let diagnostic = steve_runtime::testkit::on_timeout(|| {
+            let steve_home = h.steve();
+            let retired_home = retired_home.clone();
+            let executable = executable.clone();
+            async move {
+                let mut entries = Vec::new();
+                if steve_home.exists()
+                    && let Ok(rd) = std::fs::read_dir(&steve_home)
+                {
+                    entries = rd
+                        .filter_map(|e| {
+                            e.ok().map(|e| e.file_name().to_string_lossy().into_owned())
+                        })
+                        .collect();
+                }
+                let log_path = if remove_home {
+                    retired_home.join("data/node/logs/local-node.log")
+                } else {
+                    steve_home.join("data/node/logs/local-node.log")
+                };
+                let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+                format!(
+                    "the local Node releases its home after being retired (remove_home={remove_home}, steve_home_exists={}, entries={entries:?}, executable_exists={}); local-node.log:\n{log}",
+                    steve_home.exists(),
+                    executable.exists()
+                )
+            }
+        });
+        eventually_sync(diagnostic, || match lock.try_lock() {
+            Ok(()) => true,
+            Err(TryLockError::WouldBlock) => false,
+            Err(e) => panic!("checking the Node home lock: {e}"),
+        })
         .await;
         if remove_home {
+            let entries: Vec<String> = std::fs::read_dir(h.steve())
+                .into_iter()
+                .flatten()
+                .filter_map(|e| e.ok().map(|e| e.file_name().to_string_lossy().into_owned()))
+                .collect();
+            let paths = walk(&h.steve());
             assert!(
                 !h.steve().exists(),
-                "the Node did not recreate its Hub home"
+                "the Node did not recreate its Hub home (entries={entries:?}, walk={paths:?})"
             );
         }
     }

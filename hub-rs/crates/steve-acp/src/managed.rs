@@ -101,8 +101,16 @@ impl Drop for PrefixLock {
 pub fn prefix_lock(home: &Path, exclusive: bool) -> Result<PrefixLock, String> {
     use std::os::unix::fs::OpenOptionsExt;
     let dir = dir(home);
-    std::fs::create_dir_all(&dir)
-        .map_err(|_| "cannot create the managed adapter prefix".to_string())?;
+    if exclusive {
+        std::fs::create_dir_all(&dir)
+            .map_err(|_| "cannot create the managed adapter prefix".to_string())?;
+    } else {
+        match std::fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(_) => return Err("cannot create the managed adapter prefix".to_string()),
+        }
+    }
     if dir.is_symlink() || root(home).is_symlink() {
         return Err(
             "managed adapter prefix and node_modules must be real directories, not symlinks".into(),
@@ -129,6 +137,35 @@ pub fn prefix_lock(home: &Path, exclusive: bool) -> Result<PrefixLock, String> {
         file,
         inherited: AtomicBool::new(false),
     })
+}
+
+/// Checks whether the managed adapter prefix lock can be taken exclusively without creating
+/// `<STEVE_HOME>/adapters` or `.prefix.lock` on disk.
+pub fn check_prefix_available(home: &Path) -> Result<(), String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = dir(home);
+    if dir.is_symlink() || root(home).is_symlink() {
+        return Err(
+            "managed adapter prefix and node_modules must be real directories, not symlinks".into(),
+        );
+    }
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(dir.join(".prefix.lock"))
+    {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(_) => return Err("cannot open the managed adapter prefix lock".into()),
+    };
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Err("the adapter prefix is in use by another session, job, probe or installer; wait for it to finish".into());
+    }
+    unsafe {
+        libc::flock(file.as_raw_fd(), libc::LOCK_UN);
+    }
+    Ok(())
 }
 
 fn selection_file(home: &Path) -> PathBuf {
@@ -1003,5 +1040,50 @@ esac
             "cleared inherited PrefixLock must unlock on drop despite a duplicated fd"
         );
         drop(stray_dup);
+    }
+
+    #[test]
+    fn shared_prefix_lock_never_recreates_missing_home() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing_home = tmp.path().join("retired-steve-home");
+        let err = prefix_lock(&missing_home, false).unwrap_err();
+        assert!(!err.is_empty());
+        assert!(
+            !missing_home.exists(),
+            "shared prefix_lock must not recreate missing STEVE_HOME"
+        );
+    }
+
+    #[test]
+    fn check_prefix_available_is_non_destructive_and_detects_active_locks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let missing_home = tmp.path().join("missing-steve");
+        assert!(check_prefix_available(&missing_home).is_ok());
+        assert!(!missing_home.exists());
+
+        let home = tmp.path().join("existing-steve");
+        std::fs::create_dir(&home).unwrap();
+        assert!(check_prefix_available(&home).is_ok());
+        assert!(!dir(&home).exists());
+
+        let shared = prefix_lock(&home, false).unwrap();
+        assert!(check_prefix_available(&home).is_err());
+        drop(shared);
+        assert!(check_prefix_available(&home).is_ok());
+
+        let exclusive = prefix_lock(&home, true).unwrap();
+        assert!(check_prefix_available(&home).is_err());
+        drop(exclusive);
+        assert!(check_prefix_available(&home).is_ok());
+
+        #[cfg(unix)]
+        {
+            let link_home = tmp.path().join("symlink-steve");
+            let real_dir = tmp.path().join("real-adapters");
+            std::fs::create_dir_all(&link_home).unwrap();
+            std::fs::create_dir_all(&real_dir).unwrap();
+            std::os::unix::fs::symlink(&real_dir, dir(&link_home)).unwrap();
+            assert!(check_prefix_available(&link_home).is_err());
+        }
     }
 }
